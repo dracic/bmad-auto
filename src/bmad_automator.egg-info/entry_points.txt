@@ -1,0 +1,2 @@
+[console_scripts]
+bmad-auto = automator.cli:main

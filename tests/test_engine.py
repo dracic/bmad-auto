@@ -1,0 +1,293 @@
+"""Engine scenario tests against the mock adapter — no tmux, no LLM."""
+
+
+from automator.adapters.base import SessionResult
+from automator.adapters.mock import MockAdapter
+from automator.engine import Engine
+from automator.journal import Journal, load_state
+from automator.model import (
+    PAUSE_EPIC_BOUNDARY,
+    PAUSE_SPEC_APPROVAL,
+    Phase,
+    RunState,
+    TokenUsage,
+)
+from automator.policy import (
+    GatesPolicy,
+    LimitsPolicy,
+    NotifyPolicy,
+    Policy,
+)
+from automator.verify import rev_parse_head, worktree_clean
+from conftest import dev_effect, review_effect, write_sprint
+
+QUIET = NotifyPolicy(desktop=False, file=True)
+
+
+def make_engine(project, script, policy=None, **kwargs) -> tuple[Engine, MockAdapter]:
+    run_dir = project.project / ".automator" / "runs" / "test-run"
+    adapter = MockAdapter(script, usage_per_session=TokenUsage(input_tokens=10, output_tokens=5))
+    state = RunState(run_id="test-run", project=str(project.project), started_at="now")
+    engine = Engine(
+        paths=project,
+        policy=policy or Policy(gates=GatesPolicy(mode="none"), notify=QUIET),
+        adapter=adapter,
+        run_dir=run_dir,
+        journal=Journal(run_dir),
+        state=state,
+        **kwargs,
+    )
+    return engine, adapter
+
+
+def resume_engine(project, engine, script, policy=None) -> tuple[Engine, MockAdapter]:
+    state = load_state(engine.run_dir)
+    state.clear_pause()
+    adapter = MockAdapter(script)
+    new_engine = Engine(
+        paths=project,
+        policy=policy or engine.policy,
+        adapter=adapter,
+        run_dir=engine.run_dir,
+        journal=engine.journal,
+        state=state,
+    )
+    return new_engine, adapter
+
+
+def test_happy_path(project):
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    engine, adapter = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+    )
+    summary = engine.run()
+
+    assert summary.done == 1 and summary.deferred == 0 and not summary.paused
+    task = engine.state.tasks["1-1-a"]
+    assert task.phase == Phase.DONE
+    assert task.commit_sha and task.commit_sha != task.baseline_commit
+    assert worktree_clean(project.project)
+    assert summary.total_tokens == 30  # 2 sessions x 15
+    assert [s.role for s in adapter.sessions] == ["dev", "review"]
+    assert adapter.sessions[0].env["BMAD_AUTO_MODE"] == "1"
+    assert adapter.sessions[1].prompt.startswith("/bmad-code-review ")
+
+
+def test_review_loop_converges_within_budget(project):
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, adapter = make_engine(
+        project,
+        [
+            dev_effect(project, "1-1-a"),
+            review_effect(project, "1-1-a", clean=False, patched=2),
+            review_effect(project, "1-1-a", clean=True),
+        ],
+    )
+    summary = engine.run()
+    assert summary.done == 1
+    assert engine.state.tasks["1-1-a"].review_cycle == 2
+
+
+def test_plateau_defer_when_review_never_clean(project):
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, adapter = make_engine(
+        project,
+        [dev_effect(project, "1-1-a")]
+        + [review_effect(project, "1-1-a", clean=False, patched=1) for _ in range(3)],
+    )
+    summary = engine.run()
+
+    assert summary.deferred == 1 and summary.done == 0 and not summary.paused
+    task = engine.state.tasks["1-1-a"]
+    assert task.phase == Phase.DEFERRED
+    assert "did not converge" in task.defer_reason
+    # repo rolled back for the next story
+    assert (project.project / "src.txt").read_text() == "original\n"
+    assert rev_parse_head(project.project) == task.baseline_commit
+    # the in-review spec is stashed into the run dir, not left in artifacts
+    from conftest import spec_path
+
+    assert not spec_path(project, "1-1-a").exists()
+    stashed = engine.run_dir / "deferred" / "1-1-a" / "spec-1-1-a.md"
+    assert stashed.is_file() and "in-review" in stashed.read_text()
+
+
+def test_defer_preserves_deferred_work_additions(project):
+    """Review sessions append real knowledge to deferred-work.md; a plateau
+    defer's git reset must not erase it."""
+    from conftest import git, review_effect as make_review
+
+    project.deferred_work.write_text("# Deferred Work\n")
+    git(project.project, "add", "-A")
+    git(project.project, "commit", "-q", "-m", "seed deferred-work")
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+
+    def reviewing_with_defer(spec):
+        with project.deferred_work.open("a") as f:
+            f.write("\n### DW-1: pre-existing flaky retry\n\nstatus: open\n")
+        return make_review(project, "1-1-a", clean=False, patched=1)(spec)
+
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a")] + [reviewing_with_defer for _ in range(3)],
+    )
+    summary = engine.run()
+    assert summary.deferred == 1
+    assert "DW-1: pre-existing flaky retry" in project.deferred_work.read_text()
+
+
+def test_dev_stall_retries_then_succeeds(project):
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, adapter = make_engine(
+        project,
+        [
+            SessionResult(status="stalled"),
+            dev_effect(project, "1-1-a"),
+            review_effect(project, "1-1-a", clean=True),
+        ],
+    )
+    summary = engine.run()
+    assert summary.done == 1
+    assert engine.state.tasks["1-1-a"].attempt == 2
+
+
+def test_dev_exhausted_defers_and_run_continues(project):
+    write_sprint(project, {"1-1-a": "ready-for-dev", "1-2-b": "ready-for-dev"})
+    engine, adapter = make_engine(
+        project,
+        [
+            SessionResult(status="timeout"),
+            SessionResult(status="crashed"),
+            dev_effect(project, "1-2-b"),
+            review_effect(project, "1-2-b", clean=True),
+        ],
+    )
+    summary = engine.run()
+    assert summary.deferred == 1 and summary.done == 1
+    assert engine.state.tasks["1-1-a"].phase == Phase.DEFERRED
+    assert engine.state.tasks["1-2-b"].phase == Phase.DONE
+
+
+def test_critical_escalation_pauses_and_resume_continues(project):
+    write_sprint(project, {"1-1-a": "ready-for-dev", "1-2-b": "ready-for-dev"})
+    escalating = SessionResult(
+        status="completed",
+        result_json={
+            "workflow": "quick-dev",
+            "escalations": [{"type": "missing-config", "severity": "CRITICAL", "detail": "boom"}],
+        },
+    )
+    engine, _ = make_engine(project, [escalating])
+    summary = engine.run()
+
+    assert summary.paused and summary.escalated == 1
+    saved = load_state(engine.run_dir)
+    assert saved.paused_reason and "boom" in saved.paused_reason
+    assert saved.tasks["1-1-a"].phase == Phase.ESCALATED
+
+    resumed, _ = resume_engine(
+        project,
+        engine,
+        [dev_effect(project, "1-2-b"), review_effect(project, "1-2-b", clean=True)],
+    )
+    summary2 = resumed.run()
+    assert summary2.done == 1 and not summary2.paused
+    assert resumed.state.finished
+
+
+def test_epic_boundary_gate_pause_and_resume(project):
+    write_sprint(
+        project,
+        {
+            "epic-1": "backlog",
+            "1-1-a": "ready-for-dev",
+            "epic-2": "backlog",
+            "2-1-b": "ready-for-dev",
+        },
+    )
+    gated = Policy(gates=GatesPolicy(mode="per-epic"), notify=QUIET)
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+        policy=gated,
+    )
+    summary = engine.run()
+    assert summary.done == 1 and summary.paused
+    assert load_state(engine.run_dir).paused_stage == PAUSE_EPIC_BOUNDARY
+
+    resumed, _ = resume_engine(
+        project,
+        engine,
+        [dev_effect(project, "2-1-b"), review_effect(project, "2-1-b", clean=True)],
+    )
+    summary2 = resumed.run()
+    assert summary2.done == 2 and not summary2.paused
+
+
+def test_spec_approval_gate_pause_then_resume_reviews(project):
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    gated = Policy(gates=GatesPolicy(mode="per-story-spec-approval"), notify=QUIET)
+    engine, _ = make_engine(project, [dev_effect(project, "1-1-a")], policy=gated)
+    summary = engine.run()
+
+    assert summary.paused
+    saved = load_state(engine.run_dir)
+    assert saved.paused_stage == PAUSE_SPEC_APPROVAL
+    assert saved.tasks["1-1-a"].phase == Phase.DEV_VERIFY
+    assert saved.tasks["1-1-a"].spec_file
+
+    resumed, adapter = resume_engine(
+        project, engine, [review_effect(project, "1-1-a", clean=True)], policy=gated
+    )
+    summary2 = resumed.run()
+    assert summary2.done == 1
+    assert [s.role for s in adapter.sessions] == ["review"]
+
+
+def test_review_claims_clean_but_verify_commands_fail(project):
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    from automator.policy import VerifyPolicy
+
+    failing = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        verify=VerifyPolicy(commands=("false",)),
+        limits=LimitsPolicy(max_review_cycles=2),
+    )
+    engine, _ = make_engine(
+        project,
+        [
+            dev_effect(project, "1-1-a"),
+            review_effect(project, "1-1-a", clean=True),
+            review_effect(project, "1-1-a", clean=True),
+        ],
+        policy=failing,
+    )
+    summary = engine.run()
+    assert summary.deferred == 1 and summary.done == 0
+
+
+def test_max_stories_limit(project):
+    write_sprint(project, {"1-1-a": "ready-for-dev", "1-2-b": "ready-for-dev"})
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+        max_stories=1,
+    )
+    summary = engine.run()
+    assert summary.done == 1
+    assert "1-2-b" not in engine.state.tasks
+
+
+def test_journal_records_decisions(project):
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+    )
+    engine.run()
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    for expected in ("story-start", "session-start", "dev-decision", "review-result",
+                     "story-done", "run-complete"):
+        assert expected in kinds

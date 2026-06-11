@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: bmad-automator
+Version: 0.1.0
+Summary: Deterministic ralph-loop orchestrator for the BMAD implementation phase
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pyyaml>=6.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: ruff>=0.4; extra == "dev"
