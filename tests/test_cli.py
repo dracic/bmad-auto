@@ -48,3 +48,65 @@ def test_dry_run_renders_per_stage_commands(project, capsys):
     assert "claude" in dev_line and "--model opus" in dev_line
     assert review_line.split("review:")[1].strip().startswith("codex ")
     assert "--model gpt-5-codex" in review_line
+
+
+def test_sweep_dry_run_lists_open_entries(project, capsys):
+    from conftest import write_ledger
+
+    write_ledger(project, {"DW-1": "open", "DW-2": "done 2026-06-01"}, commit=False)
+    assert cli._sweep_dry_run(project, policy_mod.load(None)) == 0
+    out = capsys.readouterr().out
+    assert "1 open" in out
+    assert "DW-1" in out and "DW-2" not in out
+    triage_line = next(line for line in out.splitlines() if "triage:" in line)
+    assert "bmad-deferred-sweep" in triage_line
+
+
+def test_sweep_dry_run_renders_triage_adapter_from_policy(project, capsys):
+    from conftest import write_ledger
+
+    write_ledger(project, {"DW-1": "open"}, commit=False)
+    _write_policy(
+        project.project,
+        '[adapter]\nmodel = "opus"\n[adapter.triage]\nname = "gemini"\n',
+    )
+    pol = policy_mod.load(project.project / ".automator" / "policy.toml")
+    assert cli._sweep_dry_run(project, pol) == 0
+    out = capsys.readouterr().out
+    triage_line = next(line for line in out.splitlines() if "triage:" in line)
+    assert triage_line.split("triage:")[1].strip().startswith("gemini ")
+    # client switch: base model is claude-specific, must not leak into gemini
+    assert "--model" not in triage_line
+
+
+def test_sweep_dry_run_no_ledger(project, capsys):
+    assert cli._sweep_dry_run(project, policy_mod.load(None)) == 0
+    assert "no deferred-work ledger" in capsys.readouterr().out
+
+
+def test_sweep_command_parses_flags():
+    parser_args = [
+        "sweep", "--project", ".", "--no-prompt", "--decisions-only",
+        "--max-bundles", "3", "--dry-run",
+    ]
+    # exercise argparse wiring only: dry-run path needs a valid project, so
+    # just confirm parsing reaches cmd_sweep with the expected namespace
+    import argparse as ap
+
+    captured = {}
+
+    def fake_cmd(args: ap.Namespace) -> int:
+        captured.update(vars(args))
+        return 0
+
+    original = cli.cmd_sweep
+    cli.cmd_sweep = fake_cmd
+    try:
+        # rebuild the parser so it binds the patched function
+        assert cli.main(parser_args) == 0
+    finally:
+        cli.cmd_sweep = original
+    assert captured["no_prompt"] is True
+    assert captured["decisions_only"] is True
+    assert captured["max_bundles"] == 3
+    assert captured["dry_run"] is True

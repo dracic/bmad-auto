@@ -48,6 +48,7 @@ bmad-auto run             # go
 bmad-auto attach          # watch the live Claude sessions in tmux
 bmad-auto status          # run + sprint summary
 bmad-auto resume <run-id> # continue after a gate pause or escalation
+bmad-auto sweep           # triage + execute open deferred-work.md entries
 ```
 
 One-time setup: if Claude Code has never run in the target project, start it
@@ -65,19 +66,53 @@ sprint-status.yaml: 1-2-account-mgmt: ready-for-dev
   │          auto-approves it, implements, syncs sprint → review,
   │          writes result.json … Stop hook signals the orchestrator
   ├─ VERIFY  spec exists · status in-review · baseline matches · diff non-empty
+  │          · run [verify].commands (pytest, ruff…) — a broken build never
+  │          reaches review; a failure spawns a fix session fed the output
   ├─ REVIEW  fresh window: claude "/bmad-code-review <spec>"
-  │          3 layers (Blind Hunter / Edge Case Hunter / Acceptance Auditor)
-  │          → triage → auto-apply patches → defer ambiguity → done when clean
+  │          static prefilter → 3 layers (Blind Hunter / Edge Case Hunter /
+  │          Acceptance Auditor) → verify findings against code → triage →
+  │          auto-apply patches → ledger → defer ambiguity → done when clean
   │          (bounded loop, default 3 cycles)
-  ├─ VERIFY  spec done · sprint done · run [verify].commands (pytest, ruff…)
+  ├─ VERIFY  spec done · sprint done · run [verify].commands again — a failure
+  │          routes a feedback-driven dev fix session, then a fresh review cycle
   └─ COMMIT  orchestrator commits; epic boundary → gate / retro notification
 ```
 
-Failure handling: bounded dev retries (rollback to baseline between attempts),
-**plateau-defer** when review won't converge (story skipped, spec stashed into
-the run dir, deferred-work.md additions preserved, run continues), and typed
-escalations — `CRITICAL` pauses the run and notifies you (desktop + `ATTENTION`
-file), `PREFERENCE` is journaled and the run continues.
+Failure handling: bounded dev retries (verify-command failures keep the tree
+and feed the failing output to the next session via `--feedback`; other
+failures roll back to baseline), **plateau-defer** when review won't converge
+(story skipped, spec stashed into the run dir, deferred-work.md additions
+preserved, run continues), and typed escalations — `CRITICAL` pauses the run
+and notifies you (desktop + `ATTENTION` file), `PREFERENCE` is journaled and
+the run continues.
+
+## Deferred-work sweeps
+
+Skills accumulate an append-only ledger (`deferred-work.md`, `DW-<n>` entries)
+of split-off goals, pre-existing review findings, and items deferred as
+"needs human decision". `bmad-auto sweep` processes it:
+
+```
+bmad-auto sweep [--no-prompt] [--decisions-only] [--max-bundles N] [--dry-run]
+  │
+  ├─ TRIAGE   fresh window: claude "/bmad-deferred-sweep"
+  │           verifies EVERY open entry against the actual code (ledger
+  │           statuses are unreliable) and returns a machine-validated
+  │           partition: already-resolved (orchestrator closes them, with
+  │           evidence) · bundles (cohesive buildable groups) · blocked ·
+  │           skip · decisions (frozen-block renegotiations, scope reversals)
+  ├─ DECIDE   interactive runs walk you through each decision on the
+  │           terminal (build / close / keep-open per option, with a
+  │           recommendation); answers land in the ledger as `decision:`
+  │           lines. Unattended runs skip this and leave decisions open.
+  └─ BUNDLES  each bundle runs the normal pipeline: quick-dev (--dw-bundle)
+              → code review → verify commands → commit. The review gate also
+              checks every bundle entry is `status: done` in the ledger.
+```
+
+Sweeps are their own resumable runs (`bmad-auto resume <id>`). `[sweep] auto`
+in the policy fires an unattended sweep automatically at epic boundaries or
+run end; a failed/paused child sweep never interrupts the parent run.
 
 ## Policy (`.automator/policy.toml`)
 
@@ -111,6 +146,13 @@ model = ""                 # empty = CLI default
 # [adapter.review]
 # name = "codex"
 # model = "gpt-5-codex"
+# [adapter.triage]            # deferred-sweep triage stage
+# model = "opus"
+
+[sweep]
+auto = "never"             # never | per-epic | run-end (auto sweeps never prompt)
+max_bundles = 5            # bundles executed per sweep; triage excess truncated
+max_triage_attempts = 2    # triage validation retries before escalating
 ```
 
 Gate modes: `none` runs everything unattended; `per-epic` (default) pauses at

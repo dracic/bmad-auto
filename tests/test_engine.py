@@ -1,6 +1,8 @@
 """Engine scenario tests against the mock adapter — no tmux, no LLM."""
 
 
+from pathlib import Path
+
 from automator.adapters.base import SessionResult
 from automator.adapters.mock import MockAdapter
 from automator.engine import Engine
@@ -19,9 +21,11 @@ from automator.policy import (
     NotifyPolicy,
     Policy,
     StageAdapterPolicy,
+    SweepPolicy,
+    VerifyPolicy,
 )
 from automator.verify import rev_parse_head, worktree_clean
-from conftest import dev_effect, review_effect, write_sprint
+from conftest import dev_effect, review_effect, spec_path, write_sprint
 
 QUIET = NotifyPolicy(desktop=False, file=True)
 
@@ -344,27 +348,137 @@ def test_spec_approval_gate_pause_then_resume_reviews(project):
     assert [s.role for s in adapter.sessions] == ["review"]
 
 
-def test_review_claims_clean_but_verify_commands_fail(project):
+def test_dev_verify_command_failure_routes_feedback_fix(project):
+    """A broken build never reaches review: the dev-stage gate fails, the tree
+    is kept, and the next dev session gets the failing output as feedback."""
     write_sprint(project, {"1-1-a": "ready-for-dev"})
-    from automator.policy import VerifyPolicy
+    marker = project.project / "fixed.marker"
 
-    failing = Policy(
+    def fix(spec):
+        marker.write_text("ok\n")
+        sp = spec_path(project, "1-1-a")
+        return SessionResult(
+            status="completed",
+            result_json={
+                "workflow": "quick-dev",
+                "story_key": "1-1-a",
+                "spec_file": str(sp),
+                "baseline_commit": rev_parse_head(project.project),
+                "tasks_total": 3,
+                "tasks_done": 3,
+                "verification": [{"command": f"test -f {marker}", "ok": True}],
+                "escalations": [],
+            },
+        )
+
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        verify=VerifyPolicy(commands=(f"test -f {marker}",)),
+    )
+    engine, adapter = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), fix, review_effect(project, "1-1-a", clean=True)],
+        policy=policy,
+    )
+    summary = engine.run()
+
+    assert summary.done == 1
+    task = engine.state.tasks["1-1-a"]
+    assert task.attempt == 2
+    prompts = [s.prompt for s in adapter.sessions]
+    assert "--feedback" not in prompts[0] and "--feedback" in prompts[1]
+    feedback = Path(prompts[1].split("--feedback ", 1)[1])
+    assert "test -f" in feedback.read_text()
+    # the first attempt's work survived: no reset between attempts
+    assert "change for 1-1-a" in (project.project / "src.txt").read_text()
+
+
+def test_review_verify_failure_routes_fix_session_then_rereview(project):
+    """Verify commands failing after a clean review route to a feedback-driven
+    dev fix session and a fresh review cycle — not a blind re-review."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    marker = project.project / "fixed.marker"
+
+    def dev_with_marker(spec):
+        marker.write_text("ok\n")
+        return dev_effect(project, "1-1-a")(spec)
+
+    def breaking_review(spec):
+        marker.unlink()  # the review's "patch" broke the verify gate
+        return review_effect(project, "1-1-a", clean=True)(spec)
+
+    def fix(spec):
+        marker.write_text("ok\n")
+        return SessionResult(
+            status="completed", result_json={"workflow": "quick-dev", "escalations": []}
+        )
+
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        verify=VerifyPolicy(commands=(f"test -f {marker}",)),
+    )
+    engine, adapter = make_engine(
+        project,
+        [dev_with_marker, breaking_review, fix, review_effect(project, "1-1-a", clean=True)],
+        policy=policy,
+    )
+    summary = engine.run()
+
+    assert summary.done == 1
+    task = engine.state.tasks["1-1-a"]
+    assert task.review_cycle == 2 and task.attempt == 2
+    assert [s.role for s in adapter.sessions] == ["dev", "review", "dev", "review"]
+    assert "--feedback" in adapter.sessions[2].prompt
+
+
+def test_review_verify_failure_without_fix_budget_defers(project):
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    marker = project.project / "fixed.marker"
+
+    def dev_with_marker(spec):
+        marker.write_text("ok\n")
+        return dev_effect(project, "1-1-a")(spec)
+
+    def breaking_review(spec):
+        marker.unlink()
+        return review_effect(project, "1-1-a", clean=True)(spec)
+
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        verify=VerifyPolicy(commands=(f"test -f {marker}",)),
+        limits=LimitsPolicy(max_dev_attempts=1),
+    )
+    engine, adapter = make_engine(
+        project, [dev_with_marker, breaking_review], policy=policy
+    )
+    summary = engine.run()
+
+    assert summary.deferred == 1 and summary.done == 0
+    assert "kept failing" in engine.state.tasks["1-1-a"].defer_reason
+
+
+def test_verify_commands_never_pass_defers_at_dev(project):
+    """Unfixable verify failures exhaust the dev budget and defer before any
+    review session is spent."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    policy = Policy(
         gates=GatesPolicy(mode="none"),
         notify=QUIET,
         verify=VerifyPolicy(commands=("false",)),
-        limits=LimitsPolicy(max_review_cycles=2),
     )
-    engine, _ = make_engine(
+    engine, adapter = make_engine(
         project,
-        [
-            dev_effect(project, "1-1-a"),
-            review_effect(project, "1-1-a", clean=True),
-            review_effect(project, "1-1-a", clean=True),
-        ],
-        policy=failing,
+        [dev_effect(project, "1-1-a"), dev_effect(project, "1-1-a")],
+        policy=policy,
     )
     summary = engine.run()
+
     assert summary.deferred == 1 and summary.done == 0
+    assert [s.role for s in adapter.sessions] == ["dev", "dev"]
+    assert "--feedback" in adapter.sessions[1].prompt
 
 
 def test_max_stories_limit(project):
@@ -377,6 +491,125 @@ def test_max_stories_limit(project):
     summary = engine.run()
     assert summary.done == 1
     assert "1-2-b" not in engine.state.tasks
+
+
+def test_run_end_auto_sweep_fires_once(project):
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    policy = Policy(gates=GatesPolicy(mode="none"), notify=QUIET, sweep=SweepPolicy(auto="run-end"))
+    calls = []
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+        policy=policy,
+        sweep_factory=calls.append,
+    )
+    summary = engine.run()
+    assert summary.done == 1 and not summary.paused
+    assert calls == ["run-end"]
+    assert load_state(engine.run_dir).sweeps_triggered == ["run-end"]
+
+
+def test_per_epic_auto_sweep_fires_at_boundary(project):
+    write_sprint(
+        project,
+        {
+            "epic-1": "backlog",
+            "1-1-a": "ready-for-dev",
+            "epic-2": "backlog",
+            "2-1-b": "ready-for-dev",
+        },
+    )
+    policy = Policy(gates=GatesPolicy(mode="none"), notify=QUIET, sweep=SweepPolicy(auto="per-epic"))
+    calls = []
+    engine, _ = make_engine(
+        project,
+        [
+            dev_effect(project, "1-1-a"),
+            review_effect(project, "1-1-a", clean=True),
+            dev_effect(project, "2-1-b"),
+            review_effect(project, "2-1-b", clean=True),
+        ],
+        policy=policy,
+        sweep_factory=calls.append,
+    )
+    summary = engine.run()
+    assert summary.done == 2
+    assert calls == ["epic-1"]  # boundary only; run-end mode not set
+
+
+def test_auto_sweep_no_refire_on_resume(project):
+    """The per-epic trigger is recorded before the gate pause, so resuming
+    the run must not fire the same sweep again."""
+    write_sprint(
+        project,
+        {
+            "epic-1": "backlog",
+            "1-1-a": "ready-for-dev",
+            "epic-2": "backlog",
+            "2-1-b": "ready-for-dev",
+        },
+    )
+    policy = Policy(
+        gates=GatesPolicy(mode="per-epic"), notify=QUIET, sweep=SweepPolicy(auto="per-epic")
+    )
+    calls = []
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+        policy=policy,
+        sweep_factory=calls.append,
+    )
+    assert engine.run().paused
+    assert calls == ["epic-1"]
+
+    state = load_state(engine.run_dir)
+    state.clear_pause()
+    adapter = MockAdapter(
+        [dev_effect(project, "2-1-b"), review_effect(project, "2-1-b", clean=True)]
+    )
+    resumed = Engine(
+        paths=project,
+        policy=policy,
+        adapter=adapter,
+        run_dir=engine.run_dir,
+        journal=engine.journal,
+        state=state,
+        sweep_factory=calls.append,
+    )
+    assert resumed.run().done == 2
+    assert calls == ["epic-1"]  # not re-fired
+
+
+def test_auto_sweep_failure_does_not_pause_parent(project):
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    policy = Policy(gates=GatesPolicy(mode="none"), notify=QUIET, sweep=SweepPolicy(auto="run-end"))
+
+    def exploding(trigger):
+        raise RuntimeError("child sweep blew up")
+
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+        policy=policy,
+        sweep_factory=exploding,
+    )
+    summary = engine.run()
+    assert summary.done == 1 and not summary.paused
+    assert engine.state.finished
+    journal = (engine.run_dir / "journal.jsonl").read_text()
+    assert "sweep-auto-failed" in journal and "child sweep blew up" in journal
+
+
+def test_no_auto_sweep_by_default(project):
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    calls = []
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+        sweep_factory=calls.append,
+    )
+    engine.run()
+    assert calls == []
 
 
 def test_journal_records_decisions(project):

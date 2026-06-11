@@ -37,6 +37,30 @@ These rules override conversational behavior everywhere in this workflow.
    and treat the intent as: implement that story from the epic. Skip the rest of
    the intent-check cascade. Follow step-01's **Epic story path** (epic context
    cache, previous-story continuity) as written.
+   - **Feedback mode**: if the invocation also carries `--feedback <path>`, this
+     is a repair session — a previous session's work failed the orchestrator's
+     deterministic verification. Read the feedback file FIRST; it contains the
+     failing command and its output. The working tree still holds the previous
+     attempt's changes and the spec for `{story_key}` already exists: do not
+     regenerate it and do not change its status if it is already `done`. Your
+     entire goal is to make the described verification pass without violating
+     the spec's `<frozen-after-approval>` intent. Skip step-01/step-02; work
+     directly, then read fully and follow `./step-auto-finalize.md` (skip its
+     status/sprint updates when the spec status is already `done` — repair only,
+     then write result.json and end your turn). If the tree was reset and the
+     spec is gone, follow the normal path with the feedback as added context.
+   - **Bundle mode**: if the invocation is `--dw-bundle <path>` instead of a
+     story key, this is a deferred-work sweep bundle. Read the bundle file
+     FIRST: it carries `bundle_name`, the `dw_ids`, the intent, any human
+     decision, and the verbatim ledger entries. Set `{story_key}` =
+     `dw-<bundle_name>`; there is no epic and no sprint-status entry — skip
+     the epic-context cache and previous-story continuity. The spec file is
+     `{implementation_artifacts}/spec-dw-<bundle_name>.md`. Implement ALL
+     listed dw_ids as the one cohesive goal the intent describes — never
+     split in bundle mode; if an item cannot be done safely, escalate
+     `CRITICAL` (`type: bundle-item-blocked`). Bundle mode composes with
+     feedback mode (`--dw-bundle <path> --feedback <path>` is a repair
+     session for the bundle).
 4. **Always route plan-code-review.** Never one-shot — review runs as a separate
    orchestrated session with fresh context.
 5. **Never run step-04-review or step-05-present.** After step-03-implement,

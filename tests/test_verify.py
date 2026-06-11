@@ -112,6 +112,69 @@ def test_verify_review_sprint_not_done(project):
     assert not out.ok and "sprint-status" in out.reason
 
 
+def make_bundle_task(paths, dw_ids=("DW-1", "DW-2")):
+    task = StoryTask(story_key="dw-test-bundle", epic=0, dw_ids=list(dw_ids))
+    task.baseline_commit = verify.rev_parse_head(paths.project)
+    return task
+
+
+def bundle_ledger(paths, statuses: dict[str, str]) -> None:
+    parts = []
+    for dw_id, status in statuses.items():
+        parts.append(
+            f"### {dw_id}: item {dw_id}\n\norigin: test\nlocation: n/a\n"
+            f"reason: test\nstatus: {status}\n"
+        )
+    paths.deferred_work.parent.mkdir(parents=True, exist_ok=True)
+    paths.deferred_work.write_text("\n".join(parts), encoding="utf-8")
+
+
+def test_verify_dev_bundle_happy_skips_sprint(project):
+    # no sprint-status entry for the bundle key — must still pass
+    task = make_bundle_task(project)
+    sp = project.implementation_artifacts / "spec-dw-test-bundle.md"
+    write_spec(sp, "in-review", task.baseline_commit)
+    (project.project / "src.txt").write_text("changed\n")
+    rj = {"workflow": "quick-dev", "spec_file": str(sp), "dw_ids": ["DW-2", "DW-1"]}
+    out = verify.verify_dev_bundle(task, project, rj)
+    assert out.ok
+    assert task.spec_file == str(sp)
+
+
+def test_verify_dev_bundle_dw_ids_mismatch(project):
+    task = make_bundle_task(project)
+    sp = project.implementation_artifacts / "spec-dw-test-bundle.md"
+    write_spec(sp, "in-review", task.baseline_commit)
+    (project.project / "src.txt").write_text("changed\n")
+    rj = {"workflow": "quick-dev", "spec_file": str(sp), "dw_ids": ["DW-1"]}
+    out = verify.verify_dev_bundle(task, project, rj)
+    assert not out.ok and "dw_ids" in out.reason
+
+
+def test_verify_review_bundle_ledger_gate(project):
+    task = make_bundle_task(project)
+    sp = project.implementation_artifacts / "spec-dw-test-bundle.md"
+    write_spec(sp, "done", task.baseline_commit)
+    task.spec_file = str(sp)
+
+    bundle_ledger(project, {"DW-1": "done 2026-06-11", "DW-2": "open"})
+    out = verify.verify_review_bundle(task, project, Policy())
+    assert not out.ok and out.fixable and "DW-2" in out.reason and "DW-1" not in out.reason
+
+    bundle_ledger(project, {"DW-1": "done 2026-06-11", "DW-2": "done 2026-06-11"})
+    assert verify.verify_review_bundle(task, project, Policy()).ok
+
+
+def test_verify_review_bundle_missing_entry_fails(project):
+    task = make_bundle_task(project)
+    sp = project.implementation_artifacts / "spec-dw-test-bundle.md"
+    write_spec(sp, "done", task.baseline_commit)
+    task.spec_file = str(sp)
+    bundle_ledger(project, {"DW-1": "done 2026-06-11"})  # DW-2 absent entirely
+    out = verify.verify_review_bundle(task, project, Policy())
+    assert not out.ok and out.fixable and "DW-2" in out.reason
+
+
 def test_reset_hard_keeps_automator_dir(project):
     baseline = verify.rev_parse_head(project.project)
     (project.project / "src.txt").write_text("dirty\n")
@@ -129,7 +192,7 @@ def test_reset_hard_keeps_automator_dir(project):
 def test_commit_story(project):
     task = make_task(project)
     (project.project / "src.txt").write_text("done work\n")
-    sha = verify.commit_story(project.project, task)
+    sha = verify.commit_story(project.project, f"story {task.story_key}: via bmad-auto")
     assert sha != task.baseline_commit
     assert verify.worktree_clean(project.project)
 

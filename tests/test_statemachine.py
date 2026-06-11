@@ -33,3 +33,16 @@ def test_happy_path_sequence():
     ):
         advance(task, phase)
     assert task.terminal
+
+
+def test_triage_path_sequence():
+    task = StoryTask(story_key="sweep-triage", epic=0)
+    for phase in (
+        Phase.TRIAGE_RUNNING,
+        Phase.TRIAGE_VERIFY,
+        Phase.TRIAGE_RUNNING,  # invalid triage output retries
+        Phase.TRIAGE_VERIFY,
+        Phase.DONE,
+    ):
+        advance(task, phase)
+    assert task.terminal

@@ -40,6 +40,9 @@ this workflow.
    filename/frontmatter against `{sprint_status}` (exact numeric match on the
    first two segments). Skip the rest of the step-01 cascade and the step-01
    CHECKPOINT.
+   - **Sweep bundles**: a spec filename matching `spec-dw-*` is a deferred-work
+     bundle from a sweep run — it has no sprint-status entry. Set `{story_key}`
+     = null and review as usual against the spec.
 3. **Diff source**: all changes — tracked and untracked — since
    `baseline_commit`. If the diff is empty, write result.json with
    `clean: false` and a `CRITICAL` escalation (`type: empty-diff`) and end
@@ -53,13 +56,25 @@ this workflow.
    "auto-mode: needs human decision" AND an entry in `escalations`
    (`CRITICAL` if it concerns correctness or security of the new code,
    `PREFERENCE` otherwise).
-6. **Act** (step-04): write findings to the spec file as usual; apply EVERY
+6. **Spec defects** (step-03): when a finding's root cause is an error in the
+   spec itself — the code faithfully implements something the spec got wrong —
+   never patch around it silently. Root cause inside `<frozen-after-approval>`:
+   escalate `CRITICAL` (`type: spec-defect`) — the frozen intent is human-owned.
+   Root cause outside the frozen block: patch the code to the evidently correct
+   behavior, append an entry to the spec's `## Spec Change Log` recording the
+   finding, the amendment, and the known-bad state avoided, and record a
+   `PREFERENCE` escalation so a human can revisit the call.
+7. **Act** (step-04): write findings to the spec file as usual; apply EVERY
    `patch` finding without asking; append `defer` findings to the
    deferred-work file following the format in
    `bmad-quick-dev/deferred-work-format.md` (same directory conventions);
    skip the "Next steps" menu entirely.
-7. **Status updates** (step-04 section 6) run exactly as written: spec
+8. **Status updates** (step-04 section 6) run exactly as written: spec
    status (frontmatter `status:` for quick-dev specs) and sprint-status sync.
    `clean: true` in result.json must mean you set the spec to `done` —
    never claim clean without the status updates on disk.
-8. **Never commit, never push.** The orchestrator commits after verifying.
+   When `{story_key}` is null (sweep bundle): skip the sprint-status sync
+   only; the spec frontmatter update stays mandatory. New `defer` findings
+   still append DW entries to the deferred-work file — the running sweep
+   ignores entries created after its triage; a later sweep picks them up.
+9. **Never commit, never push.** The orchestrator commits after verifying.

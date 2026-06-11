@@ -41,6 +41,12 @@ If `{spec_file}` exists and contains a Tasks/Subtasks section, append a `### Rev
 
 Also append each `defer` finding to `{deferred_work_file}` as a `DW-<seq>` entry following the format and dedupe rule in the `bmad-quick-dev` skill's `deferred-work-format.md` (sibling skill directory). Use `origin: code review of <spec basename>, {date}`.
 
+Then append a `#### Review Ledger ({date})` subsection recording every triaged
+finding on one line each — `<verdict>: <title> [<location>] — <one-line reason>`
+— including the dismissed ones set aside in step-03. The ledger is append-only
+across review cycles; it is what stops the next cycle's fresh reviewers from
+re-litigating findings that were already adjudicated.
+
 ### 3. Present summary
 
 Announce what was written:

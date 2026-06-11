@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from . import deferredwork
 from .bmadconfig import ProjectPaths
 from .model import StoryTask
 from .policy import Policy
@@ -32,14 +33,17 @@ class VerifyOutcome:
     ok: bool
     reason: str = ""
     severity: str = ""  # "" | "CRITICAL" | "PREFERENCE" — set when not retryable
+    # fixable failures carry concrete evidence (failing command output) that a
+    # feedback-driven repair session can act on; non-fixable retries start over
+    fixable: bool = False
 
     @classmethod
     def passed(cls) -> "VerifyOutcome":
         return cls(ok=True)
 
     @classmethod
-    def retry(cls, reason: str) -> "VerifyOutcome":
-        return cls(ok=False, reason=reason)
+    def retry(cls, reason: str, fixable: bool = False) -> "VerifyOutcome":
+        return cls(ok=False, reason=reason, fixable=fixable)
 
     @classmethod
     def escalate(cls, reason: str, severity: str = "CRITICAL") -> "VerifyOutcome":
@@ -162,6 +166,50 @@ def verify_dev(
     return VerifyOutcome.passed()
 
 
+def verify_dev_bundle(
+    task: StoryTask, paths: ProjectPaths, result_json: dict[str, Any] | None
+) -> VerifyOutcome:
+    """verify_dev for a deferred-work bundle: bundles have no sprint-status
+    entry, but the session must claim exactly the dw ids the bundle owns."""
+    rj = result_json or {}
+    spec_file = rj.get("spec_file")
+    if not spec_file:
+        return VerifyOutcome.retry("dev result.json missing spec_file")
+    spec_path = resolve_spec_path(str(spec_file), paths)
+    if not spec_path.is_file():
+        return VerifyOutcome.retry(f"claimed spec file does not exist: {spec_path}")
+
+    fm = read_frontmatter(spec_path)
+    status = str(fm.get("status", "")).strip()
+    if status != "in-review":
+        return VerifyOutcome.retry(f"spec status is {status!r}, expected 'in-review': {spec_path}")
+
+    claimed_baseline = str(fm.get("baseline_commit", "")).strip()
+    if task.baseline_commit and claimed_baseline not in ("", "NO_VCS"):
+        if claimed_baseline != task.baseline_commit:
+            return VerifyOutcome.retry(
+                f"spec baseline_commit {claimed_baseline[:12]} does not match "
+                f"orchestrator-recorded baseline {task.baseline_commit[:12]}"
+            )
+
+    if task.baseline_commit:
+        try:
+            if not has_changes_since(paths.project, task.baseline_commit):
+                return VerifyOutcome.retry("no changes in worktree since baseline commit")
+        except GitError as e:
+            return VerifyOutcome.escalate(str(e))
+
+    claimed_ids = {str(i) for i in rj.get("dw_ids", [])}
+    if claimed_ids != set(task.dw_ids):
+        return VerifyOutcome.retry(
+            f"result.json dw_ids {sorted(claimed_ids)} do not match the bundle's "
+            f"{sorted(task.dw_ids)}"
+        )
+
+    task.spec_file = str(spec_path)
+    return VerifyOutcome.passed()
+
+
 @dataclass(frozen=True)
 class CommandResult:
     command: str
@@ -188,6 +236,19 @@ def run_verify_commands(policy: Policy, cwd: Path) -> list[CommandResult]:
     return results
 
 
+def verify_commands_outcome(policy: Policy, cwd: Path) -> VerifyOutcome:
+    """Run the policy's deterministic verify commands. Failures are fixable:
+    the captured output is concrete feedback a repair session can act on."""
+    for result in run_verify_commands(policy, cwd):
+        if result.returncode != 0:
+            return VerifyOutcome.retry(
+                f"verify command failed (rc={result.returncode}): {result.command}\n"
+                f"{result.output_tail}",
+                fixable=True,
+            )
+    return VerifyOutcome.passed()
+
+
 def verify_review(task: StoryTask, paths: ProjectPaths, policy: Policy) -> VerifyOutcome:
     if not task.spec_file:
         return VerifyOutcome.retry("no spec file recorded for task")
@@ -202,20 +263,43 @@ def verify_review(task: StoryTask, paths: ProjectPaths, policy: Policy) -> Verif
             f"sprint-status for {task.story_key} is {sprint!r}, expected 'done'"
         )
 
-    for result in run_verify_commands(policy, paths.project):
-        if result.returncode != 0:
-            return VerifyOutcome.retry(
-                f"verify command failed (rc={result.returncode}): {result.command}\n"
-                f"{result.output_tail}"
-            )
-    return VerifyOutcome.passed()
+    return verify_commands_outcome(policy, paths.project)
 
 
-def commit_story(repo: Path, task: StoryTask) -> str:
+def verify_review_bundle(task: StoryTask, paths: ProjectPaths, policy: Policy) -> VerifyOutcome:
+    """verify_review for a deferred-work bundle: no sprint-status check, but
+    every dw id the bundle owns must be marked done in the ledger on disk —
+    the LLM is told to flip them; this gate is why we can trust it happened."""
+    if not task.spec_file:
+        return VerifyOutcome.retry("no spec file recorded for task")
+    fm = read_frontmatter(Path(task.spec_file))
+    status = str(fm.get("status", "")).strip()
+    if status != "done":
+        return VerifyOutcome.retry(f"spec status is {status!r}, expected 'done'")
+
+    ledger = paths.deferred_work
+    text = ledger.read_text(encoding="utf-8") if ledger.is_file() else ""
+    entries = {e.id: e for e in deferredwork.parse_ledger(text)}
+    not_done = sorted(
+        i
+        for i in task.dw_ids
+        if i not in entries or not entries[i].status.startswith("done")
+    )
+    if not_done:
+        return VerifyOutcome.retry(
+            "deferred-work entries not marked done in "
+            f"{ledger}: {', '.join(not_done)} — set each to `status: done <date>` "
+            "with a `resolution:` line",
+            fixable=True,
+        )
+
+    return verify_commands_outcome(policy, paths.project)
+
+
+def commit_story(repo: Path, message: str) -> str:
     rc, out = _git(repo, "add", "-A")
     if rc != 0:
         raise GitError(f"git add failed: {out}")
-    message = f"story {task.story_key}: implemented and reviewed via bmad-auto"
     rc, out = _git(repo, "commit", "-m", message)
     if rc != 0:
         raise GitError(f"git commit failed: {out}")

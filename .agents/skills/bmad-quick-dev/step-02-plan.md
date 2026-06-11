@@ -26,7 +26,7 @@ deferred_work_file: '{implementation_artifacts}/deferred-work.md'
 
 **If `{auto_mode}`:** do not present the menu or note below. Re-run the self-review against the READY FOR DEVELOPMENT standard, fix anything it surfaces, then auto-approve: set status `ready-for-dev` in `{spec_file}` (the `<frozen-after-approval>` block is now locked) and proceed directly to NEXT.
 
-Present summary. Display the spec file path as a CWD-relative path (no leading `/`) so it is clickable in the terminal. If token count exceeded 1600 and user chose [K], include the token count and explain why it may be a problem.
+Present summary. Display the spec file path as a CWD-relative path (no leading `/`) so it is clickable in the terminal. If token count exceeded 4000 and user chose [K], include the token count and explain why it may be a problem.
 
 After presenting the summary, display this note:
 

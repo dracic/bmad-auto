@@ -17,9 +17,23 @@ session and creates the commit itself.
 1. Verify every task in the `## Tasks & Acceptance` section of `{spec_file}` is
    marked `[x]`. If any are not done, go back and finish them first — an
    incomplete task list fails the orchestrator's verification and burns a retry.
-2. Change `{spec_file}` status to `in-review` in the frontmatter.
-3. Follow `./sync-sprint-status.md` with `{target_status}` = `review`.
-4. Write `$BMAD_AUTO_RUN_DIR/tasks/$BMAD_AUTO_TASK_ID/result.json`:
+2. **Run the spec's `## Verification` commands.** Execute every command listed
+   there (skip this instruction only if the spec has no Verification section).
+   A checked-off task list is a claim; passing commands are evidence — the
+   orchestrator runs its own deterministic gates next, so a failure you skip
+   here just burns a retry. If a command fails: fix the code and re-run until
+   it passes. If you cannot make it pass without violating the frozen intent,
+   escalate `CRITICAL` (`type: verification-failure`) instead of finalizing.
+3. Change `{spec_file}` status to `in-review` in the frontmatter.
+4. Follow `./sync-sprint-status.md` with `{target_status}` = `review`.
+   **Bundle mode** (`{story_key}` starts with `dw-`): bundles have no
+   sprint-status entry — skip the sync. Instead, update the deferred-work
+   file: for EACH dw id listed in the bundle file, set its entry's `status:`
+   to `done <today's date>` and add `resolution: <one line: what was built>`
+   directly after it (see `./deferred-work-format.md`). The orchestrator
+   verifies these on disk after review — an unmarked entry fails the gate
+   and burns a repair session.
+5. Write `$BMAD_AUTO_RUN_DIR/tasks/$BMAD_AUTO_TASK_ID/result.json`:
 
    ```json
    {
@@ -29,11 +43,17 @@ session and creates the commit itself.
      "baseline_commit": "<baseline_commit from {spec_file} frontmatter>",
      "tasks_total": <count of tasks in the spec>,
      "tasks_done": <count of tasks marked [x]>,
+     "verification": [<one {"command": "<cmd>", "ok": <bool>} per Verification
+                       command run in instruction 2, else empty>],
      "escalations": [<contents of any escalations raised this run, else empty>]
    }
    ```
 
-5. State in one line what was implemented and end your turn. Do not ask
+   **Bundle mode**: additionally include `"dw_ids": [<the bundle file's dw
+   ids, verbatim>]` — the orchestrator rejects the result when the list does
+   not match the bundle.
+
+6. State in one line what was implemented and end your turn. Do not ask
    questions, offer next steps, or wait for anything.
 
 ## On Complete

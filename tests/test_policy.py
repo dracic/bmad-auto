@@ -150,6 +150,51 @@ def test_cache_read_weight_default_and_override(tmp_path):
         policy.load(p)
 
 
+def test_sweep_defaults_and_override(tmp_path):
+    pol = policy.load(None)
+    assert pol.sweep.auto == "never"
+    assert pol.sweep.max_bundles == 5
+    assert pol.sweep.max_triage_attempts == 2
+    p = tmp_path / "policy.toml"
+    p.write_text('[sweep]\nauto = "run-end"\nmax_bundles = 2\n')
+    pol = policy.load(p)
+    assert pol.sweep.auto == "run-end"
+    assert pol.sweep.max_bundles == 2
+
+
+def test_sweep_invalid_values(tmp_path):
+    p = tmp_path / "policy.toml"
+    p.write_text('[sweep]\nauto = "always"\n')
+    with pytest.raises(policy.PolicyError, match="sweep.auto"):
+        policy.load(p)
+    p.write_text("[sweep]\nmax_bundles = 0\n")
+    with pytest.raises(policy.PolicyError, match="max_bundles"):
+        policy.load(p)
+
+
+def test_triage_stage_adapter(tmp_path):
+    p = tmp_path / "policy.toml"
+    p.write_text('[adapter]\nmodel = "opus"\n[adapter.triage]\nmodel = "sonnet"\n')
+    pol = policy.load(p)
+    assert pol.adapter.resolved("triage").model == "sonnet"
+    assert pol.adapter.resolved("dev").model == "opus"
+    # without a stage table, triage inherits the base
+    assert policy.load(None).adapter.resolved("triage") == policy.ResolvedAdapter(
+        "claude", "", None
+    )
+
+
+def test_triage_client_switch_uses_profile_defaults(tmp_path):
+    p = tmp_path / "policy.toml"
+    p.write_text(
+        '[adapter]\nmodel = "opus"\nextra_args = ["--foo"]\n[adapter.triage]\nname = "gemini"\n'
+    )
+    pol = policy.load(p)
+    # base model/extra_args are client-specific and must not follow a client switch
+    assert pol.adapter.resolved("triage") == policy.ResolvedAdapter("gemini", "", None)
+    assert pol.adapter.resolved("dev") == policy.ResolvedAdapter("claude", "opus", ("--foo",))
+
+
 def test_template_parses():
     import tomllib
 

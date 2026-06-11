@@ -11,11 +11,18 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from . import gates, verify
 from .adapters.base import CodingCLIAdapter, SessionResult, SessionSpec
 from .bmadconfig import ProjectPaths
-from .escalation import Action, decide_dev, decide_review_session, preference_escalations
+from .escalation import (
+    Action,
+    critical_escalations,
+    decide_dev,
+    decide_review_session,
+    preference_escalations,
+)
 from .journal import Journal, save_state
 from .model import (
     PAUSE_EPIC_BOUNDARY,
@@ -73,6 +80,7 @@ class Engine:
         epic_filter: int | None = None,
         story_filter: str | None = None,
         review_adapter: CodingCLIAdapter | None = None,
+        sweep_factory: Callable[[str], None] | None = None,
     ):
         self.paths = paths
         self.policy = policy
@@ -86,6 +94,9 @@ class Engine:
         self.max_stories = max_stories
         self.epic_filter = epic_filter
         self.story_filter = story_filter
+        # spawns a child deferred-work sweep run (injected by the CLI to
+        # avoid an engine -> sweep import cycle); see _maybe_auto_sweep
+        self.sweep_factory = sweep_factory
 
     # ------------------------------------------------------------- top level
 
@@ -128,6 +139,7 @@ class Engine:
                 return
             story = self._pick_next()
             if story is None:
+                self._maybe_auto_sweep("run-end", "run-end")
                 return
             if self.state.current_epic is not None and story.epic != self.state.current_epic:
                 self._epic_boundary(self.state.current_epic, story.epic)
@@ -210,21 +222,26 @@ class Engine:
         self._review_and_commit(task)
 
     def _dev_phase(self, task: StoryTask) -> bool:
+        task.baseline_commit = verify.rev_parse_head(self.paths.project)
+        feedback: Path | None = None
         while True:
             task.attempt += 1
-            task.baseline_commit = verify.rev_parse_head(self.paths.project)
             advance(task, Phase.DEV_RUNNING)
             self._save()
             result = self._run_session(
                 task,
                 role="dev",
-                prompt=f"/bmad-quick-dev {task.story_key}",
+                prompt=self._dev_prompt(task, feedback),
                 seq=task.attempt,
             )
             advance(task, Phase.DEV_VERIFY)
             outcome = None
             if result.status == "completed":
-                outcome = verify.verify_dev(task, self.paths, result.result_json)
+                outcome = self._verify_dev_artifacts(task, result.result_json)
+                if outcome.ok:
+                    # deterministic gates run here too: a broken build must not
+                    # reach the (far more expensive) review loop
+                    outcome = verify.verify_commands_outcome(self.policy, self.paths.project)
             decision = decide_dev(task, result, outcome, self.policy)
             self.journal.append(
                 "dev-decision",
@@ -238,7 +255,13 @@ class Engine:
             if decision.action == Action.PROCEED:
                 return True
             if decision.action == Action.RETRY:
-                self._reset_to(task.baseline_commit)
+                if outcome is not None and outcome.fixable:
+                    # work exists and the failure is concrete: keep the tree,
+                    # hand the failing output to a repair session
+                    feedback = self._write_feedback(task, decision.reason)
+                else:
+                    feedback = None
+                    self._reset_to(task.baseline_commit)
                 continue
             if decision.action == Action.DEFER:
                 self._defer(task, decision.reason)
@@ -254,7 +277,7 @@ class Engine:
             result = self._run_session(
                 task,
                 role="review",
-                prompt=f"/bmad-code-review {task.spec_file}",
+                prompt=self._review_prompt(task),
                 seq=task.review_cycle,
             )
             advance(task, Phase.REVIEW_VERIFY)
@@ -284,13 +307,20 @@ class Engine:
                 dismissed=rj.get("dismissed", 0),
             )
             if rj.get("clean"):
-                outcome = verify.verify_review(task, self.paths, self.policy)
+                outcome = self._verify_review(task)
                 if outcome.ok:
                     clean = True
                     break
                 self.journal.append(
                     "review-verify-failed", story_key=task.story_key, reason=outcome.reason
                 )
+                if outcome.fixable and task.review_cycle < self.policy.limits.max_review_cycles:
+                    # failing verify commands are dev work, not review work: a
+                    # re-review of the same tree cannot make them pass. Repair
+                    # with the failing output as feedback, then re-review.
+                    if not self._fix_phase(task, outcome.reason):
+                        self._defer(task, "verify commands kept failing after clean review")
+                        return
                 continue
             # not clean: patches were applied; loop runs a fresh review of the new tree
 
@@ -301,7 +331,9 @@ class Engine:
         advance(task, Phase.COMMITTING)
         self._save()
         try:
-            task.commit_sha = verify.commit_story(self.paths.project, task)
+            task.commit_sha = verify.commit_story(
+                self.paths.project, self._commit_message(task)
+            )
         except verify.GitError as e:
             self._escalate(task, f"commit failed: {e}")
         advance(task, Phase.DONE)
@@ -315,6 +347,22 @@ class Engine:
                 weighted=weighted,
                 total=task.tokens.total,
             )
+
+    # ----------------------------------------------------- override seams
+    # SweepEngine reuses the dev/review pipeline for deferred-work bundles by
+    # overriding these (bundles have no sprint-status entry).
+
+    def _verify_dev_artifacts(self, task: StoryTask, result_json: dict | None):
+        return verify.verify_dev(task, self.paths, result_json)
+
+    def _verify_review(self, task: StoryTask):
+        return verify.verify_review(task, self.paths, self.policy)
+
+    def _review_prompt(self, task: StoryTask) -> str:
+        return f"/bmad-code-review {task.spec_file}"
+
+    def _commit_message(self, task: StoryTask) -> str:
+        return f"story {task.story_key}: implemented and reviewed via bmad-auto"
 
     # ------------------------------------------------------------- helpers
 
@@ -356,6 +404,65 @@ class Engine:
             tokens=usage.total if usage else None,
         )
         return result
+
+    def _dev_prompt(self, task: StoryTask, feedback: Path | None) -> str:
+        prompt = f"/bmad-quick-dev {task.story_key}"
+        if feedback is not None:
+            prompt += f" --feedback {feedback}"
+        return prompt
+
+    def _write_feedback(self, task: StoryTask, reason: str) -> Path:
+        """Persist a verification failure where the next session can read it —
+        deterministic evidence must reach the LLM, not just the journal."""
+        path = self.run_dir / "feedback" / f"{task.story_key}-{len(task.sessions)}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"# Verification feedback: {task.story_key}\n\n"
+            "The previous session's work failed deterministic verification.\n"
+            "Repair the working tree so verification passes, without violating\n"
+            "the spec's frozen intent.\n\n"
+            f"```\n{reason}\n```\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _fix_phase(self, task: StoryTask, reason: str) -> bool:
+        """Feedback-driven repair after a clean review whose verify commands
+        failed. Consumes the story's dev-attempt budget; returns True once the
+        commands pass so the review loop can re-review the repaired tree."""
+        while task.attempt < self.policy.limits.max_dev_attempts:
+            task.attempt += 1
+            feedback = self._write_feedback(task, reason)
+            advance(task, Phase.DEV_RUNNING)
+            self._save()
+            result = self._run_session(
+                task,
+                role="dev",
+                prompt=self._dev_prompt(task, feedback),
+                seq=task.attempt,
+            )
+            advance(task, Phase.DEV_VERIFY)
+            crits = critical_escalations(result.result_json)
+            if crits:
+                details = "; ".join(str(e.get("detail", e.get("type", "?"))) for e in crits)
+                self._escalate(task, f"CRITICAL escalation from fix session: {details}")
+            outcome = None
+            if result.status == "completed":
+                outcome = verify.verify_commands_outcome(self.policy, self.paths.project)
+                if not outcome.ok:
+                    reason = outcome.reason
+            ok = outcome is not None and outcome.ok
+            self.journal.append(
+                "fix-decision",
+                story_key=task.story_key,
+                attempt=task.attempt,
+                session_status=result.status,
+                ok=ok,
+            )
+            self._save()
+            if ok:
+                return True
+        return False
 
     def _defer(self, task: StoryTask, reason: str) -> None:
         task.defer_reason = reason
@@ -417,8 +524,38 @@ class Engine:
         self._save()
         raise RunPaused(reason, PAUSE_ESCALATION, task.story_key)
 
+    def _maybe_auto_sweep(self, kind: str, trigger: str) -> None:
+        """Run a child deferred-work sweep when policy [sweep].auto matches.
+        The child is its own resumable run; a paused or failed child is
+        journaled + notified but never interrupts this run."""
+        if self.policy.sweep.auto != kind or self.sweep_factory is None:
+            return
+        if trigger in self.state.sweeps_triggered:
+            return  # already fired before a pause/resume of this run
+        self.state.sweeps_triggered.append(trigger)
+        self._save()
+        try:
+            clean = verify.worktree_clean(self.paths.project)
+        except verify.GitError:
+            clean = False
+        if not clean:
+            # should not happen at these call sites (everything committed or
+            # reset); refuse rather than sweep on top of stray changes
+            self.journal.append("sweep-auto-skipped-dirty", trigger=trigger)
+            return
+        self.journal.append("sweep-auto-trigger", trigger=trigger)
+        try:
+            self.sweep_factory(trigger)
+            self.journal.append("sweep-auto-finished", trigger=trigger)
+        except Exception as e:  # noqa: BLE001 — child must never break the parent
+            self.journal.append("sweep-auto-failed", trigger=trigger, error=str(e))
+            gates.notify(
+                self.policy, self.run_dir, "auto sweep failed", f"{trigger}: {e}"
+            )
+
     def _epic_boundary(self, finished_epic: int, next_epic: int) -> None:
         self.journal.append("epic-boundary", finished=finished_epic, next=next_epic)
+        self._maybe_auto_sweep("per-epic", f"epic-{finished_epic}")
         if self.policy.gates.retrospective != "never":
             gates.notify(
                 self.policy,

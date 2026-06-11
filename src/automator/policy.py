@@ -9,6 +9,7 @@ from typing import Any
 
 GATE_MODES = {"none", "per-epic", "per-story-spec-approval"}
 RETRO_MODES = {"never", "notify", "auto"}
+SWEEP_AUTO_MODES = {"never", "per-epic", "run-end"}
 
 
 class PolicyError(Exception):
@@ -45,6 +46,13 @@ class NotifyPolicy:
 
 
 @dataclass(frozen=True)
+class SweepPolicy:
+    auto: str = "never"  # never | per-epic | run-end
+    max_bundles: int = 5  # bundles executed per sweep; triage excess is truncated
+    max_triage_attempts: int = 2
+
+
+@dataclass(frozen=True)
 class StageAdapterPolicy:
     """Per-stage overrides; None = inherit from [adapter]."""
 
@@ -69,9 +77,10 @@ class AdapterPolicy:
     extra_args: tuple[str, ...] | None = None
     dev: StageAdapterPolicy = field(default_factory=StageAdapterPolicy)
     review: StageAdapterPolicy = field(default_factory=StageAdapterPolicy)
+    triage: StageAdapterPolicy = field(default_factory=StageAdapterPolicy)
 
     def resolved(self, role: str) -> ResolvedAdapter:
-        stage = {"dev": self.dev, "review": self.review}.get(role)
+        stage = {"dev": self.dev, "review": self.review, "triage": self.triage}.get(role)
         if stage is None:
             return ResolvedAdapter(self.name, self.model, self.extra_args)
         name = stage.name if stage.name is not None else self.name
@@ -97,6 +106,7 @@ class Policy:
     verify: VerifyPolicy = field(default_factory=VerifyPolicy)
     notify: NotifyPolicy = field(default_factory=NotifyPolicy)
     adapter: AdapterPolicy = field(default_factory=AdapterPolicy)
+    sweep: SweepPolicy = field(default_factory=SweepPolicy)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -135,6 +145,7 @@ def load(path: Path | None) -> Policy:
     verify_d = _section(doc, "verify")
     notify_d = _section(doc, "notify")
     adapter_d = _section(doc, "adapter")
+    sweep_d = _section(doc, "sweep")
 
     gates = GatesPolicy(
         mode=str(gates_d.get("mode", GatesPolicy.mode)),
@@ -189,8 +200,24 @@ def load(path: Path | None) -> Policy:
         extra_args=None if raw_extra is None else tuple(str(a) for a in raw_extra),
         dev=_stage_adapter(adapter_d, "dev"),
         review=_stage_adapter(adapter_d, "review"),
+        triage=_stage_adapter(adapter_d, "triage"),
     )
-    return Policy(gates=gates, limits=limits, verify=verify, notify=notify, adapter=adapter)
+    sweep = SweepPolicy(
+        auto=str(sweep_d.get("auto", SweepPolicy.auto)),
+        max_bundles=int(sweep_d.get("max_bundles", SweepPolicy.max_bundles)),
+        max_triage_attempts=int(
+            sweep_d.get("max_triage_attempts", SweepPolicy.max_triage_attempts)
+        ),
+    )
+    if sweep.auto not in SWEEP_AUTO_MODES:
+        raise PolicyError(
+            f"sweep.auto must be one of {sorted(SWEEP_AUTO_MODES)}: got {sweep.auto!r}"
+        )
+    if sweep.max_bundles < 1 or sweep.max_triage_attempts < 1:
+        raise PolicyError("sweep.max_bundles and sweep.max_triage_attempts must be >= 1")
+    return Policy(
+        gates=gates, limits=limits, verify=verify, notify=notify, adapter=adapter, sweep=sweep
+    )
 
 
 POLICY_TEMPLATE = """\
@@ -222,13 +249,22 @@ model = ""                   # empty = CLI default model
 # extra_args replaces the profile's default permission-bypass flags when set:
 # extra_args = ["--permission-mode", "bypassPermissions"]
 
-# Per-stage overrides for the dev and review passes. Unset keys inherit from
-# [adapter] when the stage runs the same client; a stage that switches client
-# falls back to that profile's defaults instead (model and extra_args are
-# client-specific). Stage tables must come after the [adapter] keys above.
+# Per-stage overrides for the dev, review and sweep-triage passes. Unset keys
+# inherit from [adapter] when the stage runs the same client; a stage that
+# switches client falls back to that profile's defaults instead (model and
+# extra_args are client-specific). Stage tables must come after the [adapter]
+# keys above.
 # [adapter.dev]
 # model = "opus"
 # [adapter.review]
 # name = "codex"
 # model = "gpt-5-codex"
+# [adapter.triage]
+# model = "opus"
+
+[sweep]
+# Deferred-work sweep: triage + execute open deferred-work.md entries.
+auto = "never"               # never | per-epic | run-end (auto-triggered sweeps never prompt)
+max_bundles = 5              # bundles executed per sweep; triage excess is truncated
+max_triage_attempts = 2      # triage validation retries before escalating
 """

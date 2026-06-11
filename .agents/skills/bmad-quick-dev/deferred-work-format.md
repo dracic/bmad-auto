@@ -32,3 +32,19 @@ status: open
 
 When a deferred item is later completed, set its `status:` to `done` with the
 date (e.g. `status: done 2026-06-20`) — do not delete the entry.
+
+## Sweep annotations
+
+`bmad-auto sweep` runs (the orchestrator and its bundle dev sessions) add two
+optional field lines to existing entries — both directly after `status:`:
+
+```markdown
+resolution: <one line: what was built or why the entry was closed>
+decision: <date> <chosen option label> — <detail>
+```
+
+- `resolution:` accompanies every sweep close (`status: done <date>`). Bundle
+  dev sessions write it when finishing a bundle's entries; the orchestrator
+  writes it when closing entries triage proved already resolved.
+- `decision:` records a human's sweep-time choice on an entry. It does not by
+  itself change `status:` — a `keep-open` decision leaves the entry open.

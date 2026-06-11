@@ -12,11 +12,12 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, bmadconfig, policy as policy_mod, sprintstatus, verify
+from . import __version__, bmadconfig, deferredwork, policy as policy_mod, sprintstatus, verify
 from .adapters.base import CodingCLIAdapter
 from .engine import Engine
 from .journal import Journal, load_state, save_state
 from .model import RunState
+from .sweep import SweepEngine
 
 RUNS_DIR = Path(".automator") / "runs"
 POLICY_FILE = Path(".automator") / "policy.toml"
@@ -30,7 +31,7 @@ def _policy_path(project: Path) -> Path:
     return project / POLICY_FILE
 
 
-ROLES = ("dev", "review")
+ROLES = ("dev", "review", "triage")
 
 
 def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIAdapter]:
@@ -100,7 +101,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
         role_names = {role: pol.adapter.resolved(role).name for role in ROLES}
         notes.append(
             f"policy OK: gates={pol.gates.mode}, "
-            f"adapter dev={role_names['dev']}, review={role_names['review']}"
+            f"adapter dev={role_names['dev']}, review={role_names['review']}, "
+            f"triage={role_names['triage']}"
         )
         for name in dict.fromkeys(role_names.values()):
             try:
@@ -195,23 +197,28 @@ def cmd_run(args: argparse.Namespace) -> int:
         max_stories=args.max_stories,
         epic_filter=args.epic,
         story_filter=args.story,
+        sweep_factory=_sweep_factory(project, paths),
     )
     summary = engine.run()
     print(summary.render())
     return 0
 
 
-def _dry_run(paths: bmadconfig.ProjectPaths, pol, args: argparse.Namespace) -> int:
+def _render_invocation(pol, project: Path, role: str, prompt: str) -> str:
     from .adapters.profile import get_profile
 
+    cfg = pol.adapter.resolved(role)
+    profile = get_profile(cfg.name, project)
+    extra = cfg.extra_args if cfg.extra_args is not None else profile.bypass_args
+    argv = [profile.binary, *profile.launch_args, f'"{profile.render_prompt(prompt)}"', *extra]
+    if cfg.model:
+        argv += [profile.model_flag, cfg.model]
+    return " ".join(argv)
+
+
+def _dry_run(paths: bmadconfig.ProjectPaths, pol, args: argparse.Namespace) -> int:
     def render(role: str, prompt: str) -> str:
-        cfg = pol.adapter.resolved(role)
-        profile = get_profile(cfg.name, paths.project)
-        extra = cfg.extra_args if cfg.extra_args is not None else profile.bypass_args
-        argv = [profile.binary, *profile.launch_args, f'"{profile.render_prompt(prompt)}"', *extra]
-        if cfg.model:
-            argv += [profile.model_flag, cfg.model]
-        return " ".join(argv)
+        return _render_invocation(pol, paths.project, role, prompt)
 
     ss = sprintstatus.load(paths.sprint_status)
     queue = [
@@ -235,6 +242,114 @@ def _dry_run(paths: bmadconfig.ProjectPaths, pol, args: argparse.Namespace) -> i
     return 0
 
 
+def _start_sweep(
+    project: Path,
+    paths: bmadconfig.ProjectPaths,
+    pol,
+    *,
+    prompting: bool,
+    decisions_only: bool,
+    max_bundles: int | None,
+    trigger: str,
+) -> int:
+    run_id = _new_run_id()
+    run_dir = project / RUNS_DIR / run_id
+    journal = Journal(run_dir)
+    state = RunState(
+        run_id=run_id,
+        project=str(project),
+        started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+        policy_snapshot=pol.to_dict(),
+        run_type="sweep",
+    )
+    save_state(run_dir, state)
+    options = {
+        "prompting": prompting,
+        "decisions_only": decisions_only,
+        "max_bundles": max_bundles,
+        "trigger": trigger,
+    }
+    (run_dir / "sweep.json").write_text(json.dumps(options, indent=2), encoding="utf-8")
+    adapters = _make_adapters(project, run_dir, pol)
+    journal.append("run-start", run_id=run_id, run_type="sweep", trigger=trigger)
+    print(f"sweep {run_id} starting (attach: bmad-auto attach)")
+    engine = SweepEngine(
+        paths=paths,
+        policy=pol,
+        adapter=adapters["dev"],
+        review_adapter=adapters["review"],
+        triage_adapter=adapters["triage"],
+        run_dir=run_dir,
+        journal=journal,
+        state=state,
+        prompting=prompting,
+        decisions_only=decisions_only,
+        max_bundles=max_bundles,
+    )
+    summary = engine.run()
+    print(summary.render())
+    return 0
+
+
+def _sweep_factory(project: Path, paths: bmadconfig.ProjectPaths):
+    """Child-sweep launcher injected into story-run engines. Auto-triggered
+    sweeps are unattended: never prompt, never run decision bundles."""
+
+    def factory(trigger: str) -> None:
+        pol = policy_mod.load(_policy_path(project))
+        _start_sweep(
+            project,
+            paths,
+            pol,
+            prompting=False,
+            decisions_only=False,
+            max_bundles=None,
+            trigger=trigger,
+        )
+
+    return factory
+
+
+def cmd_sweep(args: argparse.Namespace) -> int:
+    project = _project(args)
+    paths = bmadconfig.load_paths(project)
+    pol = policy_mod.load(_policy_path(project))
+
+    if args.dry_run:
+        return _sweep_dry_run(paths, pol)
+
+    if not verify.worktree_clean(project):
+        print("git worktree is not clean — commit or stash first", file=sys.stderr)
+        return 1
+
+    return _start_sweep(
+        project,
+        paths,
+        pol,
+        prompting=not args.no_prompt,
+        decisions_only=args.decisions_only,
+        max_bundles=args.max_bundles,
+        trigger="cli",
+    )
+
+
+def _sweep_dry_run(paths: bmadconfig.ProjectPaths, pol) -> int:
+    ledger = paths.deferred_work
+    if not ledger.is_file():
+        print(f"no deferred-work ledger at {ledger}")
+        return 0
+    entries = deferredwork.parse_ledger(ledger.read_text(encoding="utf-8"))
+    open_entries = [e for e in entries if e.open]
+    closed = len(entries) - len(open_entries)
+    print(f"{ledger}: {len(open_entries)} open, {closed} closed/non-open")
+    for entry in open_entries:
+        print(f"  {entry.id:8s} {entry.title}")
+    if open_entries:
+        print("a sweep would triage these in one LLM session, then run bundles")
+        print(f"  triage: {_render_invocation(pol, paths.project, 'triage', '/bmad-deferred-sweep')}")
+    return 0
+
+
 def cmd_resume(args: argparse.Namespace) -> int:
     project = _project(args)
     paths = bmadconfig.load_paths(project)
@@ -251,15 +366,33 @@ def cmd_resume(args: argparse.Namespace) -> int:
     journal.append("run-resume", was_paused=state.paused_reason)
     state.clear_pause()
     adapters = _make_adapters(project, run_dir, pol)
-    engine = Engine(
-        paths=paths,
-        policy=pol,
-        adapter=adapters["dev"],
-        review_adapter=adapters["review"],
-        run_dir=run_dir,
-        journal=journal,
-        state=state,
-    )
+    if state.run_type == "sweep":
+        opts_path = run_dir / "sweep.json"
+        opts = json.loads(opts_path.read_text(encoding="utf-8")) if opts_path.is_file() else {}
+        engine: Engine = SweepEngine(
+            paths=paths,
+            policy=pol,
+            adapter=adapters["dev"],
+            review_adapter=adapters["review"],
+            triage_adapter=adapters["triage"],
+            run_dir=run_dir,
+            journal=journal,
+            state=state,
+            prompting=bool(opts.get("prompting", False)),
+            decisions_only=bool(opts.get("decisions_only", False)),
+            max_bundles=opts.get("max_bundles"),
+        )
+    else:
+        engine = Engine(
+            paths=paths,
+            policy=pol,
+            adapter=adapters["dev"],
+            review_adapter=adapters["review"],
+            run_dir=run_dir,
+            journal=journal,
+            state=state,
+            sweep_factory=_sweep_factory(project, paths),
+        )
     summary = engine.run()
     print(summary.render())
     return 0
@@ -275,7 +408,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("no runs found", file=sys.stderr)
         return 1
     state = load_state(run_dir)
-    print(f"run {state.run_id}  started {state.started_at}")
+    kind = f" [{state.run_type}]" if state.run_type != "story" else ""
+    print(f"run {state.run_id}{kind}  started {state.started_at}")
     if state.finished:
         print("status: finished")
     elif state.paused:
@@ -357,6 +491,22 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--story", help="only this story key")
     run_p.add_argument("--max-stories", type=int, help="stop after N stories")
     run_p.add_argument("--dry-run", action="store_true", help="print the plan, spawn nothing")
+
+    sweep_p = add("sweep", cmd_sweep, "triage + execute open deferred-work.md entries")
+    sweep_p.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="unattended: skip decision prompts, run only decision-free bundles",
+    )
+    sweep_p.add_argument(
+        "--decisions-only",
+        action="store_true",
+        help="triage + answer decisions + record them; run no bundles",
+    )
+    sweep_p.add_argument("--max-bundles", type=int, help="override [sweep] max_bundles")
+    sweep_p.add_argument(
+        "--dry-run", action="store_true", help="list open ledger entries, spawn nothing"
+    )
 
     resume_p = add("resume", cmd_resume, "resume a paused run")
     resume_p.add_argument("run_id")

@@ -92,6 +92,7 @@ def dev_effect(paths: ProjectPaths, story_key: str):
                 "baseline_commit": baseline,
                 "tasks_total": 3,
                 "tasks_done": 3,
+                "verification": [],
                 "escalations": [],
             },
         )
@@ -128,3 +129,94 @@ def _spec_baseline(path: Path) -> str:
         if line.startswith("baseline_commit:"):
             return line.split(":", 1)[1].strip().strip("'\"")
     return ""
+
+
+# ----------------------------------------------------------- sweep helpers
+
+
+def write_ledger(paths: ProjectPaths, statuses: dict[str, str], commit: bool = True) -> None:
+    """Write a DW-format deferred-work ledger; statuses maps id -> status
+    value. Committed by default — sweeps start from a clean tree."""
+    parts = ["# Deferred Work\n"]
+    for dw_id, status in statuses.items():
+        parts.append(
+            f"### {dw_id}: item {dw_id}\n\norigin: test, 2026-06-01\n"
+            f"location: src.txt:1\nreason: test entry.\nstatus: {status}\n"
+        )
+    paths.deferred_work.write_text("\n".join(parts), encoding="utf-8")
+    if commit:
+        git(paths.project, "add", "-A")
+        git(paths.project, "commit", "-q", "-m", "ledger")
+
+
+def mark_ledger_done(paths: ProjectPaths, dw_ids, date: str = "2026-06-11") -> None:
+    from automator import deferredwork
+
+    for dw_id in dw_ids:
+        deferredwork.mark_done(paths.deferred_work, dw_id, date, "built in test")
+
+
+def bundle_spec_path(paths: ProjectPaths, name: str) -> Path:
+    return paths.implementation_artifacts / f"spec-dw-{name}.md"
+
+
+def triage_effect(result_json: dict):
+    """Simulate a deferred-sweep triage session returning the given result."""
+
+    def effect(spec: SessionSpec) -> SessionResult:
+        return SessionResult(status="completed", result_json=result_json)
+
+    return effect
+
+
+def bundle_dev_effect(paths: ProjectPaths, name: str, dw_ids, mark_ledger: bool = True):
+    """Simulate a quick-dev bundle session (--dw-bundle): edits code, writes
+    the bundle spec, and (like step-auto-finalize bundle mode) marks the
+    bundle's ledger entries done."""
+
+    def effect(spec: SessionSpec) -> SessionResult:
+        baseline = rev_parse_head(paths.project)
+        source = paths.project / "src.txt"
+        source.write_text(source.read_text() + f"change for dw-{name}\n")
+        sp = bundle_spec_path(paths, name)
+        write_spec(sp, "in-review", baseline)
+        if mark_ledger:
+            mark_ledger_done(paths, dw_ids)
+        return SessionResult(
+            status="completed",
+            result_json={
+                "workflow": "quick-dev",
+                "story_key": f"dw-{name}",
+                "spec_file": str(sp),
+                "baseline_commit": baseline,
+                "tasks_total": 1,
+                "tasks_done": 1,
+                "verification": [],
+                "escalations": [],
+                "dw_ids": list(dw_ids),
+            },
+        )
+
+    return effect
+
+
+def bundle_review_effect(paths: ProjectPaths, name: str, clean: bool = True):
+    """Simulate a code-review session over a bundle spec (no sprint sync)."""
+
+    def effect(spec: SessionSpec) -> SessionResult:
+        if clean:
+            sp = bundle_spec_path(paths, name)
+            write_spec(sp, "done", _spec_baseline(sp))
+        return SessionResult(
+            status="completed",
+            result_json={
+                "workflow": "code-review",
+                "clean": clean,
+                "patched": 0,
+                "deferred": 0,
+                "dismissed": 0,
+                "escalations": [],
+            },
+        )
+
+    return effect

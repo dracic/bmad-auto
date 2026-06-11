@@ -14,6 +14,9 @@ class Phase(StrEnum):
     REVIEW_RUNNING = "review-running"
     REVIEW_VERIFY = "review-verify"
     COMMITTING = "committing"
+    # sweep-only: the triage session classifying open deferred-work entries
+    TRIAGE_RUNNING = "triage-running"
+    TRIAGE_VERIFY = "triage-verify"
     DONE = "done"
     DEFERRED = "deferred"
     ESCALATED = "escalated"
@@ -122,6 +125,10 @@ class StoryTask:
     spec_file: str | None = None
     commit_sha: str | None = None
     defer_reason: str | None = None
+    # sweep bundles only: the deferred-work ids this task closes and the
+    # rendered intent file handed to dev sessions
+    dw_ids: list[str] = field(default_factory=list)
+    bundle_file: str | None = None
     sessions: list[SessionRecord] = field(default_factory=list)
     tokens: TokenUsage = field(default_factory=TokenUsage)
 
@@ -145,6 +152,8 @@ class StoryTask:
             "spec_file": self.spec_file,
             "commit_sha": self.commit_sha,
             "defer_reason": self.defer_reason,
+            "dw_ids": self.dw_ids,
+            "bundle_file": self.bundle_file,
             "sessions": [s.to_dict() for s in self.sessions],
             "tokens": self.tokens.to_dict(),
         }
@@ -161,6 +170,8 @@ class StoryTask:
             spec_file=d.get("spec_file"),
             commit_sha=d.get("commit_sha"),
             defer_reason=d.get("defer_reason"),
+            dw_ids=[str(i) for i in d.get("dw_ids", [])],
+            bundle_file=d.get("bundle_file"),
             sessions=[SessionRecord.from_dict(s) for s in d.get("sessions", [])],
             tokens=TokenUsage.from_dict(d.get("tokens", {})),
         )
@@ -177,6 +188,10 @@ class RunState:
     paused_stage: str | None = None
     paused_story_key: str | None = None
     finished: bool = False
+    run_type: str = "story"  # "story" | "sweep" — resume/status dispatch on it
+    # auto-sweep triggers already fired this run (e.g. "epic-1", "run-end");
+    # guards re-fire on resume
+    sweeps_triggered: list[str] = field(default_factory=list)
     tasks: dict[str, StoryTask] = field(default_factory=dict)
 
     @property
@@ -203,6 +218,8 @@ class RunState:
             "paused_stage": self.paused_stage,
             "paused_story_key": self.paused_story_key,
             "finished": self.finished,
+            "run_type": self.run_type,
+            "sweeps_triggered": self.sweeps_triggered,
             "tasks": {k: t.to_dict() for k, t in self.tasks.items()},
         }
 
@@ -218,5 +235,7 @@ class RunState:
             paused_stage=d.get("paused_stage"),
             paused_story_key=d.get("paused_story_key"),
             finished=bool(d.get("finished", False)),
+            run_type=str(d.get("run_type", "story")),
+            sweeps_triggered=[str(s) for s in d.get("sweeps_triggered", [])],
             tasks={k: StoryTask.from_dict(t) for k, t in d.get("tasks", {}).items()},
         )
