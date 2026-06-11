@@ -56,6 +56,16 @@ def test_zero_budget_rejected(tmp_path):
         policy.load(p)
 
 
+def test_cache_read_weight_default_and_override(tmp_path):
+    assert policy.load(None).limits.cache_read_weight == 0.1
+    p = tmp_path / "policy.toml"
+    p.write_text("[limits]\ncache_read_weight = 1.0\n")
+    assert policy.load(p).limits.cache_read_weight == 1.0
+    p.write_text("[limits]\ncache_read_weight = 1.5\n")
+    with pytest.raises(policy.PolicyError, match="cache_read_weight"):
+        policy.load(p)
+
+
 def test_template_parses():
     import tomllib
 

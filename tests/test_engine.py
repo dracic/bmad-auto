@@ -55,6 +55,70 @@ def resume_engine(project, engine, script, policy=None) -> tuple[Engine, MockAda
     return new_engine, adapter
 
 
+def test_token_budget_discounts_cache_reads(project):
+    """Raw totals dominated by cache reads must not trip the budget; the
+    weighted total (cache reads at 0.1x) is what's checked."""
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    # per session: raw = 620k (would bust 1.2M over 2 sessions), weighted = 80k
+    usage = TokenUsage(input_tokens=15_000, output_tokens=5_000, cache_read_tokens=600_000)
+    run_dir = project.project / ".automator" / "runs" / "test-run"
+    adapter = MockAdapter(
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+        usage_per_session=usage,
+    )
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        limits=LimitsPolicy(max_tokens_per_story=1_200_000),
+    )
+    engine = Engine(
+        paths=project,
+        policy=policy,
+        adapter=adapter,
+        run_dir=run_dir,
+        journal=Journal(run_dir),
+        state=RunState(run_id="test-run", project=str(project.project), started_at="now"),
+    )
+    summary = engine.run()
+
+    assert summary.done == 1
+    assert summary.total_tokens == 2 * 620_000  # display stays raw
+    journal_text = (run_dir / "journal.jsonl").read_text()
+    assert "token-budget-exceeded" not in journal_text
+
+
+def test_token_budget_exceeded_journals_weighted(project):
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    usage = TokenUsage(input_tokens=15_000, output_tokens=5_000, cache_read_tokens=600_000)
+    run_dir = project.project / ".automator" / "runs" / "test-run"
+    adapter = MockAdapter(
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+        usage_per_session=usage,
+    )
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        limits=LimitsPolicy(max_tokens_per_story=100_000),  # < 2 x 80k weighted
+    )
+    engine = Engine(
+        paths=project,
+        policy=policy,
+        adapter=adapter,
+        run_dir=run_dir,
+        journal=Journal(run_dir),
+        state=RunState(run_id="test-run", project=str(project.project), started_at="now"),
+    )
+    engine.run()
+
+    entries = [
+        line
+        for line in (run_dir / "journal.jsonl").read_text().splitlines()
+        if "token-budget-exceeded" in line
+    ]
+    assert len(entries) == 1
+    assert '"weighted": 160000' in entries[0]
+
+
 def test_happy_path(project):
     write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
     engine, adapter = make_engine(

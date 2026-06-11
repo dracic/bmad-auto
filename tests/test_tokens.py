@@ -1,6 +1,16 @@
 import json
 
+from automator.model import TokenUsage
 from automator.tokens import read_usage, tally, tally_codex_rollout, tally_gemini_chat
+
+
+def test_weighted_total():
+    usage = TokenUsage(
+        input_tokens=100, output_tokens=50, cache_read_tokens=1000, cache_creation_tokens=10
+    )
+    assert usage.weighted_total(0.1) == 100 + 50 + 10 + 100
+    assert usage.weighted_total(1.0) == usage.total
+    assert usage.weighted_total(0.0) == 160
 
 
 def test_tally_mixed_shapes(tmp_path):

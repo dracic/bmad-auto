@@ -29,6 +29,8 @@ class LimitsPolicy:
     session_timeout_min: int = 45
     stop_without_result_nudges: int = 1
     max_tokens_per_story: int = 2_000_000
+    # weight of cache-read tokens in the budget check (1.0 = count raw)
+    cache_read_weight: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -109,9 +111,16 @@ def load(path: Path | None) -> Policy:
         max_tokens_per_story=int(
             limits_d.get("max_tokens_per_story", LimitsPolicy.max_tokens_per_story)
         ),
+        cache_read_weight=float(
+            limits_d.get("cache_read_weight", LimitsPolicy.cache_read_weight)
+        ),
     )
     if limits.max_review_cycles < 1 or limits.max_dev_attempts < 1:
         raise PolicyError("limits.max_review_cycles and limits.max_dev_attempts must be >= 1")
+    if not 0.0 <= limits.cache_read_weight <= 1.0:
+        raise PolicyError(
+            f"limits.cache_read_weight must be between 0 and 1: got {limits.cache_read_weight}"
+        )
 
     verify = VerifyPolicy(commands=tuple(str(c) for c in verify_d.get("commands", ())))
     notify = NotifyPolicy(
@@ -141,6 +150,7 @@ max_dev_attempts = 2
 session_timeout_min = 45
 stop_without_result_nudges = 1
 max_tokens_per_story = 2000000
+cache_read_weight = 0.1      # cache reads bill at ~0.1x input on all vendors; 1.0 = count raw
 
 [verify]
 # Deterministic gates run by the orchestrator after a clean review, before commit.

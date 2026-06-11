@@ -91,6 +91,7 @@ max_review_cycles = 3
 max_dev_attempts = 2
 session_timeout_min = 45
 max_tokens_per_story = 2000000
+cache_read_weight = 0.1    # cache reads bill at ~0.1x input everywhere; 1.0 = count raw
 
 [verify]
 commands = ["pytest -q", "ruff check ."]
@@ -131,9 +132,11 @@ TOML in `automator/data/profiles/`:
 | `codex` | supported, E2E-verified | Codex ≥ 0.139. No slash expansion in the initial prompt — the profile renders `$skill-name` mentions (plus a "use subagents as needed" nudge) instead. No SessionEnd hook; window-death fallback covers crashes. |
 | `gemini` | supported, E2E-verified | Gemini CLI ≥ 0.46 (hooks on by default since then). Launches with `-i` to stay interactive; `AfterAgent` maps to canonical Stop. Usage parser validated against real chat logs. |
 
-Heads-up on budgets: both Codex and Gemini report large cache-read counts
-(~0.9–1.8M on a trivial story), and `limits.max_tokens_per_story` counts
-them — size the budget accordingly.
+On budgets: agentic sessions are dominated by cache reads (80–90%+ of raw
+tokens), which every supported vendor bills at ~0.1x base input. The
+`max_tokens_per_story` check therefore uses a cost-weighted total — cache
+reads count at `limits.cache_read_weight` (default 0.1) — while displayed
+totals stay raw. Set the weight to 1.0 to budget raw tokens.
 
 Shared prerequisites: the BMAD skills must be present in `.agents/skills/`
 (all three CLIs read it), and each CLI must have been run once interactively

@@ -305,9 +305,13 @@ class Engine:
         advance(task, Phase.DONE)
         self.journal.append("story-done", story_key=task.story_key, commit=task.commit_sha)
         self._save()
-        if task.tokens.total > self.policy.limits.max_tokens_per_story:
+        weighted = task.tokens.weighted_total(self.policy.limits.cache_read_weight)
+        if weighted > self.policy.limits.max_tokens_per_story:
             self.journal.append(
-                "token-budget-exceeded", story_key=task.story_key, total=task.tokens.total
+                "token-budget-exceeded",
+                story_key=task.story_key,
+                weighted=weighted,
+                total=task.tokens.total,
             )
 
     # ------------------------------------------------------------- helpers

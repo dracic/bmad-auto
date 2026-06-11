@@ -50,6 +50,17 @@ class TokenUsage:
             + self.cache_creation_tokens
         )
 
+    def weighted_total(self, cache_read_weight: float) -> int:
+        """Cost-proportional total: cache reads are billed at ~0.1x base input
+        on all supported vendors (Anthropic/OpenAI/Gemini, June 2026), so raw
+        totals mostly measure context re-reads; the budget discounts them."""
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_tokens
+            + round(self.cache_read_tokens * cache_read_weight)
+        )
+
     def to_dict(self) -> dict[str, int]:
         return {
             "input_tokens": self.input_tokens,
