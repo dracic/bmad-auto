@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 
 from conftest import install_bmad_config, write_sprint
-from textual.widgets import Checkbox, DataTable, Input, RichLog
+from textual.widgets import Checkbox, DataTable, Input, RichLog, TabbedContent
 
 from automator.journal import Journal, save_state
 from automator.model import Phase, RunState, StoryTask
@@ -149,6 +149,35 @@ async def test_journal_pane_updates_after_poll(project):
 
         await until(pilot, has_line)
         assert any("1-2-search" in strip.text for strip in journal.lines)
+
+
+async def test_log_pane_shows_emulated_content(project):
+    from test_tui_data import ink_stream
+
+    root = project.project
+    run_dir = make_run(root, "20260611-100000-aaaa", alive=True)
+    (run_dir / "logs").mkdir()
+    (run_dir / "logs" / "story-1.log").write_bytes(ink_stream())
+    Journal(run_dir).append("session-start", task_id="story-1")
+    app = BmadAutoApp(root)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        await until(pilot, lambda: screen.selected_run_id == "20260611-100000-aaaa")
+        # a hidden RichLog defers all writes until it has a size — show the tab
+        screen.query_one("#tabs", TabbedContent).active = "tab-log"
+        await pilot.pause()
+        screen._tick(force_rescan=False)  # manual poll, no 1s wait
+        log = screen.query_one("#log", RichLog)
+
+        def has_final_line() -> bool:
+            return any("done in 3s" in strip.text for strip in log.lines)
+
+        await until(pilot, has_final_line)
+        text = "\n".join(strip.text for strip in log.lines)
+        assert "— story-1.log —" in text
+        assert "thinking" not in text  # repaint frames collapsed away
+        assert "\x1b" not in text
 
 
 async def test_sprint_tab_shows_counts(project):

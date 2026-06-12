@@ -56,7 +56,7 @@ class _PollContext:
         self.watcher = data.RunWatcher(run_dir)
         self.journal = data.JournalTail(run_dir)
         self.entries: list[dict[str, Any]] = []
-        self.log: data.LogTail | None = None
+        self.log: data.LogView | None = None
         self.log_task: str | None = None
         self.attention_seen = 0
         self.first_poll = True
@@ -76,7 +76,7 @@ class _Snapshot:
     new_entries: list[dict[str, Any]] = field(default_factory=list)
     log_task: str | None = None
     log_reset: bool = False
-    new_log: str = ""
+    log_lines: Text | None = None  # full re-render; None = unchanged this tick
     attention_reset: bool = False
     new_attention: str = ""
     toast_attention: bool = False
@@ -212,12 +212,12 @@ class DashboardScreen(Screen[None]):
             if task != ctx.log_task:
                 ctx.log_task = task
                 ctx.log = (
-                    data.LogTail(ctx.run_dir / data.LOGS_DIR / f"{task}.log") if task else None
+                    data.LogView(ctx.run_dir / data.LOGS_DIR / f"{task}.log") if task else None
                 )
                 snap.log_reset = True
             snap.log_task = task
-            if ctx.log is not None:
-                snap.new_log = ctx.log.read_new()
+            if ctx.log is not None and (ctx.log.read_new() or snap.log_reset):
+                snap.log_lines = ctx.log.render()
             attention = ctx.watcher.attention()
             if len(attention) < ctx.attention_seen:
                 snap.attention_reset = True
@@ -262,12 +262,17 @@ class DashboardScreen(Screen[None]):
             journal.write(journal_line(entry))
 
         log = self.query_one("#log", RichLog)
-        if snap.log_reset:
+        if snap.log_reset or snap.log_lines is not None:
+            # Cursor-up repaints rewrite earlier content, so the pane is a
+            # full re-render, not an append. Content above the live screen is
+            # stable history, so preserving scroll_y keeps a scrolled-up user
+            # anchored; only follow the tail if they were already at it.
+            at_end = log.is_vertical_scroll_end or snap.log_reset
             log.clear()
             if snap.log_task:
-                log.write(Text(f"— {snap.log_task}.log —", style="dim"))
-        if snap.new_log:
-            log.write(Text.from_ansi(snap.new_log.rstrip("\n")))
+                log.write(Text(f"— {snap.log_task}.log —", style="dim"), scroll_end=False)
+            if snap.log_lines is not None and snap.log_lines.plain:
+                log.write(snap.log_lines, scroll_end=at_end)
 
         attention = self.query_one("#attention", RichLog)
         if snap.attention_reset:

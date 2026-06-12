@@ -196,31 +196,103 @@ def test_journal_tail_skips_unparseable_lines(tmp_path):
     assert [e["kind"] for e in tail.read_new()] == ["run-start"]
 
 
-# ------------------------------------------------------------------ LogTail
+# ------------------------------------------------------------------ LogView
 
 
-def test_log_tail_first_read_seeks_to_tail(tmp_path):
+def ink_stream() -> bytes:
+    """Two real lines, a spinner repainted in place, then a final replace —
+    the shape an ink-style interactive CLI leaves in a pipe-pane capture."""
+    out = b"line one\r\nline two\r\n"
+    out += "⠋ thinking\r\n".encode()
+    for glyph in "⠙⠹⠸":
+        out += b"\x1b[1A\x1b[2K" + f"{glyph} thinking\r\n".encode()
+    out += b"\x1b[1A\x1b[2Kdone in 3s\r\n"
+    return out
+
+
+def test_log_view_collapses_repaints(tmp_path):
     path = tmp_path / "task.log"
-    path.write_bytes(b"x" * 100_000 + b"THE-END")
-    tail = data.LogTail(path, max_bytes=1024)
-    first = tail.read_new()
-    assert len(first) == 1024
-    assert first.endswith("THE-END")
+    path.write_bytes(ink_stream())
+    view = data.LogView(path)
+    assert view.read_new() is True
+    plain = view.render().plain
+    assert plain.count("line one") == 1
+    assert plain.count("line two") == 1
+    assert "done in 3s" in plain
+    assert "thinking" not in plain
+    assert "\x1b" not in plain
+
+
+def test_log_view_first_read_seeks_to_tail(tmp_path):
+    path = tmp_path / "task.log"
+    path.write_bytes(b"filler\r\n" * 12_000 + b"THE-END\r\n")
+    view = data.LogView(path, max_bytes=1024)
+    assert view.read_new() is True
+    assert view.render().plain.endswith("THE-END")
 
     with path.open("ab") as f:
-        f.write(b"more output")
-    assert tail.read_new() == "more output"
-    assert tail.read_new() == ""
+        f.write(b"more output\r\n")
+    assert view.read_new() is True
+    assert view.render().plain.endswith("more output")
+    assert view.read_new() is False
 
 
-def test_log_tail_missing_file_and_truncation(tmp_path):
+def test_log_view_missing_file(tmp_path):
+    view = data.LogView(tmp_path / "task.log")
+    assert view.read_new() is False
+    assert view.render().plain == ""
+
+
+def test_log_view_truncation_resets_emulator(tmp_path):
     path = tmp_path / "task.log"
-    tail = data.LogTail(path)
-    assert tail.read_new() == ""
-    path.write_text("hello ")
-    assert tail.read_new() == "hello "
-    path.write_text("anew")  # shrank: rewritten log
-    assert tail.read_new() == "anew"
+    path.write_bytes(b"hello\r\n")
+    view = data.LogView(path)
+    assert view.read_new() is True
+    assert "hello" in view.render().plain
+
+    path.write_bytes(b"anew\r\n")  # shrank: rewritten log
+    assert view.read_new() is True
+    plain = view.render().plain
+    assert "anew" in plain
+    assert "hello" not in plain
+
+
+def test_log_view_split_escape_across_reads(tmp_path):
+    path = tmp_path / "task.log"
+    path.write_bytes(b"hello\r\n\x1b[1")
+    view = data.LogView(path)
+    assert view.read_new() is True
+    with path.open("ab") as f:
+        f.write(b"A\x1b[2Kbye\r\n")
+    assert view.read_new() is True
+    plain = view.render().plain
+    assert "bye" in plain
+    assert "hello" not in plain
+    assert "\x1b" not in plain
+
+
+def test_log_view_styles(tmp_path):
+    path = tmp_path / "task.log"
+    path.write_bytes(b"\x1b[31mred\x1b[0m plain \x1b[38;5;196mX\r\n")
+    view = data.LogView(path)
+    assert view.read_new() is True
+    line = view.render()
+    styled = {}
+    for start, end, style in line.spans:
+        if style.color is not None:
+            styled[line.plain[start:end]] = style.color
+    assert styled["red"].name == "red"
+    assert styled["X"].name == "#ff0000"
+
+
+def test_log_view_history_beyond_screen(tmp_path):
+    path = tmp_path / "task.log"
+    path.write_bytes(b"".join(f"row {i:03d}\r\n".encode() for i in range(1, 81)))
+    view = data.LogView(path)
+    assert view.read_new() is True
+    plain = view.render().plain
+    assert "row 001" in plain  # scrolled into history, still rendered
+    assert "row 080" in plain
 
 
 # ------------------------------------------------------------ active task id
