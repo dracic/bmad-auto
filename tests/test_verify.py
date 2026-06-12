@@ -55,6 +55,19 @@ def test_verify_dev_lying_baseline(project):
     assert not out.ok and "does not match" in out.reason
 
 
+def test_verify_dev_short_hash_baseline(project):
+    # Sessions sometimes write `git rev-parse --short HEAD`; an abbreviation
+    # of the recorded baseline is the same commit, not a lie.
+    write_sprint(project, {"1-1-a": "review"})
+    task = make_task(project)
+    sp = spec_path(project, "1-1-a")
+    write_spec(sp, "in-review", task.baseline_commit[:7])
+    (project.project / "src.txt").write_text("changed\n")
+
+    out = verify.verify_dev(task, project, dev_result(sp))
+    assert out.ok
+
+
 def test_verify_dev_no_changes(project):
     # Spec claims NO_VCS baseline (skips the mismatch check); everything is
     # committed, so there are no changes since the orchestrator's baseline.

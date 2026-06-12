@@ -78,6 +78,14 @@ def worktree_clean(repo: Path) -> bool:
     return out == ""
 
 
+def same_commit(a: str, b: str) -> bool:
+    """Hash equality tolerant of abbreviated forms (>= 7 chars, git's default
+    --short length); sessions sometimes report `git rev-parse --short HEAD`."""
+    if len(a) < 7 or len(b) < 7:
+        return a == b
+    return a.startswith(b) or b.startswith(a)
+
+
 def has_changes_since(repo: Path, baseline: str) -> bool:
     """True if tracked changes since baseline OR untracked files exist."""
     rc, _ = _git(repo, "diff", "--quiet", baseline, "--")
@@ -143,7 +151,7 @@ def verify_dev(
 
     claimed_baseline = str(fm.get("baseline_commit", "")).strip()
     if task.baseline_commit and claimed_baseline not in ("", "NO_VCS"):
-        if claimed_baseline != task.baseline_commit:
+        if not same_commit(claimed_baseline, task.baseline_commit):
             return VerifyOutcome.retry(
                 f"spec baseline_commit {claimed_baseline[:12]} does not match "
                 f"orchestrator-recorded baseline {task.baseline_commit[:12]}"
@@ -186,7 +194,7 @@ def verify_dev_bundle(
 
     claimed_baseline = str(fm.get("baseline_commit", "")).strip()
     if task.baseline_commit and claimed_baseline not in ("", "NO_VCS"):
-        if claimed_baseline != task.baseline_commit:
+        if not same_commit(claimed_baseline, task.baseline_commit):
             return VerifyOutcome.retry(
                 f"spec baseline_commit {claimed_baseline[:12]} does not match "
                 f"orchestrator-recorded baseline {task.baseline_commit[:12]}"
