@@ -5,3 +5,5 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 .automator/runs/
+.claude/
+.agents/

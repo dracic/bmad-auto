@@ -44,5 +44,9 @@ def test_installed_skill_matches_module(skill: str, tree: str) -> None:
     canonical = REPO / "module" / skill
     installed = REPO / tree / skill
     assert canonical.is_dir(), f"canonical skill missing: {canonical}"
+    # .claude/ and .agents/ are dev-workspace trees, untracked and absent in CI
+    # (gitignored). When present locally this still guards drift; otherwise skip.
+    if not (REPO / tree).is_dir():
+        pytest.skip(f"{tree} not present (dev-workspace only)")
     assert installed.is_dir(), f"skill not installed in {tree}: {installed}"
     _assert_identical(canonical, installed)
