@@ -359,7 +359,7 @@ class Engine:
         return verify.verify_review(task, self.paths, self.policy)
 
     def _review_prompt(self, task: StoryTask) -> str:
-        return f"/bmad-code-review {task.spec_file}"
+        return f"/bmad-auto-review {task.spec_file}"
 
     def _commit_message(self, task: StoryTask) -> str:
         return f"story {task.story_key}: implemented and reviewed via bmad-auto"
@@ -406,7 +406,7 @@ class Engine:
         return result
 
     def _dev_prompt(self, task: StoryTask, feedback: Path | None) -> str:
-        prompt = f"/bmad-quick-dev {task.story_key}"
+        prompt = f"/bmad-auto-dev {task.story_key}"
         if feedback is not None:
             prompt += f" --feedback {feedback}"
         return prompt

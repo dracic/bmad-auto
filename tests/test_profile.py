@@ -39,10 +39,10 @@ def test_unknown_profile_raises():
 
 def test_render_prompt_passthrough_and_template():
     claude = get_profile("claude")
-    assert claude.render_prompt("/bmad-quick-dev 1-1-a") == "/bmad-quick-dev 1-1-a"
+    assert claude.render_prompt("/bmad-auto-dev 1-1-a") == "/bmad-auto-dev 1-1-a"
     codex = get_profile("codex")
-    assert codex.render_prompt("/bmad-quick-dev 1-1-a") == (
-        "Use the $bmad-quick-dev skill now, and use subagents as needed: 1-1-a"
+    assert codex.render_prompt("/bmad-auto-dev 1-1-a") == (
+        "Use the $bmad-auto-dev skill now, and use subagents as needed: 1-1-a"
     )
     # non-slash prompts pass through {prompt}; {skill}/{args} degrade gracefully
     assert claude.render_prompt("just do it") == "just do it"

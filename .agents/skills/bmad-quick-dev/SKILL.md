@@ -3,14 +3,11 @@ name: bmad-quick-dev
 description: 'Implements any user intent, requirement, story, bug fix or change request by producing clean working code artifacts that follow the project''s existing architecture, patterns and conventions. Use when the user wants to build, fix, tweak, refactor, add or modify any code, component or feature.'
 ---
 
-# Quick Dev Workflow
+# Quick Dev New Preview Workflow
 
 **Goal:** Turn user intent into a hardened, reviewable artifact.
 
 **CRITICAL:** If a step says "read fully and follow step-XX", you read and follow step-XX. No exceptions.
-
-Subagents, when the capability is available, are an important part of this workflow. Use them as directed by the workflow steps.
-If you need an explicit user instruction to run them, ask once now for the whole workflow run.
 
 ## READY FOR DEVELOPMENT STANDARD
 
@@ -23,12 +20,12 @@ A specification is "Ready for Development" when:
 
 ## SCOPE STANDARD
 
-A specification should target a **single user-facing goal** within **1,500–4,000 tokens**:
+A specification should target a **single user-facing goal** within **900–1600 tokens**:
 
 - **Single goal**: One cohesive feature, even if it spans multiple layers/files. Multi-goal means >=2 **top-level independent shippable deliverables** — each could be reviewed, tested, and merged as a separate PR without breaking the others. Never count surface verbs, "and" conjunctions, or noun phrases. Never split cross-layer implementation details inside one user goal.
   - Split: "add dark mode toggle AND refactor auth to JWT AND build admin dashboard"
   - Don't split: "add validation and display errors" / "support drag-and-drop AND paste AND retry"
-- **1,500–4,000 tokens**: Sized for one focused implementation context. Below 1,500 risks ambiguity — boundaries and acceptance criteria get vague. Above 4,000 the spec is usually compensating for scope creep, not adding clarity: modern 200k–1M-token-context models tolerate much larger specs, so the ceiling guards spec discipline (one goal, sharp ACs), not context overflow. A bloated spec dilutes the acceptance criteria a reviewer must audit against.
+- **900–1600 tokens**: Optimal range for LLM consumption. Below 900 risks ambiguity; above 1600 risks context-rot in implementation agents.
 - **Neither limit is a gate.** Both are proposals with user override.
 
 ## Conventions
@@ -39,12 +36,6 @@ A specification should target a **single user-facing goal** within **1,500–4,0
 - `{skill-name}` resolves to the skill directory's basename.
 
 ## On Activation
-
-### Step 0: Automation Check
-
-Run: `echo "${BMAD_AUTO_MODE:-}"`
-
-If the output is `1`, set `{auto_mode}` = true and read `./automation-mode.md` fully — treat its rules as persistent facts that override conversational behavior for the entire run (skip the greeting in Step 5, never halt for input). Otherwise set `{auto_mode}` = false and ignore that file.
 
 ### Step 1: Resolve the Workflow Block
 
@@ -88,7 +79,7 @@ Greet `{user_name}`, speaking in `{communication_language}`.
 
 Execute each entry in `{workflow.activation_steps_append}` in order.
 
-Activation is complete. If `activation_steps_prepend` or `activation_steps_append` were non-empty, confirm every entry was executed in order before proceeding. Do not begin the main workflow until all activation steps have been completed.
+Activation is complete. Begin the workflow below.
 
 ## WORKFLOW ARCHITECTURE
 
@@ -104,7 +95,7 @@ This uses **step-file architecture** for disciplined execution:
 
 1. **READ COMPLETELY**: Read the entire step file before acting
 2. **FOLLOW SEQUENCE**: Execute sections in order
-3. **WAIT FOR INPUT**: Halt at checkpoints and wait for human — unless `{auto_mode}`, where each halt resolves via the decision table in `automation-mode.md`
+3. **WAIT FOR INPUT**: Halt at checkpoints and wait for human
 4. **LOAD NEXT**: When directed, read fully and follow the next step file
 
 ### Critical Rules (NO EXCEPTIONS)
@@ -113,7 +104,7 @@ This uses **step-file architecture** for disciplined execution:
 - **ALWAYS** read entire step file before execution
 - **NEVER** skip steps or optimize the sequence
 - **ALWAYS** follow the exact instructions in the step file
-- **ALWAYS** halt at checkpoints and wait for human input — in `{auto_mode}` the automation-mode.md decision table IS the human input; apply it instead of waiting
+- **ALWAYS** halt at checkpoints and wait for human input
 
 ## FIRST STEP
 

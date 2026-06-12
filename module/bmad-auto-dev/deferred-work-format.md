@@ -1,8 +1,8 @@
 # Deferred Work Format
 
 Canonical entry format for `{implementation_artifacts}/deferred-work.md`.
-Used by quick-dev (multi-goal splits, token splits, review defers) and
-code-review (defer findings). The file is append-only — never rewrite or
+Used by bmad-auto-dev (multi-goal splits, token splits, review defers) and
+bmad-auto-review (defer findings). The file is append-only — never rewrite or
 delete existing entries.
 
 ## Before appending: dedupe check
@@ -24,7 +24,7 @@ highest existing number. One entry per deferred item:
 ```markdown
 ### DW-<seq>: <one-line title>
 
-origin: <workflow + artifact + date, e.g. "quick-dev split of spec-3-2-digest.md, 2026-06-12">
+origin: <workflow + artifact + date, e.g. "bmad-auto-dev split of spec-3-2-digest.md, 2026-06-12">
 location: <file:line or component, or "n/a" for deferred goals>
 reason: <why this was deferred rather than done now, one or two sentences>
 status: open

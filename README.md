@@ -32,8 +32,9 @@ screen-scraping tmux panes. Here:
 - Python 3.11+, tmux, and a supported coding CLI (`claude` by default; `codex`
   and `gemini` via profiles — see "Other coding CLIs")
 - A BMAD v6 project (`_bmad/bmm/config.yaml`, sprint-status.yaml from
-  `bmad-sprint-planning`) with the automation-mode-enabled skills from this
-  repo (`bmad-quick-dev`, `bmad-code-review`)
+  `bmad-sprint-planning`) with the automator skill module from this repo
+  installed (`bmad-auto-dev`, `bmad-auto-review`, `bmad-auto-sweep` — see
+  "Installing the skill module"). Standard BMAD skills stay untouched.
 
 ## Quick start
 
@@ -57,19 +58,52 @@ once (`claude`) and accept the workspace-trust dialog (and any hooks-approval
 prompt) before `bmad-auto run` — spawned sessions cannot answer first-run
 dialogs, and a pending dialog reads as a session timeout to the orchestrator.
 
+## Installing the skill module
+
+The orchestrator drives its own forks of the BMAD dev/review skills — your
+standard BMAD install is never modified. The module lives in `module/`
+(BMAD module code `bauto`) and contains four skills:
+
+| Skill | Role |
+|---|---|
+| `bmad-auto-dev` | unattended implementation (fork of `bmad-quick-dev`) |
+| `bmad-auto-review` | unattended adversarial review (fork of `bmad-code-review`) |
+| `bmad-auto-sweep` | deferred-work ledger triage (automation-only) |
+| `bmad-auto-setup` | registers the module in `_bmad/` config + help |
+
+Install into a target project by copying the skill folders into the trees the
+CLIs read (`.claude/skills/` for Claude Code, `.agents/skills/` for
+codex/gemini), then optionally running the setup skill to register the module:
+
+```bash
+cp -r module/bmad-auto-* /path/to/project/.claude/skills/
+cp -r module/bmad-auto-* /path/to/project/.agents/skills/   # codex/gemini only
+claude "/bmad-auto-setup accept all defaults"               # optional registration
+```
+
+The skills must be installed together: `bmad-auto-review` writes deferred-work
+entries per `bmad-auto-dev/deferred-work-format.md` (sibling skill directory).
+If you carry `_bmad/custom/bmad-quick-dev.toml` or `bmad-code-review.toml`
+customization overrides, duplicate them as `bmad-auto-dev.toml` /
+`bmad-auto-review.toml` — overrides are keyed by skill directory name.
+
+To pull in upstream BMAD improvements, diff the upstream skill against the
+fork (`diff -r <bmad-install>/bmad-quick-dev module/bmad-auto-dev`) and merge
+manually; the forks keep the upstream file structure to make this easy.
+
 ## How a story flows
 
 ```
 sprint-status.yaml: 1-2-account-mgmt: ready-for-dev
   │
-  ├─ DEV     tmux window: claude "/bmad-quick-dev 1-2-account-mgmt"
-  │          quick-dev (automation mode): plans a 1.5–4k-token spec,
+  ├─ DEV     tmux window: claude "/bmad-auto-dev 1-2-account-mgmt"
+  │          bmad-auto-dev: plans a 1.5–4k-token spec,
   │          auto-approves it, implements, syncs sprint → review,
   │          writes result.json … Stop hook signals the orchestrator
   ├─ VERIFY  spec exists · status in-review · baseline matches · diff non-empty
   │          · run [verify].commands (pytest, ruff…) — a broken build never
   │          reaches review; a failure spawns a fix session fed the output
-  ├─ REVIEW  fresh window: claude "/bmad-code-review <spec>"
+  ├─ REVIEW  fresh window: claude "/bmad-auto-review <spec>"
   │          static prefilter → 3 layers (Blind Hunter / Edge Case Hunter /
   │          Acceptance Auditor) → verify findings against code → triage →
   │          auto-apply patches → ledger → defer ambiguity → done when clean
@@ -96,7 +130,7 @@ of split-off goals, pre-existing review findings, and items deferred as
 ```
 bmad-auto sweep [--no-prompt] [--decisions-only] [--max-bundles N] [--dry-run]
   │
-  ├─ TRIAGE   fresh window: claude "/bmad-deferred-sweep"
+  ├─ TRIAGE   fresh window: claude "/bmad-auto-sweep"
   │           verifies EVERY open entry against the actual code (ledger
   │           statuses are unreliable) and returns a machine-validated
   │           partition: already-resolved (orchestrator closes them, with
@@ -106,8 +140,8 @@ bmad-auto sweep [--no-prompt] [--decisions-only] [--max-bundles N] [--dry-run]
   │           terminal (build / close / keep-open per option, with a
   │           recommendation); answers land in the ledger as `decision:`
   │           lines. Unattended runs skip this and leave decisions open.
-  └─ BUNDLES  each bundle runs the normal pipeline: quick-dev (--dw-bundle)
-              → code review → verify commands → commit. The review gate also
+  └─ BUNDLES  each bundle runs the normal pipeline: bmad-auto-dev (--dw-bundle)
+              → bmad-auto-review → verify commands → commit. The review gate also
               checks every bundle entry is `status: done` in the ledger.
 ```
 
@@ -189,7 +223,7 @@ model = ""                 # empty = CLI default
 # [adapter.review]
 # name = "codex"
 # model = "gpt-5-codex"
-# [adapter.triage]            # deferred-sweep triage stage
+# [adapter.triage]            # sweep triage stage
 # model = "opus"
 
 [sweep]
@@ -235,8 +269,9 @@ tokens), which every supported vendor bills at ~0.1x base input. The
 reads count at `limits.cache_read_weight` (default 0.1) — while displayed
 totals stay raw. Set the weight to 1.0 to budget raw tokens.
 
-Shared prerequisites: the BMAD skills must be present in `.agents/skills/`
-(all three CLIs read it), and each CLI must have been run once interactively
+Shared prerequisites: the `bmad-auto-*` skills must be present in
+`.agents/skills/` (codex and gemini read it; Claude Code reads
+`.claude/skills/` — see "Installing the skill module"), and each CLI must have been run once interactively
 in the project for auth/trust — `bmad-auto init --cli codex --cli gemini`
 registers the hook relay and prints the per-CLI first-run steps.
 

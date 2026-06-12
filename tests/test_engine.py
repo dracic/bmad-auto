@@ -141,7 +141,7 @@ def test_happy_path(project):
     assert summary.total_tokens == 30  # 2 sessions x 15
     assert [s.role for s in adapter.sessions] == ["dev", "review"]
     assert adapter.sessions[0].env["BMAD_AUTO_MODE"] == "1"
-    assert adapter.sessions[1].prompt.startswith("/bmad-code-review ")
+    assert adapter.sessions[1].prompt.startswith("/bmad-auto-review ")
 
 
 def test_per_stage_adapter_and_model_dispatch(project):

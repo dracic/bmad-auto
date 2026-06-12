@@ -12,7 +12,7 @@
 
 ## PRECONDITION
 
-Verify `{spec_file}` resolves to a non-empty path and the file exists on disk. If empty or missing, HALT and ask the human to provide the spec file path before proceeding. (`{auto_mode}`: escalate `CRITICAL` `missing-spec` per automation-mode.md instead.)
+Verify `{spec_file}` resolves to a non-empty path and the file exists on disk. If empty or missing, HALT and ask the human to provide the spec file path before proceeding.
 
 ## INSTRUCTIONS
 
@@ -38,6 +38,4 @@ Before leaving this step, verify every task in the `## Tasks & Acceptance` secti
 
 ## NEXT
 
-If `{auto_mode}`: read fully and follow `./step-auto-finalize.md` — review and commit belong to the orchestrator.
-
-Otherwise: read fully and follow `./step-04-review.md`
+Read fully and follow `./step-04-review.md`

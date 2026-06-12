@@ -9,9 +9,6 @@ description: 'Review code changes adversarially using parallel review layers (Bl
 
 **Your Role:** You are an elite code reviewer. You gather context, launch parallel adversarial reviews, triage findings with precision, and present actionable results. No noise, no filler.
 
-Subagents, when the capability is available, are an important part of this workflow. Use them as directed by the workflow steps.
-If you need an explicit user instruction to run them, ask once now for the whole workflow run.
-
 ## Conventions
 
 - Bare paths (e.g. `checklist.md`) resolve from the skill root.
@@ -20,12 +17,6 @@ If you need an explicit user instruction to run them, ask once now for the whole
 - `{skill-name}` resolves to the skill directory's basename.
 
 ## On Activation
-
-### Step 0: Automation Check
-
-Run: `echo "${BMAD_AUTO_MODE:-}"`
-
-If the output is `1`, set `{auto_mode}` = true and read `./automation-mode.md` fully — treat its rules as persistent facts that override conversational behavior for the entire run (skip the greeting in Step 5, never halt for input). Otherwise set `{auto_mode}` = false and ignore that file.
 
 ### Step 1: Resolve the Workflow Block
 
@@ -67,7 +58,7 @@ Greet `{user_name}`, speaking in `{communication_language}`.
 
 Execute each entry in `{workflow.activation_steps_append}` in order.
 
-Activation is complete. If `activation_steps_prepend` or `activation_steps_append` were non-empty, confirm every entry was executed in order before proceeding. Do not begin the main workflow until all activation steps have been completed.
+Activation is complete. Begin the workflow below.
 
 ## WORKFLOW ARCHITECTURE
 
@@ -83,7 +74,7 @@ This uses **step-file architecture** for disciplined execution:
 
 1. **READ COMPLETELY**: Read the entire step file before acting
 2. **FOLLOW SEQUENCE**: Execute sections in order
-3. **WAIT FOR INPUT**: Halt at checkpoints and wait for human — unless `{auto_mode}`, where each halt resolves via the rules in `automation-mode.md`
+3. **WAIT FOR INPUT**: Halt at checkpoints and wait for human
 4. **LOAD NEXT**: When directed, read fully and follow the next step file
 
 ### Critical Rules (NO EXCEPTIONS)
@@ -92,7 +83,7 @@ This uses **step-file architecture** for disciplined execution:
 - **ALWAYS** read entire step file before execution
 - **NEVER** skip steps or optimize the sequence
 - **ALWAYS** follow the exact instructions in the step file
-- **ALWAYS** halt at checkpoints and wait for human input — in `{auto_mode}` the automation-mode.md rules ARE the human input; apply them instead of waiting
+- **ALWAYS** halt at checkpoints and wait for human input
 
 ## FIRST STEP
 

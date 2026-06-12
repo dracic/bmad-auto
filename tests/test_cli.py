@@ -59,7 +59,7 @@ def test_sweep_dry_run_lists_open_entries(project, capsys):
     assert "1 open" in out
     assert "DW-1" in out and "DW-2" not in out
     triage_line = next(line for line in out.splitlines() if "triage:" in line)
-    assert "bmad-deferred-sweep" in triage_line
+    assert "bmad-auto-sweep" in triage_line
 
 
 def test_sweep_dry_run_renders_triage_adapter_from_policy(project, capsys):

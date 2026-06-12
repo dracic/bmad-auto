@@ -431,7 +431,7 @@ class SweepEngine(Engine):
             )
 
     def _triage_prompt(self, feedback: Path | None) -> str:
-        prompt = "/bmad-deferred-sweep"
+        prompt = "/bmad-auto-sweep"
         if feedback is not None:
             prompt += f" --feedback {feedback}"
         return prompt
@@ -569,7 +569,7 @@ class SweepEngine(Engine):
     # ------------------------------------------------------ override seams
 
     def _dev_prompt(self, task: StoryTask, feedback: Path | None) -> str:
-        prompt = f"/bmad-quick-dev --dw-bundle {task.bundle_file}"
+        prompt = f"/bmad-auto-dev --dw-bundle {task.bundle_file}"
         if feedback is not None:
             prompt += f" --feedback {feedback}"
         return prompt

@@ -231,8 +231,8 @@ def _dry_run(paths: bmadconfig.ProjectPaths, pol, args: argparse.Namespace) -> i
     print(f"would process {len(queue)} stories (gates={pol.gates.mode}):")
     for story in queue:
         print(f"\n  {story.key} (epic {story.epic}, status {story.status})")
-        print(f"    dev:    {render('dev', f'/bmad-quick-dev {story.key}')}")
-        print(f"    review: {render('review', '/bmad-code-review <spec from dev>')}")
+        print(f"    dev:    {render('dev', f'/bmad-auto-dev {story.key}')}")
+        print(f"    review: {render('review', '/bmad-auto-review <spec from dev>')}")
         print(f"    env:    BMAD_AUTO_MODE=1 BMAD_AUTO_STORY_KEY={story.key}")
     return 0
 
@@ -344,7 +344,7 @@ def _sweep_dry_run(paths: bmadconfig.ProjectPaths, pol) -> int:
         print(f"  {entry.id:8s} {entry.title}")
     if open_entries:
         print("a sweep would triage these in one LLM session, then run bundles")
-        print(f"  triage: {_render_invocation(pol, paths.project, 'triage', '/bmad-deferred-sweep')}")
+        print(f"  triage: {_render_invocation(pol, paths.project, 'triage', '/bmad-auto-sweep')}")
     return 0
 
 

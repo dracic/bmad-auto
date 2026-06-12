@@ -1,0 +1,14 @@
+code: bauto
+name: "BMAD Automator Skills"
+description: "Automation-mode skills driven by the bmad-auto orchestrator: unattended dev (bmad-auto-dev), adversarial review (bmad-auto-review), and deferred-work sweep triage (bmad-auto-sweep)"
+module_version: 1.0.0
+default_selected: false
+module_greeting: >
+  BMAD Automator skills installed. These skills are invoked by the bmad-auto
+  orchestrator (pip install bmad-automator; bmad-auto init/run/sweep) and must
+  be installed together — bmad-auto-review writes deferred-work entries per
+  bmad-auto-dev's deferred-work-format.md. They require the BMad Method (bmm)
+  module: _bmad/bmm/config.yaml and a sprint-status.yaml from
+  bmad-sprint-planning. If you have _bmad/custom/bmad-quick-dev.toml or
+  bmad-code-review.toml customization overrides, duplicate them as
+  bmad-auto-dev.toml / bmad-auto-review.toml.
