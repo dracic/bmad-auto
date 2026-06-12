@@ -261,7 +261,7 @@ class DashboardScreen(Screen[None]):
             self._pin_task = task
         self._tick(force_rescan=False)
 
-    def _scroll_log_to(self, line: int | None, attempts: int = 20) -> None:
+    def _scroll_log_to(self, line: int | None, attempts: int = 60) -> None:
         if line is None:
             self.notify("log is empty or not loaded yet", severity="warning")
             return
@@ -299,13 +299,10 @@ class DashboardScreen(Screen[None]):
         if force_rescan is None:
             force_rescan = self._tick_count % _RESCAN_EVERY == 0
             self._tick_count += 1
-        if self._poll_lock.locked():
-            # a worker is still running; launching now would just bail on the
-            # lock, so retry shortly instead of dropping this tick (a forced
-            # navigation tick would otherwise wait up to a full interval)
-            self.set_timer(0.1, lambda: self._tick(force_rescan))
-            return
-        # the pin is read here on the UI thread; ctx stays worker-owned
+        # the pin is read here on the UI thread; ctx stays worker-owned. If a
+        # worker is still mid-flight _poll bails on the lock; _pin_task and
+        # _pending_jump persist on the screen, so the next interval tick (≤1s)
+        # re-applies them — no extra rescheduling needed.
         self._poll(self._ctx, self._generation, force_rescan, self._pin_task)
 
     @work(thread=True, exclusive=True, group="poll")
