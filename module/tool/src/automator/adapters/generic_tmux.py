@@ -133,7 +133,14 @@ class GenericTmuxAdapter(CodingCLIAdapter):
             self.build_command(spec),
         )
         log_file = self.logs_dir / f"{spec.task_id}.log"
-        self._tmux("pipe-pane", "-t", window_id, "-o", f"cat >> {shlex.quote(str(log_file))}")
+        # A CLI that crashes on launch (bad args, instant auth failure) can take
+        # its window down before pipe-pane attaches, which races as "can't find
+        # window". That is not a setup failure -- the dead window is reported as
+        # a crash in wait_for_completion -- so tolerate it instead of raising.
+        try:
+            self._tmux("pipe-pane", "-t", window_id, "-o", f"cat >> {shlex.quote(str(log_file))}")
+        except TmuxError:
+            pass
         return SessionHandle(task_id=spec.task_id, native_id=window_id)
 
     def wait_for_completion(self, handle: SessionHandle, spec: SessionSpec) -> SessionResult:
