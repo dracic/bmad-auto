@@ -26,7 +26,7 @@ from .model import RunState
 from .runs import RUNS_DIR
 from .sweep import SweepEngine
 
-POLICY_FILE = Path(".automator") / "policy.toml"
+POLICY_FILE = policy_mod.POLICY_FILE
 
 
 def _project(args: argparse.Namespace) -> Path:

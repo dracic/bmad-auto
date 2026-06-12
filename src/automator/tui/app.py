@@ -3,7 +3,7 @@
 Observer/launcher only: the TUI never runs engines in-process. Run control
 (r/s/e) launches detached bmad-auto processes in the bmad-auto-ctl tmux
 session via tui.launch; validate and dry runs are captured into a modal.
-The g (settings) binding lands in phase 5 and currently just says so.
+The g binding opens the policy.toml settings editor.
 """
 
 from __future__ import annotations
@@ -17,9 +17,11 @@ from pathlib import Path
 from textual import work
 from textual.app import App, SuspendNotSupported
 from textual.binding import Binding
+from tomlkit.exceptions import ParseError
 
 from .. import runs, verify
 from ..journal import load_state
+from ..policy import POLICY_FILE
 from ..runs import RUNS_DIR
 from . import data, launch
 from .screens.dashboard import DashboardScreen
@@ -30,6 +32,8 @@ from .screens.modals import (
     StartSweepModal,
     TextOutputModal,
 )
+from .screens.settings_screen import SettingsScreen
+from .settings import PolicyDoc
 
 
 class BmadAutoApp(App[None]):
@@ -258,10 +262,14 @@ class BmadAutoApp(App[None]):
         self.call_from_thread(self.push_screen, TextOutputModal(title, rc, out))
 
     def action_settings(self) -> None:
-        self.notify(
-            "the settings editor lands in TUI phase 5 — not implemented yet",
-            severity="warning",
-        )
+        if isinstance(self.screen, SettingsScreen):
+            return
+        try:
+            doc = PolicyDoc.load(self.project / POLICY_FILE)
+        except ParseError as e:
+            self.notify(f"policy.toml is not valid TOML: {e}", severity="error")
+            return
+        self.push_screen(SettingsScreen(self.project, doc))
 
 
 def run_tui(project: Path) -> int:

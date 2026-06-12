@@ -184,13 +184,21 @@ def test_cli_tui_hint_without_textual(project, monkeypatch, capsys):
     assert "bmad-automator[tui]" in capsys.readouterr().err
 
 
-async def test_settings_binding_stubbed(project):
+async def test_settings_binding_opens_editor(project):
+    """g opens the settings screen (template-backed when no policy.toml) and
+    escape returns; editor behavior itself lives in test_tui_settings.py."""
+    from automator.tui.screens.settings_screen import SettingsScreen
+
     app = BmadAutoApp(project.project)
     async with app.run_test() as pilot:
         await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
         await pilot.press("g")
-        await until(pilot, lambda: len(app._notifications) > 0)
-        assert any("phase 5" in m for m in notifications(app))
+        await until(pilot, lambda: isinstance(app.screen, SettingsScreen))
+        await pilot.press("g")  # no double-push
+        await pilot.pause()
+        assert isinstance(app.screen, SettingsScreen)
+        await pilot.press("escape")
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
 
 
 # ------------------------------------------------------------- run control

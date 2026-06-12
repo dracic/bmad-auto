@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+POLICY_FILE = Path(".automator") / "policy.toml"
+
 GATE_MODES = {"none", "per-epic", "per-story-spec-approval"}
 RETRO_MODES = {"never", "notify", "auto"}
 SWEEP_AUTO_MODES = {"never", "per-epic", "run-end"}
