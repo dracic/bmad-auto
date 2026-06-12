@@ -3,8 +3,8 @@
 Everything the dashboard shows comes from the run-dir artifacts the engine
 already writes atomically: state.json (os.replace), journal.jsonl
 (append-only), logs/<task-id>.log, ATTENTION. This module never imports
-textual — it is plain stdlib + core modules, fully unit-testable, and the
-screens own the poll cadence.
+textual — it is plain stdlib + core modules + pyte/rich, fully unit-testable,
+and the screens own the poll cadence.
 
 All readers are stat-gated: parse results are cached while the file's
 (mtime_ns, size) is unchanged. Liveness is the exception — a dying engine
@@ -20,6 +20,10 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import pyte
+from rich.style import Style
+from rich.text import Text
 
 from .. import bmadconfig, sprintstatus
 from ..gates import ATTENTION_FILE
@@ -240,33 +244,154 @@ class JournalTail:
         return entries
 
 
-class LogTail:
-    """Incremental reader for a pane log. The first read seeks to the last
-    max_bytes so multi-MB logs are never slurped whole; later reads return
-    only new bytes. ANSI escapes pass through for the UI to render."""
+# Pane geometry mirrors adapters.generic_tmux PANE_COLUMNS/PANE_LINES (not
+# imported: that module drags in Policy/SignalWatcher, and this layer stays
+# a pure observer).
+_PANE_COLUMNS = 220
+_PANE_LINES = 50
+_HISTORY_LINES = 2000  # matches the dashboard RichLog max_lines
 
-    def __init__(self, path: Path, max_bytes: int = 65536):
+# pyte names SGR 33 "brown"; aixterm brights carry no underscore.
+_PYTE_COLOR_FIX = {"brown": "yellow", "brightbrown": "bright_yellow"}
+_HEX_DIGITS = set("0123456789abcdef")
+
+
+def _rich_color(value: str) -> str | None:
+    """pyte color -> rich color: 'default' (None), bare rrggbb hex
+    (256/truecolor), or a named ANSI color."""
+    if value == "default":
+        return None
+    if len(value) == 6 and set(value) <= _HEX_DIGITS:
+        return f"#{value}"
+    value = _PYTE_COLOR_FIX.get(value, value)
+    if value.startswith("bright"):
+        return "bright_" + value[6:]
+    return value
+
+
+_style_cache: dict[tuple, Style] = {}
+
+
+def _char_style(key: tuple) -> Style:
+    style = _style_cache.get(key)
+    if style is None:
+        fg, bg, bold, italics, underscore, strikethrough, reverse = key
+        style = _style_cache[key] = Style(
+            color=_rich_color(fg),
+            bgcolor=_rich_color(bg),
+            bold=bold or None,
+            italic=italics or None,
+            underline=underscore or None,
+            strike=strikethrough or None,
+            reverse=reverse or None,
+        )
+    return style
+
+
+def _render_row(row: dict) -> Text:
+    """One pyte buffer row (sparse col -> Char dict) -> styled Text. Trailing
+    default-background whitespace is trimmed; wide-char stub cells (data '')
+    concatenate away naturally."""
+    width = max(row, default=-1) + 1
+    while width:
+        ch = row[width - 1]
+        if ch.data not in (" ", "") or ch.bg != "default" or ch.reverse:
+            break
+        width -= 1
+    text = Text()
+    run: list[str] = []
+    prev_key: tuple | None = None
+    for x in range(width):
+        ch = row[x]
+        key = (ch.fg, ch.bg, ch.bold, ch.italics, ch.underscore, ch.strikethrough, ch.reverse)
+        if key != prev_key and run:
+            text.append("".join(run), _char_style(prev_key))
+            run.clear()
+        prev_key = key
+        run.append(ch.data)
+    if run and prev_key is not None:
+        text.append("".join(run), _char_style(prev_key))
+    return text
+
+
+class LogView:
+    """Terminal-emulated view of a pane log (a raw pipe-pane capture full of
+    cursor-addressed repaints). Bytes are fed through pyte so the stream
+    collapses to what a real pane-sized terminal shows; scrolled-off lines
+    land in history, so a finished run shows more than the final screen.
+    Same stat-gated incremental contract as JournalTail: the first read seeks
+    to the last max_bytes, truncation resets — the emulator included.
+
+    Known degradations, all strictly better than rendering the raw stream:
+    a mid-stream first frame may be partial until the next repaint; altscreen
+    (mode 1049) CLIs merge frames into one buffer; a human attaching to the
+    tmux session resizes the pane away from our fixed geometry."""
+
+    def __init__(
+        self,
+        path: Path,
+        max_bytes: int = 262144,
+        columns: int = _PANE_COLUMNS,
+        lines: int = _PANE_LINES,
+        history: int = _HISTORY_LINES,
+    ):
         self.path = path
         self.max_bytes = max_bytes
+        self._columns, self._lines, self._history = columns, lines, history
         self._offset: int | None = None  # None until the file first appears
+        self._row_cache: dict[int, Text] = {}  # id(history row) -> rendered
+        self._reset_screen()
 
-    def read_new(self) -> str:
+    def _reset_screen(self) -> None:
+        self._screen = pyte.HistoryScreen(self._columns, self._lines, history=self._history)
+        self._stream = pyte.ByteStream(self._screen)
+        self._row_cache.clear()
+
+    def read_new(self) -> bool:
+        """Feed any new bytes into the emulator; True when content changed."""
         sig = _stat_sig(self.path)
         if sig is None:
+            if self._offset is None:
+                return False
             self._offset = None
-            return ""
+            self._reset_screen()
+            return True
         size = sig[1]
         if self._offset is None:
             self._offset = max(0, size - self.max_bytes)
         elif size < self._offset:
             self._offset = 0
+            self._reset_screen()
         if size == self._offset:
-            return ""
+            return False
         with self.path.open("rb") as f:
             f.seek(self._offset)
             chunk = f.read(size - self._offset)
         self._offset += len(chunk)
-        return chunk.decode("utf-8", errors="replace")
+        self._stream.feed(chunk)
+        return True
+
+    def render(self) -> Text:
+        """History + current screen as one styled Text, trailing blank rows
+        dropped, capped to the newest history rows. History rows are detached
+        dicts that never mutate, so their renders are memoized by id() —
+        valid exactly while the row sits in the deque (the cache is re-keyed
+        every call, keeping only surviving ids)."""
+        screen = self._screen
+        fresh: dict[int, Text] = {}
+        rows: list[Text] = []
+        for row in screen.history.top:
+            text = self._row_cache.get(id(row))
+            if text is None:
+                text = _render_row(row)
+            fresh[id(row)] = text
+            rows.append(text)
+        self._row_cache = fresh
+        rows += [_render_row(screen.buffer[y]) for y in range(screen.lines)]
+        while rows and not rows[-1].plain:
+            rows.pop()
+        del rows[: max(0, len(rows) - self._history)]
+        return Text("\n").join(rows)
 
 
 def active_task_id(run_dir: Path, journal_entries: list[dict[str, Any]]) -> str | None:

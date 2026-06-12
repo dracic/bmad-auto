@@ -30,6 +30,9 @@ from .base import CodingCLIAdapter, SessionHandle, SessionResult, SessionSpec
 from .profile import CLIProfile
 
 TMUX_TIMEOUT_S = 30
+# Pane geometry for agent windows; mirrored in tui.data for log emulation.
+PANE_COLUMNS = 220
+PANE_LINES = 50
 RESULT_GRACE_S = 15.0
 RESULT_POLL_S = 0.5
 EVENT_KINDS = {"SessionStart", "Stop", "SessionEnd"}
@@ -97,9 +100,9 @@ class GenericTmuxAdapter(CodingCLIAdapter):
                 "-c",
                 str(cwd),
                 "-x",
-                "220",
+                str(PANE_COLUMNS),
                 "-y",
-                "50",
+                str(PANE_LINES),
             )
 
     def build_command(self, spec: SessionSpec) -> str:
