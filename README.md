@@ -183,13 +183,22 @@ The orchestrator drives its own forks of the BMAD dev/review skills — your sta
 | `bmad-auto-sweep`  | deferred-work ledger triage (automation-only)              |
 | `bmad-auto-setup`  | registers the module in `_bmad/` config + help             |
 
-Install into a target project by copying the skill folders into the trees the CLIs read (`.claude/skills/` for Claude Code, `.agents/skills/` for codex/gemini), then optionally running the setup skill to register the module:
+**Installed via the BMAD-method installer (recommended).** The installer copies the four `bmad-auto-*` skills into your project, but not the orchestrator tool. Finish setup with `/bmad-auto-setup`, which installs the tool from Git, asks which coding CLIs to drive, registers their hooks, and runs the preflight:
+
+```bash
+claude "/bmad-auto-setup accept all defaults"
+```
+
+**Manual (repo clone / dev).** Copy the skill folders into the trees the CLIs read (`.claude/skills/` for Claude Code, `.agents/skills/` for codex/gemini), install the tool, then run the setup skill:
 
 ```bash
 cp -r skills/bmad-auto-* /path/to/project/.claude/skills/
 cp -r skills/bmad-auto-* /path/to/project/.agents/skills/   # codex/gemini only
-claude "/bmad-auto-setup accept all defaults"               # optional registration
+pip install -e ".[tui]"                                     # the orchestrator tool + TUI
+claude "/bmad-auto-setup accept all defaults"               # register config + bootstrap
 ```
+
+See **[docs/setup-guide.md](docs/setup-guide.md)** for the full walkthrough — choosing CLIs, installing the tool and TUI together or separately, and initializing codex/gemini.
 
 The skills must be installed together: `bmad-auto-review` writes deferred-work entries per `bmad-auto-dev/deferred-work-format.md` (sibling skill directory). If you carry `_bmad/custom/bmad-quick-dev.toml` or `bmad-code-review.toml` customization overrides, duplicate them as `bmad-auto-dev.toml` / `bmad-auto-review.toml` — overrides are keyed by skill directory name.
 
@@ -291,5 +300,6 @@ python scripts/gen_screenshots.py   # writes docs/images/*.svg + *.png (PNG need
 
 ## Documentation
 
+- **[docs/setup-guide.md](docs/setup-guide.md)** — installing the module + the `/bmad-auto-setup` walkthrough.
 - **[docs/tui-guide.md](docs/tui-guide.md)** — the complete TUI reference.
 - **[skills/README.md](skills/README.md)** — the `bauto` skill module overview.
