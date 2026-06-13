@@ -7,12 +7,13 @@ that invoke `bmad-auto-dev`, `bmad-auto-review`, and `bmad-auto-sweep`, watches 
 hook signals, and verifies their artifacts. Installing the tool is part of setup, not
 an optional extra.
 
-There are two ways the skills land in a project: the **BMAD-method installer**
-(recommended), or a **manual copy** from a clone of this repo. Both end at the same
-place — the `/bmad-auto-setup` skill, which installs the tool, picks which coding CLIs
-to drive, and bootstraps the project. For the one-page summary, see the
-[Installing the skill module](../README.md#installing-the-skill-module) section of the
-README.
+There are two ways the skills land in a project. The orchestrator's wheel **bundles**
+the four skills, so the simplest path is **pip + `bmad-auto init`**, which installs them
+itself. Alternatively the **BMAD-method installer** copies them. Either way the
+`/bmad-auto-setup` skill registers the `_bmad/` config, ensures the tool is installed,
+picks which coding CLIs to drive, and bootstraps the project. For the one-page summary,
+see the [Installing the skill module](../README.md#installing-the-skill-module) section
+of the README.
 
 ## Installed via the BMAD-method installer? (recommended)
 
@@ -20,7 +21,9 @@ The BMAD-method installer copies the four `bmad-auto-*` skill directories into y
 project. It does **not** carry the orchestrator tool — the installer copies only skill
 directories, not their sibling files, so the tool can't ride along in the skill folder.
 It is installed separately from Git by the setup skill. The canonical source is
-<https://github.com/pbean/bmad-automator>.
+<https://github.com/pbean/bmad-automator>. (Going the other way, the tool's wheel
+bundles the skills, so `bmad-auto init` can install them without the BMAD installer —
+when the installer already placed them, `init` simply skips the existing copies.)
 
 After the installer runs, complete setup with one command:
 
@@ -36,9 +39,9 @@ claude "/bmad-auto-setup accept all defaults"
 2. Installs the `bmad-automator` tool from Git (see
    [Installing the tool and TUI](#installing-the-tool-and-tui)).
 3. Asks **which coding CLI(s)** the orchestrator should drive, then runs `bmad-auto init`
-   to register hooks + write the `.automator/policy.toml` template + add gitignore entries
-   (see [Choosing which CLIs to drive](#choosing-which-clis-to-drive) and
-   [Initializing CLIs other than claude](#initializing-clis-other-than-claude)).
+   to install the `bmad-auto-*` skills + register hooks + write the `.automator/policy.toml`
+   template + add gitignore entries (see [Choosing which CLIs to drive](#choosing-which-clis-to-drive)
+   and [Initializing CLIs other than claude](#initializing-clis-other-than-claude)).
 4. Runs `bmad-auto validate` as a preflight (see [Verify](#verify)).
 5. Cleans up the legacy installer package directories under `_bmad/`, leaving only config.
 
@@ -47,18 +50,20 @@ Run `/bmad-auto-setup` with plain prompts if you want to choose interactively �
 
 ## Manual install (repo clone / dev setup)
 
-If you are working from a clone of this repo instead of the installer, copy the skill
-folders into the trees the CLIs read, then install the tool in editable mode:
+If you are working from a clone of this repo, install the tool in editable mode and let
+`bmad-auto init` lay down the skills (the canonical skills live at
+`src/automator/data/skills/` and are bundled into the package):
 
 ```bash
-cp -r skills/bmad-auto-* /path/to/project/.claude/skills/
-cp -r skills/bmad-auto-* /path/to/project/.agents/skills/   # codex/gemini only
-pip install -e ".[tui]"                                      # the orchestrator tool + TUI
-claude "/bmad-auto-setup accept all defaults"               # register config + bootstrap
+pip install -e ".[tui]"                                  # the orchestrator tool + TUI
+bmad-auto init --project /path/to/project --cli claude   # installs skills + hooks + policy
+claude "/bmad-auto-setup accept all defaults"            # register _bmad/ config + help
 ```
 
-The skills must be installed together: `bmad-auto-review` writes deferred-work entries per
-`bmad-auto-dev/deferred-work-format.md` (a sibling skill directory).
+Add `--cli codex --cli gemini` to also populate `.agents/skills/`. The skills must be
+installed together: `bmad-auto-review` writes deferred-work entries per
+`bmad-auto-dev/deferred-work-format.md` (a sibling skill directory) — `init` always
+installs all four.
 
 ## Choosing which CLIs to drive
 
@@ -127,8 +132,8 @@ Confirm with `bmad-auto --version`.
 
 ## Initializing CLIs other than claude
 
-`bmad-auto init` registers hooks per CLI. The `--cli` flag is repeatable — pass it once per
-CLI you want to drive:
+`bmad-auto init` registers hooks and installs the bundled `bmad-auto-*` skills per CLI. The
+`--cli` flag is repeatable — pass it once per CLI you want to drive:
 
 ```bash
 # claude only (default)
@@ -157,11 +162,13 @@ them to whoever owns the machine:
 - **gemini** — authenticate once (browser OAuth or `GEMINI_API_KEY`). Requires Gemini CLI
   ≥ 0.46.
 
-### Skill-location gotcha
+### Skill location
 
 `claude` reads skills from `.claude/skills/`; `codex` and `gemini` read from `.agents/skills/`.
-If you selected `codex` or `gemini`, make sure the `bmad-auto-*` skills are installed in
-`.agents/skills/` too, not only `.claude/skills/`.
+`init` installs the bundled `bmad-auto-*` skills into the right tree for each CLI you pass via
+`--cli`, so selecting `codex`/`gemini` populates `.agents/skills/` automatically. It skips skill
+dirs that already exist — pass `--force-skills` to overwrite a stale copy, or `--no-skills` to
+manage them yourself.
 
 ## Verify
 

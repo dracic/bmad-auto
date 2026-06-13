@@ -548,7 +548,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         # missing policy file yields defaults -> ("claude",)
         pol = policy_mod.load(_policy_path(project))
         clis = tuple(dict.fromkeys(pol.adapter.resolved(role).name for role in ROLES))
-    return install_into(project, clis=clis)
+    return install_into(project, clis=clis, skills=args.skills, force_skills=args.force_skills)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -565,13 +565,26 @@ def main(argv: list[str] | None = None) -> int:
         p.set_defaults(func=func)
         return p
 
-    init_p = add("init", cmd_init, "install hooks + policy template into the target project")
+    init_p = add(
+        "init", cmd_init, "install hooks + skills + policy template into the target project"
+    )
     init_p.add_argument(
         "--cli",
         action="append",
         metavar="PROFILE",
         help="CLI profile(s) to register hooks for (claude | codex | gemini | custom; "
         "repeatable; default: profiles referenced by .automator/policy.toml, or claude)",
+    )
+    init_p.add_argument(
+        "--no-skills",
+        dest="skills",
+        action="store_false",
+        help="skip installing the bundled bmad-auto-* skills (hooks/policy only)",
+    )
+    init_p.add_argument(
+        "--force-skills",
+        action="store_true",
+        help="overwrite bmad-auto-* skill dirs that already exist (default: skip them)",
     )
     add("validate", cmd_validate, "preflight checks; exit non-zero on failure")
 

@@ -7,7 +7,7 @@ module_greeting: >
   BMAD Automator installed — both the four automation skills and the
   bmad-auto orchestrator tool (the Python program that drives the loop). Setup
   pip-installed the `bmad-automator` package from its Git repository, ran
-  `bmad-auto init` (hooks + policy + gitignore), and `bmad-auto validate`
+  `bmad-auto init` (skills + hooks + policy + gitignore), and `bmad-auto validate`
   (preflight). The skills
   are invoked by the orchestrator and must stay installed together —
   bmad-auto-review writes deferred-work entries per bmad-auto-dev's

@@ -63,7 +63,7 @@ After writing config, create any output directories that were configured. For fi
 
 This module ships the **bmad-auto orchestrator** — the Python program that actually drives the loop — as the `bmad-automator` Python package, installed from its public Git repository. The four skills do nothing on their own: the orchestrator is what spawns the fresh Claude Code sessions that invoke `bmad-auto-dev`, `bmad-auto-review`, and `bmad-auto-sweep`, watches their hook signals, and verifies their artifacts. Installing the tool is therefore part of setup, not an optional extra.
 
-> **Why not a bundled copy?** The BMAD installer copies only the four skill directories into a project — it does **not** carry sibling files. So the tool can't ride along in the skill folder; it's installed from Git instead. The canonical source is <https://github.com/pbean/bmad-automator>.
+> **Why is the tool installed from Git?** The BMAD installer copies only the four skill directories into a project — it does **not** carry sibling files, so the tool can't ride along in the skill folder; it's installed from Git instead. The canonical source is <https://github.com/pbean/bmad-automator>. (The reverse holds, though: the tool's wheel **bundles** the four skills, so `bmad-auto init` lays them down into a project's skill trees on its own — see step 3.)
 
 Unless the user explicitly asked to skip it (e.g. `skills only` / `--no-tool`), install and bootstrap now. In the commands below, resolve `{project-root}` to the real project path before running.
 
@@ -82,7 +82,7 @@ Unless the user explicitly asked to skip it (e.g. `skills only` / `--no-tool`), 
 
    Re-run with their choice, then confirm with `bmad-auto --version`.
 
-3. **Bootstrap the project** — install the coding-CLI hooks, the `.automator/policy.toml` template, and the gitignore entry (idempotent).
+3. **Bootstrap the project** — install the coding-CLI hooks, the bundled `bmad-auto-*` skills, the `.automator/policy.toml` template, and the gitignore entry (idempotent).
 
    First decide **which coding CLI(s)** the orchestrator should drive. The three supported adapters are `claude` (default), `codex`, and `gemini`. Hooks are registered per CLI, so the choice matters — register every CLI you intend to use for dev/review/triage. Ask the user (unless they already specified it in their setup args, e.g. `cli: claude, codex`, or accepted defaults — then default to `claude` only):
 
@@ -100,7 +100,7 @@ Unless the user explicitly asked to skip it (e.g. `skills only` / `--no-tool`), 
 
    Names must be exactly `claude`, `codex`, or `gemini` — `init` errors on an unknown profile and lists the valid ones. `init` prints any one-time first-run notes per CLI (e.g. start `claude` once in the project and accept the workspace-trust + hooks-approval dialogs before `bmad-auto run` — spawned sessions can't answer first-run dialogs). Relay those notes to the user.
 
-   **Note on skill location:** `claude` reads skills from `.claude/skills/`; `codex` and `gemini` read from `.agents/skills/`. If the user selected `codex` or `gemini`, make sure the `bmad-auto-*` skills are installed in `.agents/skills/` as well, not only `.claude/skills/`.
+   **Skills are installed automatically:** `init` lays the bundled `bmad-auto-*` skills into the right tree for each selected CLI — `.claude/skills/` for `claude`, `.agents/skills/` for `codex`/`gemini`. Existing skill dirs are left untouched (re-run with `--force-skills` to overwrite, or `--no-skills` to skip the step and manage skills yourself).
 
 4. **Preflight** — verify config, sprint-status, git, tmux, and the coding CLI:
 
@@ -138,7 +138,7 @@ Check `directories_removed` and `files_removed_count` in the JSON output for the
 
 ## Confirm
 
-Use the script JSON output to display what was written — config values set (written to `config.yaml` at root for core, module section for module values), user settings written to `config.user.yaml` (`user_keys` in result), help entries added, fresh install vs update. Also report the **tool install**: the installed `bmad-auto --version`, that `bmad-auto init` registered hooks/policy/gitignore for the selected coding CLI(s) (name each one — e.g. "hooks registered for claude, codex"), and the `bmad-auto validate` preflight result (pass, or the readiness checklist of what's still missing). If legacy files were deleted, mention the migration. If legacy directories were removed, report the count and list (e.g. "Cleaned up 106 installer package files from bmb/, core/, \_config/ — skills are installed at .claude/skills/"). Then display the `module_greeting` from `./assets/module.yaml` to the user.
+Use the script JSON output to display what was written — config values set (written to `config.yaml` at root for core, module section for module values), user settings written to `config.user.yaml` (`user_keys` in result), help entries added, fresh install vs update. Also report the **tool install**: the installed `bmad-auto --version`, that `bmad-auto init` registered hooks, installed the `bmad-auto-*` skills, and wrote policy/gitignore for the selected coding CLI(s) (name each one — e.g. "hooks + skills installed for claude, codex"), and the `bmad-auto validate` preflight result (pass, or the readiness checklist of what's still missing). If legacy files were deleted, mention the migration. If legacy directories were removed, report the count and list (e.g. "Cleaned up 106 installer package files from bmb/, core/, \_config/ — skills are installed at .claude/skills/"). Then display the `module_greeting` from `./assets/module.yaml` to the user.
 
 ## Outcome
 
