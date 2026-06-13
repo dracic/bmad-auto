@@ -35,6 +35,22 @@ def test_init_without_policy_defaults_to_claude(tmp_path):
     assert cli.main(["init", "--project", str(tmp_path)]) == 0
     assert (tmp_path / ".claude" / "settings.json").is_file()
     assert not (tmp_path / ".codex").exists()
+    # init installs the bundled skills by default
+    assert (tmp_path / ".claude" / "skills" / "bmad-auto-dev" / "SKILL.md").is_file()
+
+
+def test_init_no_skills_flag(tmp_path):
+    assert cli.main(["init", "--project", str(tmp_path), "--no-skills"]) == 0
+    assert (tmp_path / ".claude" / "settings.json").is_file()
+    assert not (tmp_path / ".claude" / "skills").exists()
+
+
+def test_init_force_skills_flag(tmp_path):
+    skill_md = tmp_path / ".claude" / "skills" / "bmad-auto-dev" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("CUSTOM", encoding="utf-8")
+    assert cli.main(["init", "--project", str(tmp_path), "--force-skills"]) == 0
+    assert skill_md.read_text() != "CUSTOM"
 
 
 def test_dry_run_renders_per_stage_commands(project, capsys):

@@ -1,8 +1,10 @@
-"""Drift guard: skills/ is the canonical source for the bmad-auto skills.
+"""Drift guard: src/automator/data/skills/ is the canonical source for the
+bmad-auto skills (bundled into the wheel; `bmad-auto init` installs them).
 
 The forked skills are plain copies (not symlinks) in .claude/skills/ (read by
 Claude Code) and .agents/skills/ (read by codex/gemini). Edits must flow
-skills/<skill> -> both trees; this test turns drift into a CI failure.
+src/automator/data/skills/<skill> -> both trees; this test turns drift into a
+CI failure.
 """
 
 import filecmp
@@ -10,13 +12,10 @@ from pathlib import Path
 
 import pytest
 
+from automator.install import MODULE_SKILLS
+
 REPO = Path(__file__).resolve().parent.parent
-MODULE_SKILLS = [
-    "bmad-auto-setup",
-    "bmad-auto-dev",
-    "bmad-auto-review",
-    "bmad-auto-sweep",
-]
+SKILLS_SRC = REPO / "src" / "automator" / "data" / "skills"
 SKILL_TREES = [".claude/skills", ".agents/skills"]
 
 
@@ -39,14 +38,14 @@ def _assert_identical(canonical: Path, installed: Path) -> None:
         stack.extend(node.subdirs.values())
     assert not problems, (
         f"{installed} has drifted from canonical {canonical}; "
-        f"re-copy from skills/ to fix:\n  " + "\n  ".join(problems)
+        f"re-copy from src/automator/data/skills/ to fix:\n  " + "\n  ".join(problems)
     )
 
 
 @pytest.mark.parametrize("skill", MODULE_SKILLS)
 @pytest.mark.parametrize("tree", SKILL_TREES)
 def test_installed_skill_matches_module(skill: str, tree: str) -> None:
-    canonical = REPO / "skills" / skill
+    canonical = SKILLS_SRC / skill
     installed = REPO / tree / skill
     assert canonical.is_dir(), f"canonical skill missing: {canonical}"
     # .claude/ and .agents/ are dev-workspace trees, untracked and absent in CI

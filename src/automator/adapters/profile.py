@@ -43,6 +43,10 @@ class CLIProfile:
     name: str
     binary: str
     hooks: HookSpec
+    # project-relative tree this CLI reads skills from, e.g. ".claude/skills"
+    # (claude) or ".agents/skills" (codex/gemini); `bmad-auto init` installs the
+    # bundled bmad-auto-* skills here.
+    skill_tree: str = ".claude/skills"
     prompt_template: str = "{prompt}"
     launch_args: tuple[str, ...] = ()
     bypass_args: tuple[str, ...] = ()
@@ -94,10 +98,15 @@ def _parse_profile(doc: dict, source: str) -> CLIProfile:
     if usage_parser not in USAGE_PARSERS:
         raise fail(f"usage_parser must be one of {sorted(USAGE_PARSERS)}: got {usage_parser!r}")
 
+    skill_tree = str(doc.get("skill_tree", ".claude/skills"))
+    if not skill_tree or Path(skill_tree).is_absolute():
+        raise fail("skill_tree must be a project-relative path")
+
     return CLIProfile(
         name=name,
         binary=binary,
         hooks=HookSpec(dialect=dialect, config_path=config_path, events=events),
+        skill_tree=skill_tree,
         prompt_template=str(doc.get("prompt_template", "{prompt}")),
         launch_args=tuple(str(a) for a in doc.get("launch_args", ())),
         bypass_args=tuple(str(a) for a in doc.get("bypass_args", ())),

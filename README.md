@@ -41,7 +41,7 @@ Inspired by the official [bmad-automator](https://github.com/bmad-code-org/bmad-
 pip install -e ".[tui]"          # core is pyyaml-only; [tui] adds the dashboard
 
 cd /path/to/your/bmad/project
-bmad-auto init                   # installs hooks + .automator/policy.toml + gitignore
+bmad-auto init                   # installs bmad-auto-* skills + hooks + .automator/policy.toml + gitignore
 bmad-auto validate               # preflight: config, sprint-status, git, tmux, CLI, hooks
 bmad-auto run --dry-run          # print the plan without spawning anything
 bmad-auto run                    # go
@@ -52,16 +52,16 @@ bmad-auto tui                    # …or drive everything from the dashboard
 
 ## Command reference
 
-| Command                       | What it does                                                                                                                                       |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bmad-auto init`              | Install the hook relay, `.automator/policy.toml`, and a runs-dir gitignore. `--cli <profile>` (repeatable) targets specific agents.                |
-| `bmad-auto validate`          | Preflight every prerequisite: BMAD config, sprint-status, git, tmux, CLI binary, hook registration.                                                |
-| `bmad-auto run`               | Drive the dev → review → verify → commit loop. `--epic N`, `--story KEY`, `--max-stories N`, `--dry-run`.                                          |
-| `bmad-auto sweep`             | Triage + execute open `deferred-work.md` entries. `--no-prompt`, `--decisions-only`, `--max-bundles N`, `--repeat`, `--max-cycles N`, `--dry-run`. |
-| `bmad-auto resume <run-id>`   | Continue a run paused at a gate, escalation, or interruption.                                                                                      |
-| `bmad-auto status [<run-id>]` | Run + sprint summary with per-story token totals.                                                                                                  |
-| `bmad-auto attach [<run-id>]` | tmux-attach to a run's live agent session.                                                                                                         |
-| `bmad-auto tui`               | The interactive dashboard (needs the `[tui]` extra).                                                                                               |
+| Command                       | What it does                                                                                                                                                                                                                  |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bmad-auto init`              | Install the bundled `bmad-auto-*` skills, the hook relay, `.automator/policy.toml`, and a runs-dir gitignore. `--cli <profile>` (repeatable) targets specific agents; `--no-skills` / `--force-skills` control skill copying. |
+| `bmad-auto validate`          | Preflight every prerequisite: BMAD config, sprint-status, git, tmux, CLI binary, hook registration.                                                                                                                           |
+| `bmad-auto run`               | Drive the dev → review → verify → commit loop. `--epic N`, `--story KEY`, `--max-stories N`, `--dry-run`.                                                                                                                     |
+| `bmad-auto sweep`             | Triage + execute open `deferred-work.md` entries. `--no-prompt`, `--decisions-only`, `--max-bundles N`, `--repeat`, `--max-cycles N`, `--dry-run`.                                                                            |
+| `bmad-auto resume <run-id>`   | Continue a run paused at a gate, escalation, or interruption.                                                                                                                                                                 |
+| `bmad-auto status [<run-id>]` | Run + sprint summary with per-story token totals.                                                                                                                                                                             |
+| `bmad-auto attach [<run-id>]` | tmux-attach to a run's live agent session.                                                                                                                                                                                    |
+| `bmad-auto tui`               | The interactive dashboard (needs the `[tui]` extra).                                                                                                                                                                          |
 
 Every command takes `--project <dir>` (default: the current directory).
 
@@ -174,7 +174,7 @@ Bundle dev sessions can themselves append new deferred entries (split-off goals,
 
 ## Installing the skill module
 
-The orchestrator drives its own forks of the BMAD dev/review skills — your standard BMAD install is never modified. The module lives in `skills/` (BMAD module code `bauto`) and contains four skills:
+The orchestrator drives its own forks of the BMAD dev/review skills — your standard BMAD install is never modified. The four skills are bundled in the `bmad-automator` wheel (canonical source: `src/automator/data/skills/`, BMAD module code `bauto`) so `bmad-auto init` lays them down for you:
 
 | Skill              | Role                                                       |
 | ------------------ | ---------------------------------------------------------- |
@@ -183,26 +183,27 @@ The orchestrator drives its own forks of the BMAD dev/review skills — your sta
 | `bmad-auto-sweep`  | deferred-work ledger triage (automation-only)              |
 | `bmad-auto-setup`  | registers the module in `_bmad/` config + help             |
 
-**Installed via the BMAD-method installer (recommended).** The installer copies the four `bmad-auto-*` skills into your project, but not the orchestrator tool. Finish setup with `/bmad-auto-setup`, which installs the tool from Git, asks which coding CLIs to drive, registers their hooks, and runs the preflight:
+**Via pip + `bmad-auto init` (self-sufficient).** Installing the tool and running `init` is all you need — `init` installs the `bmad-auto-*` skills into `.claude/skills/` (claude) and/or `.agents/skills/` (codex/gemini) for the CLIs you select, alongside the hooks and policy:
+
+```bash
+pip install "bmad-automator[tui] @ git+https://github.com/pbean/bmad-automator.git"
+bmad-auto init --project /path/to/project --cli claude   # add --cli codex/gemini as needed
+claude "/bmad-auto-setup accept all defaults"            # registers _bmad/ config + help
+```
+
+Existing skill dirs are left untouched (`--force-skills` to overwrite a stale copy, `--no-skills` to manage skills yourself).
+
+**Via the BMAD-method installer.** The installer also copies the four `bmad-auto-*` skills into your project (but not the orchestrator tool). Finish setup with `/bmad-auto-setup`, which installs the tool from Git, asks which coding CLIs to drive, registers their hooks (`init` skips the already-present skills), and runs the preflight:
 
 ```bash
 claude "/bmad-auto-setup accept all defaults"
-```
-
-**Manual (repo clone / dev).** Copy the skill folders into the trees the CLIs read (`.claude/skills/` for Claude Code, `.agents/skills/` for codex/gemini), install the tool, then run the setup skill:
-
-```bash
-cp -r skills/bmad-auto-* /path/to/project/.claude/skills/
-cp -r skills/bmad-auto-* /path/to/project/.agents/skills/   # codex/gemini only
-pip install -e ".[tui]"                                     # the orchestrator tool + TUI
-claude "/bmad-auto-setup accept all defaults"               # register config + bootstrap
 ```
 
 See **[docs/setup-guide.md](docs/setup-guide.md)** for the full walkthrough — choosing CLIs, installing the tool and TUI together or separately, and initializing codex/gemini.
 
 The skills must be installed together: `bmad-auto-review` writes deferred-work entries per `bmad-auto-dev/deferred-work-format.md` (sibling skill directory). If you carry `_bmad/custom/bmad-quick-dev.toml` or `bmad-code-review.toml` customization overrides, duplicate them as `bmad-auto-dev.toml` / `bmad-auto-review.toml` — overrides are keyed by skill directory name.
 
-To pull in upstream BMAD improvements, diff the upstream skill against the fork (`diff -r <bmad-install>/bmad-quick-dev skills/bmad-auto-dev`) and merge manually; the forks keep the upstream file structure to make this easy.
+To pull in upstream BMAD improvements, diff the upstream skill against the fork (`diff -r <bmad-install>/bmad-quick-dev src/automator/data/skills/bmad-auto-dev`) and merge manually; the forks keep the upstream file structure to make this easy.
 
 ## Policy (`.automator/policy.toml`)
 
@@ -277,7 +278,7 @@ One generic driver (`adapters/generic_tmux.py`) runs any coding CLI that fits th
 
 **On budgets:** agentic sessions are dominated by cache reads (80–90%+ of raw tokens), which every supported vendor bills at ~0.1x base input. The `max_tokens_per_story` check therefore uses a cost-weighted total — cache reads count at `limits.cache_read_weight` (default 0.1) — while displayed totals stay raw. Set the weight to 1.0 to budget raw tokens.
 
-**Shared prerequisites:** the `bmad-auto-*` skills must be present in `.agents/skills/` (codex and gemini read it; Claude Code reads `.claude/skills/` — see [Installing the skill module](#installing-the-skill-module)), and each CLI must have been run once interactively in the project for auth/trust — `bmad-auto init --cli codex --cli gemini` registers the hook relay and prints the per-CLI first-run steps.
+**Shared prerequisites:** the `bmad-auto-*` skills must be present in `.agents/skills/` (codex and gemini read it; Claude Code reads `.claude/skills/`), and each CLI must have been run once interactively in the project for auth/trust — `bmad-auto init --cli codex --cli gemini` installs the skills into `.agents/skills/`, registers the hook relay, and prints the per-CLI first-run steps.
 
 **Adding a CLI without touching Python:** drop a TOML file in `<project>/.automator/profiles/<name>.toml` (same fields as the built-ins: binary, `prompt_template`, bypass flags, a `[hooks]` block picking one of the config dialects `claude-settings-json` / `codex-hooks-json` / `gemini-settings-json`, and a native→canonical event map). The hook relay script and orchestrator are CLI-agnostic — each registration passes the canonical event name as the script argument. A CLI whose hook config clones one of the existing dialects (the ecosystem trend) needs nothing else; a genuinely different transport gets its own adapter class instead (see the opencode HTTP+SSE design stub in `adapters/opencode_http.py`).
 
@@ -302,4 +303,4 @@ python scripts/gen_screenshots.py   # writes docs/images/*.svg + *.png (PNG need
 
 - **[docs/setup-guide.md](docs/setup-guide.md)** — installing the module + the `/bmad-auto-setup` walkthrough.
 - **[docs/tui-guide.md](docs/tui-guide.md)** — the complete TUI reference.
-- **[skills/README.md](skills/README.md)** — the `bauto` skill module overview.
+- **[src/automator/data/skills/README.md](src/automator/data/skills/README.md)** — the `bauto` skill module overview.

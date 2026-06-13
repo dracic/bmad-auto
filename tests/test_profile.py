@@ -26,6 +26,15 @@ def test_builtin_profiles_load():
     assert "SessionEnd" not in profiles["codex"].hooks.events  # codex has no such hook
     assert profiles["gemini"].hooks.events["AfterAgent"] == "Stop"
     assert profiles["gemini"].launch_args == ("-i",)
+    # claude reads .claude/skills; codex and gemini read .agents/skills
+    assert profiles["claude"].skill_tree == ".claude/skills"
+    assert profiles["codex"].skill_tree == ".agents/skills"
+    assert profiles["gemini"].skill_tree == ".agents/skills"
+
+
+def test_skill_tree_defaults_when_unset():
+    # MINIMAL_PROFILE omits skill_tree -> defaults to .claude/skills
+    assert get_profile("claude").skill_tree == ".claude/skills"
 
 
 def test_legacy_alias_resolves():
@@ -82,6 +91,13 @@ def test_user_profile_overlay(tmp_path):
                 'config_path = "/abs/settings.json"',
             ),
             "relative",
+        ),
+        (
+            MINIMAL_PROFILE.replace(
+                "[hooks]",
+                'skill_tree = "/abs/skills"\n[hooks]',
+            ),
+            "skill_tree",
         ),
     ],
 )

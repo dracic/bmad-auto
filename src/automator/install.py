@@ -3,6 +3,8 @@
 - copies the hook relay script to <project>/.automator/bmad_auto_hook.py
 - idempotently merges hook registrations into each selected CLI's hook config
   (dialect + native->canonical event map come from the CLI profile)
+- installs the bundled bmad-auto-* skills into each selected CLI's skill tree
+  (.claude/skills for claude, .agents/skills for codex/gemini)
 - writes .automator/policy.toml from the template (if missing)
 - gitignores .automator/runs/
 
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 from collections.abc import Sequence
 from importlib import resources
 from pathlib import Path
@@ -25,6 +28,11 @@ from .policy import POLICY_TEMPLATE
 HOOK_SCRIPT_REL = ".automator/bmad_auto_hook.py"
 HOOK_MARKER = "bmad_auto_hook.py"
 GEMINI_HOOK_TIMEOUT_MS = 60_000
+
+# The bmad-auto-* skills bundled in the wheel (automator/data/skills/) that
+# `bmad-auto init` lays down. They must be installed together — bmad-auto-review
+# references bmad-auto-dev/deferred-work-format.md as a sibling.
+MODULE_SKILLS = ("bmad-auto-dev", "bmad-auto-review", "bmad-auto-sweep", "bmad-auto-setup")
 
 
 def _hook_command(project: Path, profile: CLIProfile, canonical_event: str) -> str:
@@ -86,7 +94,59 @@ def _register_hooks(project: Path, profile: CLIProfile) -> int:
     return 0
 
 
-def install_into(project: Path, clis: Sequence[str] = ("claude",)) -> int:
+def _copy_traversable(src, dst: Path) -> None:
+    """Recursively copy a packaged resource tree to a filesystem path.
+
+    Walks via the Traversable API (.iterdir/.read_bytes) rather than resolving a
+    filesystem path, so it works even when the package is zip-imported.
+    """
+    if src.is_dir():
+        dst.mkdir(parents=True, exist_ok=True)
+        for child in src.iterdir():
+            _copy_traversable(child, dst / child.name)
+    else:
+        dst.write_bytes(src.read_bytes())
+
+
+def _copy_skills(project: Path, trees: Sequence[str], force: bool) -> bool:
+    """Install the bundled bmad-auto-* skills into each project skill tree.
+
+    A skill directory that already exists is skipped unless ``force`` (so the
+    BMAD installer's copy or local edits are never clobbered silently). Returns
+    True if any skill was skipped because it already existed.
+    """
+    skills_root = resources.files("automator.data").joinpath("skills")
+    skipped_any = False
+    for tree in trees:
+        tree_dir = project / tree
+        installed: list[str] = []
+        skipped: list[str] = []
+        for skill in MODULE_SKILLS:
+            dst = tree_dir / skill
+            if dst.exists() and not force:
+                skipped.append(skill)
+                continue
+            if dst.exists():
+                shutil.rmtree(dst)
+            _copy_traversable(skills_root.joinpath(skill), dst)
+            installed.append(skill)
+        parts: list[str] = []
+        if installed:
+            parts.append(f"installed {', '.join(installed)}")
+        if skipped:
+            parts.append(f"skipped {', '.join(skipped)} (exist)")
+            skipped_any = True
+        print(f"  skills -> {tree}/: {'; '.join(parts) if parts else 'nothing to do'}")
+    return skipped_any
+
+
+def install_into(
+    project: Path,
+    clis: Sequence[str] = ("claude",),
+    *,
+    skills: bool = True,
+    force_skills: bool = False,
+) -> int:
     project = project.resolve()
     try:
         available = load_profiles(project)
@@ -116,7 +176,14 @@ def install_into(project: Path, clis: Sequence[str] = ("claude",)) -> int:
         if _register_hooks(project, profile) != 0:
             return 1
 
-    # 3. policy template
+    # 3. bundled skills into each CLI's skill tree (deduped: codex+gemini share
+    #    .agents/skills)
+    skills_skipped = False
+    if skills:
+        trees = list(dict.fromkeys(p.skill_tree for p in profiles))
+        skills_skipped = _copy_skills(project, trees, force_skills)
+
+    # 4. policy template
     policy_path = automator_dir / "policy.toml"
     if policy_path.is_file():
         print("  policy exists, leaving untouched")
@@ -124,7 +191,7 @@ def install_into(project: Path, clis: Sequence[str] = ("claude",)) -> int:
         policy_path.write_text(POLICY_TEMPLATE, encoding="utf-8")
         print(f"  policy written: {policy_path}")
 
-    # 4. gitignore runs dir
+    # 5. gitignore runs dir
     gitignore = project / ".gitignore"
     ignore_line = ".automator/runs/"
     existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
@@ -134,6 +201,9 @@ def install_into(project: Path, clis: Sequence[str] = ("claude",)) -> int:
                 f.write("\n")
             f.write(ignore_line + "\n")
         print(f"  gitignored: {ignore_line}")
+
+    if skills_skipped:
+        print("  some skills already present; re-run with --force-skills to overwrite")
 
     print(
         "init complete. One-time setup before `bmad-auto run` — spawned "

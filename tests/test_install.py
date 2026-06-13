@@ -1,7 +1,7 @@
 import json
 
 from automator.adapters.profile import get_profile
-from automator.install import install_into, merge_hooks
+from automator.install import MODULE_SKILLS, install_into, merge_hooks
 
 
 def _registrations(profile, command="python3 /x/.automator/bmad_auto_hook.py {event}"):
@@ -62,6 +62,12 @@ def test_install_into_full(tmp_path):
     assert "Stop" in settings["hooks"]
     assert ".automator/runs/" in (tmp_path / ".gitignore").read_text()
 
+    # all four skills land in claude's tree, with nested files intact
+    skills_dir = tmp_path / ".claude" / "skills"
+    for skill in MODULE_SKILLS:
+        assert (skills_dir / skill / "SKILL.md").is_file()
+    assert (skills_dir / "bmad-auto-review" / "steps" / "step-01-gather-context.md").is_file()
+
     # second run: idempotent, does not duplicate
     assert install_into(tmp_path) == 0
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
@@ -85,6 +91,40 @@ def test_install_into_multiple_clis(tmp_path):
     assert install_into(tmp_path, clis=("codex", "gemini")) == 0
     codex_hooks = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
     assert len(codex_hooks["hooks"]["Stop"]) == 1
+
+
+def test_install_skills_dedupes_agents_tree(tmp_path):
+    # codex and gemini share .agents/skills — install once there, not under .claude
+    assert install_into(tmp_path, clis=("codex", "gemini")) == 0
+    for skill in MODULE_SKILLS:
+        assert (tmp_path / ".agents" / "skills" / skill / "SKILL.md").is_file()
+    assert not (tmp_path / ".claude" / "skills").exists()
+
+
+def test_install_skills_skip_existing(tmp_path):
+    skill_md = tmp_path / ".claude" / "skills" / "bmad-auto-dev" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("CUSTOM", encoding="utf-8")
+    # default run must not clobber an existing skill dir
+    assert install_into(tmp_path) == 0
+    assert skill_md.read_text() == "CUSTOM"
+    # but a skill that was absent still gets installed
+    assert (tmp_path / ".claude" / "skills" / "bmad-auto-review" / "SKILL.md").is_file()
+
+
+def test_install_skills_force(tmp_path):
+    skill_md = tmp_path / ".claude" / "skills" / "bmad-auto-dev" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("CUSTOM", encoding="utf-8")
+    assert install_into(tmp_path, force_skills=True) == 0
+    assert skill_md.read_text() != "CUSTOM"
+
+
+def test_install_no_skills(tmp_path):
+    assert install_into(tmp_path, skills=False) == 0
+    # hooks still installed, but no skill tree created
+    assert (tmp_path / ".claude" / "settings.json").is_file()
+    assert not (tmp_path / ".claude" / "skills").exists()
 
 
 def test_install_unknown_cli(tmp_path):

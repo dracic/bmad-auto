@@ -11,6 +11,7 @@ bypass_args = ["--approval-mode=yolo"]
 model_flag = "--model"
 usage_parser = "gemini-chat"
 first_run_note = "authenticate once (browser OAuth or GEMINI_API_KEY); requires Gemini CLI >= 0.46"
+skill_tree = ".agents/skills"
 
 [env]
 GEMINI_CLI_TRUST_WORKSPACE = "true"
