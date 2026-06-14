@@ -75,7 +75,7 @@ Unless the user explicitly asked to skip it (e.g. `skills only` / `--no-tool`), 
    uv tool install "bmad-automator[tui] @ git+https://github.com/pbean/bmad-automator.git"
    ```
 
-   `uv tool install` puts `bmad-auto` in uv's own managed environment, so there's no PEP 668 externally-managed conflict and no need for `--user`, an activated virtualenv, or `--break-system-packages`. If a `bmad-automator` is already installed, re-run with `uv tool install --upgrade "bmad-automator[tui] @ git+https://github.com/pbean/bmad-automator.git"` (or `uv tool upgrade bmad-automator`). Confirm with `bmad-auto --version`.
+   `uv tool install` puts `bmad-auto` in uv's own managed environment, so there's no PEP 668 externally-managed conflict and no need for `--user`, an activated virtualenv, or `--break-system-packages`. Pin a release tag for reproducibility by appending `@v<X.Y.Z>` to the Git URL. If a `bmad-automator` is already installed, upgrade with `uv tool upgrade bmad-automator --reinstall` — the `--reinstall` is required for a Git source (a plain `uv tool upgrade` reuses the cached commit and won't pull new code); then re-run `bmad-auto init --force-skills` in each project so its skill copies refresh. Confirm with `bmad-auto --version`.
 
 3. **Bootstrap the project** — install the coding-CLI hooks, the bundled `bmad-auto-*` skills, the `.automator/policy.toml` template, and the gitignore entry (idempotent).
 

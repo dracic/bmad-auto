@@ -208,12 +208,34 @@ The orchestrator drives its own forks of the BMAD dev/review skills — your sta
 **Via uv + `bmad-auto init` (self-sufficient).** Installing the tool and running `init` is all you need — `init` installs the `bmad-auto-*` skills into `.claude/skills/` (claude) and/or `.agents/skills/` (codex/gemini) for the CLIs you select, alongside the hooks and policy:
 
 ```bash
+# latest from main (tracks HEAD — newest features, less stable):
 uv tool install "bmad-automator[tui] @ git+https://github.com/pbean/bmad-automator.git"
+
+# OR a pinned release tag (reproducible — recommended for day-to-day use):
+uv tool install "bmad-automator[tui] @ git+https://github.com/pbean/bmad-automator.git@v0.3.0"
+
 bmad-auto init --project /path/to/project --cli claude   # add --cli codex/gemini as needed
 claude "/bmad-auto-setup accept all defaults"            # registers _bmad/ config + help
 ```
 
-Existing skill dirs are left untouched (`--force-skills` to overwrite a stale copy, `--no-skills` to manage skills yourself).
+The `[tui]` extra pulls in the dashboard/settings UI (textual); drop it for a headless install. `bmad-auto --version` confirms what you've got. Existing skill dirs are left untouched (`--force-skills` to overwrite a stale copy, `--no-skills` to manage skills yourself).
+
+### Upgrading
+
+Upgrading is two steps — the tool **and** the per-project skill copies, which `init` froze at install time and an upgrade does not touch:
+
+```bash
+# 1. upgrade the tool. --reinstall is required for a git source: a plain
+#    `uv tool upgrade` reuses the cached commit and won't pull new code.
+uv tool upgrade bmad-automator --reinstall                 # follows main or your pinned tag
+#    to move to a newer tag, re-run install with the new ref:
+#    uv tool install --force "bmad-automator[tui] @ git+https://github.com/pbean/bmad-automator.git@v0.3.0"
+
+# 2. re-lay the refreshed skills into EACH project that uses bmad-auto:
+bmad-auto init --project /path/to/project --force-skills
+```
+
+Your `.automator/policy.toml` is left untouched on upgrade — new keys are optional and fall back to their defaults, so configs survive. Check the [CHANGELOG / releases](https://github.com/pbean/bmad-automator/releases) for what changed between tags.
 
 **Via the BMAD-method installer.** The installer also copies the four `bmad-auto-*` skills into your project (but not the orchestrator tool). Finish setup with `/bmad-auto-setup`, which installs the tool from Git, asks which coding CLIs to drive, registers their hooks (`init` skips the already-present skills), and runs the preflight:
 
