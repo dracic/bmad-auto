@@ -5,6 +5,22 @@ All notable changes to `bmad-automator` are documented here. The format is based
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
+## [0.3.2] — 2026-06-14
+
+### Changed
+
+- **`bmad-auto-setup` now upgrades, not just installs.** Re-running the skill (or invoking
+  it with `upgrade`) on an already-installed project is detected as an upgrade — it runs
+  `uv tool upgrade bmad-automator --reinstall` (the `--reinstall` is required for a git
+  source) and re-lays the per-project skills with `bmad-auto init --force-skills`, then
+  reports the before → after version. Previously a re-run was treated as a config-only
+  update: it left `--force-skills` off, so `init` silently skipped every existing skill
+  dir and the project kept stale skills against the upgraded tool. Upgrade is detected from
+  an existing `bauto` config section and/or a uv-managed `bmad-automator`, and the tool
+  follows `main` by default with an offer to pin a release tag. Docs (README "Upgrading",
+  `docs/setup-guide.md`) now describe the skill-driven upgrade alongside the manual ritual,
+  and the stale `uv tool upgrade bmad-automator` hint (missing `--reinstall`) is corrected.
+
 ## [0.3.1] — 2026-06-14
 
 Maintenance release. Also backfills the previously-undocumented `[0.3.0]` notes below.
