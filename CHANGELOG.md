@@ -5,7 +5,7 @@ All notable changes to `bmad-automator` are documented here. The format is based
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
-## [0.4.0] — Unreleased
+## [0.4.0] — 2026-06-16
 
 First release with **opt-in git-worktree isolation** for runs and sweeps. The default is
 unchanged: with no `[scm]` configuration, work happens in place on the checked-out branch
