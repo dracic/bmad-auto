@@ -30,10 +30,12 @@ exactly as before (`isolation = "none"` is byte-for-byte identical to prior beha
   preserved to `run_dir/failed/<unit>/changes.patch`; with `keep_failed` (default) its worktree +
   branch stay mounted for inspection. `failed_diff_max_mb` (default `5`) caps the per-file size of
   untracked files in that patch — oversized files are skipped with a labelled marker — and
-  `failed_diff_unlimited` lifts the cap entirely (logs a warning when active). Both are exposed in
-  the TUI settings screen.
+  `failed_diff_unlimited` lifts the cap entirely (logs a warning when active).
 - **`commit_message_template`** — optional `[scm]` template (`{story_key}` / `{run_id}`
-  substituted) used for story and sweep-bundle commits when set; also exposed in the TUI.
+  substituted) used for story and sweep-bundle commits when set.
+- The full `[scm]` section (isolation, `branch_per`, `target_branch`, `merge_strategy`,
+  `delete_branch`, `keep_failed`, the failed-diff caps, and the commit template) is editable from
+  the TUI settings screen. (`max_parallel` is omitted while it stays inert.)
 - **git worktree / branch / merge / diff primitives** in `verify.py` (worktree add/remove/list/
   prune, `create_branch`, `merge_branch`, `capture_diff`, …), unit-tested in isolation.
 

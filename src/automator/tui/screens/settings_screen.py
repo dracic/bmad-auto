@@ -39,7 +39,10 @@ from textual.widgets import (
 )
 
 from ...policy import (
+    BRANCH_PER_MODES,
     GATE_MODES,
+    ISOLATION_MODES,
+    MERGE_STRATEGIES,
     POLICY_FILE,
     RETRO_MODES,
     SWEEP_AUTO_MODES,
@@ -180,6 +183,65 @@ _FIELDS: tuple[_Field, ...] = (
     ),
     _Field("sweep", "repeat", "switch", default=SweepPolicy.repeat),
     _Field("sweep", "max_cycles", "int", minimum=1, default=SweepPolicy.max_cycles),
+    _Field(
+        "scm",
+        "isolation",
+        "select",
+        options=tuple(sorted(ISOLATION_MODES)),
+        default=ScmPolicy.isolation,
+        description=(
+            "none: work in place on the checked-out branch (default) · "
+            "worktree: run each story in its own git worktree, merge back to the target branch"
+        ),
+    ),
+    _Field(
+        "scm",
+        "branch_per",
+        "select",
+        options=tuple(sorted(BRANCH_PER_MODES)),
+        default=ScmPolicy.branch_per,
+        description=(
+            "worktree mode: one branch per story, or one shared branch per run "
+            "(run forces delete-branch off so the shared branch survives)"
+        ),
+    ),
+    _Field(
+        "scm",
+        "target_branch",
+        "str",
+        placeholder="default: the branch checked out at run start",
+        description="worktree mode: branch all units merge back into (created if missing)",
+    ),
+    _Field(
+        "scm",
+        "merge_strategy",
+        "select",
+        options=tuple(sorted(MERGE_STRATEGIES)),
+        default=ScmPolicy.merge_strategy,
+        description="worktree mode: how a unit branch lands on the target — ff, merge, or squash",
+    ),
+    _Field(
+        "scm",
+        "delete_branch",
+        "switch",
+        default=ScmPolicy.delete_branch,
+        description="worktree mode: delete the unit branch after a successful merge",
+    ),
+    _Field(
+        "scm",
+        "keep_failed",
+        "switch",
+        default=ScmPolicy.keep_failed,
+        description="worktree mode: keep a failed unit's worktree + branch mounted for inspection",
+    ),
+    _Field(
+        "scm",
+        "commit_message_template",
+        "str",
+        placeholder="blank = built-in default; {story_key} / {run_id} substituted",
+        label="commit message template",
+        description="commit message dev sessions use for a story/bundle commit when set",
+    ),
     _Field(
         "scm",
         "failed_diff_max_mb",
