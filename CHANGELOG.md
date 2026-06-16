@@ -48,6 +48,10 @@ exactly as before (`isolation = "none"` is byte-for-byte identical to prior beha
   run's state stays portable if the worktree is later moved.
 - The run reclaims its worktree scaffolding on clean completion (deliberately-kept failed/escalated
   worktrees are left in place and journalled so they can be found).
+- **TUI settings editor now collapses every section by default.** Each policy section
+  (`gates`, `limits`, `scm`, …) starts collapsed with a one-line description in its header, so the
+  grown-large form scans at a glance — expand only the section you want to edit. `ctrl+e` toggles
+  all sections open/closed at once.
 
 ### Fixed
 

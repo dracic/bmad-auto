@@ -270,6 +270,21 @@ _FIELDS: tuple[_Field, ...] = (
 # collect() sentinel for a field whose widget holds an unusable value
 _INVALID = object()
 
+# brief description shown after each section name in its collapsible header
+_SECTION_DESC = {
+    "gates": "approval gates, escalation & retrospective behavior",
+    "review": "separate adversarial review session toggle",
+    "limits": "cycle/attempt caps, timeout & token budget",
+    "verify": "post-implementation verification commands",
+    "notify": "desktop & file notifications",
+    "adapter": "CLI client, model & bypass flags (base for all stages)",
+    "adapter.dev": "dev-stage adapter overrides",
+    "adapter.review": "review-stage adapter overrides",
+    "adapter.triage": "triage-stage adapter overrides",
+    "sweep": "deferred-work sweep automation",
+    "scm": "git isolation, branching & merge-back",
+}
+
 
 class SettingsScreen(Screen[None]):
     DEFAULT_CSS = """
@@ -328,6 +343,7 @@ class SettingsScreen(Screen[None]):
     BINDINGS = [
         Binding("escape", "back", "back"),
         Binding("ctrl+s", "save", "save"),
+        Binding("ctrl+e", "toggle_all", "expand/collapse all"),
         Binding("up", "nav_prev", "prev", show=False, priority=True),
         Binding("down", "nav_next", "next", show=False, priority=True),
         Binding("enter", "edit_field", "edit", show=False, priority=True),
@@ -354,8 +370,9 @@ class SettingsScreen(Screen[None]):
                 id="note",
             )
             for section, fields in groupby(_FIELDS, key=lambda f: f.section):
-                collapsed = section.startswith("adapter.") and not self._has_keys(section)
-                with Collapsible(title=section, collapsed=collapsed):
+                desc = _SECTION_DESC.get(section)
+                title = f"{section} — {desc}" if desc else section
+                with Collapsible(title=title, collapsed=True):
                     for spec in fields:
                         yield from self._compose_field(spec)
             yield Static(id="errors")
@@ -363,9 +380,6 @@ class SettingsScreen(Screen[None]):
                 yield Button("save", variant="primary", id="save")
                 yield Button("cancel", id="cancel")
         yield Footer()
-
-    def _has_keys(self, section: str) -> bool:
-        return any(self._doc.get(section, k) is not None for k in ("name", "model", "extra_args"))
 
     def _compose_field(self, spec: _Field) -> ComposeResult:
         raw = self._doc.get(spec.section, spec.key)
@@ -453,6 +467,13 @@ class SettingsScreen(Screen[None]):
         if isinstance(area, TextArea):
             self._editing = area
             area.add_class("-editing")
+
+    def action_toggle_all(self) -> None:
+        self._exit_edit()
+        sections = list(self.query(Collapsible))
+        target = any(not c.collapsed for c in sections)  # something open -> collapse all
+        for c in sections:
+            c.collapsed = target
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape" and self._editing is not None:
