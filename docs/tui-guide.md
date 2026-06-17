@@ -363,39 +363,41 @@ open/closed at once. Unset keys show their default as a placeholder rather than
 a baked-in value; clearing a field deletes the key, restoring default/inherit
 behavior.
 
-| Section.key                           | Type                   | Default            | Notes                                                                                        |
-| ------------------------------------- | ---------------------- | ------------------ | -------------------------------------------------------------------------------------------- |
-| `gates.mode`                          | select                 | `per-epic`         | `none` / `per-epic` / `per-story-spec-approval`                                              |
-| `gates.retrospective`                 | select                 | `notify`           | `never` / `notify` / `auto`                                                                  |
-| `limits.max_review_cycles`            | int ≥ 1                | 3                  | review loop bound before plateau-defer                                                       |
-| `limits.max_dev_attempts`             | int ≥ 1                | 2                  | dev retry budget                                                                             |
-| `limits.session_timeout_min`          | int ≥ 1                | 45                 | per-session wall clock                                                                       |
-| `limits.stop_without_result_nudges`   | int ≥ 0                | 1                  | nudges when a session stops without result.json                                              |
-| `limits.max_tokens_per_story`         | int ≥ 1                | 2000000            | cost-weighted budget                                                                         |
-| `limits.cache_read_weight`            | float 0.0–1.0          | 0.1                | cache-read weight in the budget; 1.0 = raw                                                   |
-| `verify.commands`                     | one per line           | (none)             | test/lint commands run before commit                                                         |
-| `notify.desktop`                      | switch                 | on                 | desktop notifications                                                                        |
-| `notify.file`                         | switch                 | on                 | ATTENTION file logging                                                                       |
-| `adapter.name`                        | text                   | `claude`           | CLI profile: `claude` / `codex` / `gemini` / custom                                          |
-| `adapter.model`                       | text                   | (CLI default)      | model override                                                                               |
-| `adapter.extra_args`                  | override switch + args | profile defaults   | see below                                                                                    |
-| `adapter.cleanup_session_on_finish`   | switch                 | on                 | kill the run's tmux session on finish; off keeps it                                          |
-| `adapter.dev` / `.review` / `.triage` | text ×2 + args         | inherit            | per-stage `name` / `model` / `extra_args` overrides                                          |
-| `sweep.auto`                          | select                 | `never`            | `never` / `per-epic` / `run-end`                                                             |
-| `sweep.max_bundles`                   | int ≥ 1                | 5                  | bundles per sweep; triage excess truncated                                                   |
-| `sweep.max_triage_attempts`           | int ≥ 1                | 2                  | triage validation retries                                                                    |
-| `sweep.repeat`                        | switch                 | off                | re-triage after each cycle, continue on new work                                             |
-| `sweep.max_cycles`                    | int ≥ 1                | 5                  | cycle cap per sweep run when repeat is on                                                    |
-| `scm.isolation`                       | select                 | `none`             | `none` (work in place) / `worktree` (per-unit worktree + merge-back)                         |
-| `scm.branch_per`                      | select                 | `story`            | worktree mode: branch per `story`, or one shared branch per `run` (forces delete-branch off) |
-| `scm.target_branch`                   | text                   | (run-start branch) | worktree mode: branch units merge back into (created if missing)                             |
-| `scm.merge_strategy`                  | select                 | `merge`            | worktree mode: `ff` / `merge` / `squash`                                                     |
-| `scm.delete_branch`                   | switch                 | on                 | worktree mode: delete the unit branch after a successful merge                               |
-| `scm.keep_failed`                     | switch                 | on                 | keep a failed unit's worktree + branch mounted for inspection                                |
-| `scm.commit_message_template`         | text                   | (built-in)         | story/bundle commit message; `{story_key}` / `{run_id}` substituted                          |
-| `scm.failed_diff_max_mb`              | int ≥ 1                | 5                  | per-file cap (MB) for untracked files in a kept-failed unit's `changes.patch`                |
-| `scm.failed_diff_unlimited`           | switch                 | off                | lift the failed-diff size cap (warns when active)                                            |
-| `tui.low_frame_rate`                  | switch                 | off                | cap to 15fps + disable animations (slow/SSH links); applies next launch                      |
+| Section.key                           | Type                   | Default            | Notes                                                                                                                                                |
+| ------------------------------------- | ---------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gates.mode`                          | select                 | `per-epic`         | `none` / `per-epic` / `per-story-spec-approval`                                                                                                      |
+| `gates.retrospective`                 | select                 | `notify`           | `never` / `notify` / `auto`                                                                                                                          |
+| `limits.max_review_cycles`            | int ≥ 1                | 3                  | review loop bound before plateau-defer                                                                                                               |
+| `limits.max_dev_attempts`             | int ≥ 1                | 2                  | dev retry budget                                                                                                                                     |
+| `limits.session_timeout_min`          | int ≥ 1                | 45                 | per-session wall clock                                                                                                                               |
+| `limits.stop_without_result_nudges`   | int ≥ 0                | 1                  | nudges when a session stops without result.json                                                                                                      |
+| `limits.max_tokens_per_story`         | int ≥ 1                | 2000000            | cost-weighted budget                                                                                                                                 |
+| `limits.cache_read_weight`            | float 0.0–1.0          | 0.1                | cache-read weight in the budget; 1.0 = raw                                                                                                           |
+| `verify.commands`                     | one per line           | (none)             | test/lint commands run before commit                                                                                                                 |
+| `notify.desktop`                      | switch                 | on                 | desktop notifications                                                                                                                                |
+| `notify.file`                         | switch                 | on                 | ATTENTION file logging                                                                                                                               |
+| `adapter.name`                        | text                   | `claude`           | CLI profile: `claude` / `codex` / `gemini` / custom                                                                                                  |
+| `adapter.model`                       | text                   | (CLI default)      | model override                                                                                                                                       |
+| `adapter.extra_args`                  | override switch + args | profile defaults   | see below                                                                                                                                            |
+| `adapter.cleanup_session_on_finish`   | switch                 | on                 | kill the run's tmux session on finish; off keeps it                                                                                                  |
+| `adapter.dev` / `.review` / `.triage` | text ×2 + args         | inherit            | per-stage `name` / `model` / `extra_args` overrides                                                                                                  |
+| `sweep.auto`                          | select                 | `never`            | `never` / `per-epic` / `run-end`                                                                                                                     |
+| `sweep.max_bundles`                   | int ≥ 1                | 5                  | bundles per sweep; triage excess truncated                                                                                                           |
+| `sweep.max_triage_attempts`           | int ≥ 1                | 2                  | triage validation retries                                                                                                                            |
+| `sweep.repeat`                        | switch                 | off                | re-triage after each cycle, continue on new work                                                                                                     |
+| `sweep.max_cycles`                    | int ≥ 1                | 5                  | cycle cap per sweep run when repeat is on                                                                                                            |
+| `scm.isolation`                       | select                 | `none`             | `none` (work in place) / `worktree` (per-unit worktree + merge-back)                                                                                 |
+| `scm.branch_per`                      | select                 | `story`            | worktree mode: branch per `story`, or one shared branch per `run` (forces delete-branch off)                                                         |
+| `scm.target_branch`                   | text                   | (run-start branch) | worktree mode: branch units merge back into (created if missing)                                                                                     |
+| `scm.merge_strategy`                  | select                 | `merge`            | worktree mode: `ff` / `merge` / `squash`                                                                                                             |
+| `scm.delete_branch`                   | switch                 | on                 | worktree mode: delete the unit branch after a successful merge                                                                                       |
+| `scm.keep_failed`                     | switch                 | on                 | keep a failed unit's worktree + branch mounted for inspection                                                                                        |
+| `scm.seed_adapter_defaults`           | switch                 | on                 | worktree mode: seed each loaded adapter's gitignored MCP/CLI configs (`.mcp.json`, `.claude/settings.json`, `.codex/config.toml`…) into the worktree |
+| `scm.worktree_seed`                   | one per line           | (none)             | worktree mode: extra project-relative gitignored files to seed, on top of the adapter defaults                                                       |
+| `scm.commit_message_template`         | text                   | (built-in)         | story/bundle commit message; `{story_key}` / `{run_id}` substituted                                                                                  |
+| `scm.failed_diff_max_mb`              | int ≥ 1                | 5                  | per-file cap (MB) for untracked files in a kept-failed unit's `changes.patch`                                                                        |
+| `scm.failed_diff_unlimited`           | switch                 | off                | lift the failed-diff size cap (warns when active)                                                                                                    |
+| `tui.low_frame_rate`                  | switch                 | off                | cap to 15fps + disable animations (slow/SSH links); applies next launch                                                                              |
 
 (`scm.max_parallel` is intentionally **not** exposed in the editor — it stays
 inert, clamped to 1, until parallel fan-out is built.)

@@ -30,6 +30,7 @@ import tempfile
 from pathlib import Path
 
 import yaml
+from textual.widgets import Collapsible
 
 # Import the package the same way the installed CLI does.
 from automator.journal import Journal, save_state
@@ -532,6 +533,18 @@ async def capture(root: Path) -> list[str]:
         await pilot.pause(0.3)
         app.save_screenshot(str(OUT_DIR / "settings.svg"))
         saved.append("settings.svg")
+
+        # Same screen, [scm] section expanded — the sections start collapsed, so
+        # the worktree-isolation + config-seeding knobs are only visible here.
+        seed_switch = app.screen.query_one("#scm-seed_adapter_defaults")
+        scm_section = next(a for a in seed_switch.ancestors if isinstance(a, Collapsible))
+        scm_section.collapsed = False
+        await pilot.pause()
+        # frame the seed knobs with the worktree knobs above them still in view
+        app.screen.query_one("#scm-worktree_seed").scroll_visible(animate=False)
+        await pilot.pause(0.3)
+        app.save_screenshot(str(OUT_DIR / "settings-scm.svg"))
+        saved.append("settings-scm.svg")
 
     return saved
 

@@ -7,6 +7,20 @@ breaking changes may land in a minor release.
 
 ## [0.4.3] — 2026-06-17
 
+### Added
+
+- **Worktree config seeding.** Under `[scm] isolation = "worktree"`, a `git worktree add`
+  checks out tracked files only, so a project's gitignored MCP/CLI configs (`.mcp.json`,
+  `.claude/settings.json`, `.codex/config.toml`, `.gemini/settings.json`) were absent from
+  every fresh worktree — isolated dev/review sessions then timed out reaching their MCP server
+  and raised a `CRITICAL` verification-blocked escalation that looked like a spec error. Each
+  loaded adapter's own configs are now copied into the worktree before the session launches,
+  governed by two new `[scm]` knobs: `seed_adapter_defaults` (default on; seeds each loaded
+  CLI profile's `seed_files`) and `worktree_seed` (extra project-relative paths on top). Seeding
+  is copy-when-absent and runs before the signal-hook merge, so a seeded `settings.json` keeps
+  its real content and only gains the Stop hook; seeded paths are shielded from the unit's
+  `git add -A`. Both knobs are exposed in the TUI settings editor's `[scm]` section.
+
 ### Fixed
 
 - `bmad-auto cleanup` (and the TUI `c` action) no longer kills sessions and control
