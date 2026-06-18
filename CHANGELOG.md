@@ -5,68 +5,46 @@ All notable changes to `bmad-automator` are documented here. The format is based
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
-## [0.4.3] — 2026-06-17
+## [0.4.3] — 2026-06-18
 
 ### Added
 
-- **Game-engine plugin layer (opt-in; Unity, shared mode).** A new `[engine]` policy section
-  adapts the dev/sweep cycle to projects that drive a live engine Editor through an Editor MCP
-  (e.g. a Unity project controlled via [IvanMurzak/Unity-MCP](https://github.com/IvanMurzak/Unity-MCP)
-  or [CoplayDev/unity-mcp](https://github.com/CoplayDev/unity-mcp)). Off by default
-  (`name = ""`) — normal projects are unaffected. Engine plugins ship like CLI profiles:
-  bundled TOML in `automator/data/engines/<name>/`, overridable per project under
-  `.automator/engines/<name>/`. Because a live Editor MCP can only act on the folder its Editor
-  has open (Unity binds one Editor per folder and can't be repointed live), `editor_mode` is
-  coupled to `[scm] isolation`: **`shared`** (requires `isolation = "none"`) runs the agent in
-  place on the project the operator's warm Editor already has open — zero relaunches, full live
-  MCP; **`per_worktree`** (requires `isolation = "worktree"`) gives each unit its own managed
-  Editor (see below). Before each unit, a **readiness gate** runs the plugin's `ready_cmd` and
-  blocks until the Editor + MCP report ready (Unity: `wait-for-ready` for IvanMurzak, a
-  connectivity check for CoplayDev); on timeout the unit is deferred with an `ATTENTION` notice
-  rather than starting a session against a half-open Editor.
-- **Game-engine `per_worktree` mode (Unity).** With `editor_mode = "per_worktree"` and
-  `[scm] isolation = "worktree"`, each unit runs in its own git worktree with a dedicated managed
-  Editor: a per-worktree setup hook launches the Editor on the worktree path (the IvanMurzak CLI
-  derives the MCP port from that path, so the worktree's Editor self-isolates from the operator's
-  main one), writes the worktree's `.mcp.json`, and symlinks `Library` to a persistent
-  per-worktree cache under the gitignored `.automator/cache/` (never the operator's live
-  Library); the readiness gate then waits for it,
-  and a teardown hook quits the Editor on completion **and** on pause/escalation so it never
-  outlives its worktree (with a hard-kill fallback: when readiness failed the Editor never
-  registered with the MCP, so `close` can't find it — teardown then SIGTERM→SIGKILLs any Unity
-  Editor binary still bound to the worktree path, so a failed unit can't leak a live Editor). The MCP server's generated skill tree (gitignored, so absent from a
-  fresh checkout) is copied into each worktree via the plugin's new `seed_globs`. A setup failure
-  defers the unit instead of starting a session; only the IvanMurzak MCP is wired for a managed
-  launch (CoplayDev's shared-server model needs a project-local override). The readiness gate
-  waits a cold-launch **grace** (new `[engine] ready_grace_sec`, default `-1` = auto: 120s for
-  per_worktree, 0s for shared) before the first probe and passes an explicit `--timeout` to
-  `wait-for-ready` (the CLI's own default is only 120s), retrying so a fast connection-refused
-  against a not-yet-listening worktree Editor no longer aborts the gate early. `bmad-auto init`
-  now also gitignores `.automator/cache/` (alongside `.automator/runs/`) so the rebuildable
-  Library cache never lands in git.
-- **Worktree config seeding.** Under `[scm] isolation = "worktree"`, a `git worktree add`
-  checks out tracked files only, so a project's gitignored MCP/CLI configs (`.mcp.json`,
-  `.claude/settings.json`, `.codex/config.toml`, `.gemini/settings.json`) were absent from
-  every fresh worktree — isolated dev/review sessions then timed out reaching their MCP server
-  and raised a `CRITICAL` verification-blocked escalation that looked like a spec error. Each
-  loaded adapter's own configs are now copied into the worktree before the session launches,
-  governed by two new `[scm]` knobs: `seed_adapter_defaults` (default on; seeds each loaded
-  CLI profile's `seed_files`) and `worktree_seed` (extra project-relative paths on top). Seeding
-  is copy-when-absent and runs before the signal-hook merge, so a seeded `settings.json` keeps
-  its real content and only gains the Stop hook; seeded paths are shielded from the unit's
-  `git add -A`. Both knobs are exposed in the TUI settings editor's `[scm]` section.
+- **Game-engine plugin layer (opt-in; Unity).** New `[engine]` policy section adapts the
+  dev/sweep cycle to projects that drive a live engine Editor through an MCP (Unity via
+  [IvanMurzak/Unity-MCP](https://github.com/IvanMurzak/Unity-MCP) or
+  [CoplayDev/unity-mcp](https://github.com/CoplayDev/unity-mcp)); off by default. Plugins ship
+  like CLI profiles — bundled under `automator/data/engines/<name>/`, overridable in
+  `.automator/engines/<name>/`. `editor_mode` couples to `[scm] isolation`: `shared` runs the
+  agent in place on the operator's open Editor; `per_worktree` gives each unit its own managed
+  Editor. A readiness gate blocks until the Editor + MCP report ready before each unit, deferring
+  on timeout instead of starting against a half-open Editor.
+- **Unity `per_worktree` mode.** Each unit runs in its own git worktree with a dedicated Editor:
+  - Launches in local (Custom) mode — `bootstrap-local` plus `open --start-server true` so the
+    Editor hosts its own per-path MCP server; this makes `wait-for-ready` a real readiness signal
+    before any client connects. Connection knobs overridable via `BMAD_AUTO_UNITY_MCP_*`
+    (`…_LOCAL=0` keeps the prior cloud launch).
+  - Primes the worktree `Library` with a reflink/CoW copy of the warm main `Library`, so Unity
+    reimports incrementally rather than cold — a cold import on a large project crashes the import
+    workers (Burst `SIGFPE` writing `VirtualArtifacts`). Tunable via `BMAD_AUTO_UNITY_LIBRARY_SEED`
+    and `…_SEED_MODE` (`reflink`|`copy`|`symlink`|`off`).
+  - Teardown quits the Editor and reaps its child `gamedev-mcp-server` on completion or pause, so
+    neither leaks across runs (a leaked server holds its port and breaks the next run).
+  - Cold-launch grace via `[engine] ready_grace_sec`; MCP skill tree seeded into each worktree via
+    `seed_globs`; `init` now gitignores `.automator/cache/`.
+- **Worktree config seeding.** A fresh worktree checks out tracked files only, so a project's
+  gitignored MCP/CLI configs (`.mcp.json`, `.claude/settings.json`, …) were missing — isolated
+  sessions then timed out reaching their MCP and escalated as spurious spec errors. Each loaded
+  adapter's configs are now copied in before launch, via new `[scm]` knobs `seed_adapter_defaults`
+  (default on) and `worktree_seed` (extra paths). Both are in the TUI settings editor.
 
 ### Fixed
 
-- `bmad-auto cleanup` (and the TUI `c` action) no longer kills sessions and control
-  windows belonging to **other** projects' live runs. tmux sessions are global and were
-  named only `bmad-auto-<run_id>` with no project identity, so a run id not found under
-  the current project was treated as a prunable orphan — which matched another project's
-  active run and stopped it prematurely. Each agent session and control-session window is
-  now stamped with its project at creation (a `@bmad_project` tmux option), and cleanup
-  only prunes sessions/windows belonging to the current project. True same-project orphans
-  (a deleted run dir whose session lingers) are still cleaned. Sessions created before this
-  release are untagged and are left untouched across projects until recreated.
+- `bmad-auto cleanup` (and the TUI `c` action) no longer stops other projects' live runs. tmux
+  sessions are global but were named only `bmad-auto-<run_id>`, so a run id absent from the current
+  project looked like a prunable orphan and matched another project's active run. Sessions and
+  windows are now stamped with their project (`@bmad_project`); cleanup prunes only the current
+  project's, while still clearing true same-project orphans. Pre-existing untagged sessions are
+  left untouched.
 
 ## [0.4.2] — 2026-06-17
 

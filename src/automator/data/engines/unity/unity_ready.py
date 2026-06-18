@@ -6,10 +6,20 @@ dev/sweep session never starts against a half-open Editor. The engine runs this
 as the plugin's ``ready_cmd`` and injects its configuration via the environment.
 
 Supported MCP servers (BMAD_AUTO_ENGINE_MCP):
-  - ivanmurzak : shells out to the Unity-MCP CLI's ``wait-for-ready``, passing an
-                 explicit ``--timeout`` (the CLI's own default is only 120s) and
+  - ivanmurzak : shells out to the Unity-MCP CLI's ``wait-for-ready`` (passing an
+                 explicit ``--timeout`` — the CLI's own default is only 120s — and
                  retrying so a fast connection-refused against a not-yet-listening
-                 Editor doesn't abort the gate early.
+                 Editor doesn't abort the gate early). Because the per_worktree
+                 Editor hosts its *own* MCP server (unity_setup launches it with
+                 ``--start-server true``), the Editor↔server bridge — and therefore
+                 ``wait-for-ready`` — comes up *without* any MCP client connected, so
+                 it is a sound readiness signal before the agent ever runs. That is
+                 the default gate. Optionally (BMAD_AUTO_UNITY_READY_TOOL set to a
+                 tool name) it also confirms with a real read-only ``run-tool``
+                 round-trip that actually executes in the Editor. This is OFF by
+                 default: tool names are version-specific (e.g. ``ping``, ``unity-
+                 tool-list``) and some return null/non-zero even when healthy, so the
+                 round-trip is opt-in for operators who've picked a tool that works.
   - coplaydev  : connectivity check against the MCP HTTP server (best effort —
                  see note below; override engine.ready_cmd for a stricter probe).
 
@@ -28,6 +38,7 @@ Env knobs (all optional):
   BMAD_AUTO_REPO_ROOT            main repo root
   BMAD_AUTO_ENGINE_READY_TIMEOUT seconds to keep polling          (default 600)
   BMAD_AUTO_ENGINE_READY_GRACE   pre-probe delay seconds; -1=auto (default -1)
+  BMAD_AUTO_UNITY_READY_TOOL     opt-in read-only run-tool to confirm (default empty = off)
   UNITY_MCP_CLI                  IvanMurzak CLI binary            (default unity-mcp-cli)
   UNITY_MCP_URL                  CoplayDev MCP server URL         (default http://localhost:8080)
 
@@ -77,6 +88,57 @@ def _grace() -> float:
     return _AUTO_GRACE.get(mode, 0.0)
 
 
+# run-tool prints these even on a "successful" (rc 0) invocation when the call
+# actually failed — the CLI returns 0 on a connection-refused, and a tool that
+# returns null comes back as an HTTP 500. Treat any of these as not-ready.
+_TOOL_ERROR_MARKERS = ("error", "not found", "refused", "internal server error", "is null")
+
+
+def _ready_tool() -> str:
+    """The optional read-only run-tool used to confirm the Editor accepts tool
+    calls. Empty (the default) disables the round-trip: wait-for-ready alone gates
+    readiness, which is sound now that the Editor hosts its own MCP server."""
+    return os.environ.get("BMAD_AUTO_UNITY_READY_TOOL", "").strip()
+
+
+def _wait_for_ready(cli: str, remaining: float) -> tuple[int, str]:
+    """One `wait-for-ready` call that polls for the rest of the budget. Returns
+    (rc, output); rc 0 means the Editor↔server bridge is up."""
+    cli_timeout_ms = max(1000, int(remaining * 1000))
+    try:
+        proc = subprocess.run(
+            [cli, "wait-for-ready", _project(), "--timeout", str(cli_timeout_ms)],
+            timeout=remaining + 5,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.TimeoutExpired:
+        return 1, "wait-for-ready process timed out"
+    return proc.returncode, (proc.stdout + proc.stderr).strip()[-500:]
+
+
+def _run_tool_probe(cli: str, tool: str, remaining: float) -> tuple[int, str]:
+    """A real read-only tool round-trip against the Editor over HTTP — proof it
+    can accept tool calls, independent of any MCP client. Returns (rc, output)."""
+    tool_timeout_ms = max(1000, min(60000, int(remaining * 1000)))
+    try:
+        proc = subprocess.run(
+            [cli, "run-tool", tool, _project(), "--timeout", str(tool_timeout_ms)],
+            timeout=remaining + 5,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.TimeoutExpired:
+        return 1, f"run-tool {tool} timed out"
+    out = (proc.stdout + proc.stderr).strip()
+    rc = proc.returncode
+    # the CLI's exit code is unreliable (0 on connection-refused; non-zero on a
+    # null-returning but healthy tool) — also scan the output for error markers.
+    if rc == 0 and any(m in out.lower() for m in _TOOL_ERROR_MARKERS):
+        rc = 1
+    return rc, out[-500:]
+
+
 def _ready_ivanmurzak(deadline: float) -> int:
     cli = os.environ.get("UNITY_MCP_CLI", "unity-mcp-cli")
     if shutil.which(cli) is None:
@@ -86,30 +148,33 @@ def _ready_ivanmurzak(deadline: float) -> int:
             file=sys.stderr,
         )
         return 2
+    tool = _ready_tool()
     last = ""
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        # let the CLI poll for the rest of the budget in one call; if it instead
+        # phase 1: wait until the Editor↔server bridge reports ready. If it
         # fast-fails (Editor not listening yet) we retry until the deadline.
-        cli_timeout_ms = max(1000, int(remaining * 1000))
-        try:
-            proc = subprocess.run(
-                [cli, "wait-for-ready", _project(), "--timeout", str(cli_timeout_ms)],
-                timeout=remaining + 5,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.TimeoutExpired:
-            last = "wait-for-ready process timed out"
-            break
-        if proc.returncode == 0:
+        rc, last = _wait_for_ready(cli, remaining)
+        if rc != 0:
+            if deadline - time.monotonic() <= 0:
+                break
+            time.sleep(3)  # brief pause before retrying a fast-fail
+            continue
+        # phase 2: confirm with a real tool round-trip (proves the Editor accepts
+        # tool calls with no client attached). Skipped when the tool is empty.
+        if not tool:
             return 0
-        last = (proc.stdout + proc.stderr).strip()[-500:]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        rc, last = _run_tool_probe(cli, tool, remaining)
+        if rc == 0:
+            return 0
         if deadline - time.monotonic() <= 0:
             break
-        time.sleep(3)  # brief pause before retrying a fast-fail
+        time.sleep(3)  # bridge up but tool not answering yet (still importing?)
     print(f"unity_ready: Editor not ready within budget: {last}", file=sys.stderr)
     return 1
 
