@@ -149,6 +149,10 @@ class Engine:
         # fails fast rather than mid-unit.
         self._registry.validate(policy)
         self._bus = HookBus(self._registry, journal)
+        # stages at which some active plugin injects a provided workflow session
+        # (Phase 4). Precomputed once for an O(1) guard so a run whose plugins
+        # provide no workflows stays byte-identical (no extra sessions, no journal).
+        self._workflow_stages = self._registry.workflow_stages()
         if self._bus.any_active():
             self.journal.append("plugins-active", plugins=self._bus.active_plugins())
         # stop-signal bookkeeping (see run())
@@ -820,6 +824,57 @@ class Engine:
             env = dict(ctx.proposed_env)
         return prompt, env, ctx
 
+    def _run_workflows(self, stage: str, task: StoryTask, seq: int) -> bool:
+        """Run every plugin-provided workflow bound to ``stage`` as an extra agent
+        session through the generic ``_run_session`` path — the conservative form
+        of custom orchestration (no new pipeline stage; an injected session in the
+        unit's live worktree). Returns True iff a *blocking* workflow's session
+        did not complete and the unit was therefore deferred (the caller must stop
+        driving it). O(1) no-op when no active plugin provides a workflow here, so
+        a workflow-free run stays byte-identical.
+
+        A workflow session is just another session: it fires ``pre_workflow_session``
+        + ``pre_session`` + ``post_session`` and is recorded on the task like any
+        other, so token budgets and the transcript trail account for it."""
+        if stage not in self._workflow_stages:
+            return False
+        for lp, wf in self._registry.workflows_for(stage):
+            prompt = (
+                lp.manifest.render(wf.prompt)
+                .replace("{story_key}", task.story_key)
+                .replace("{run_id}", self.state.run_id)
+            )
+            self.journal.append(
+                "workflow-start",
+                plugin=lp.name,
+                workflow=wf.name,
+                stage=stage,
+                role=wf.role,
+                story_key=task.story_key,
+            )
+            result = self._run_session(
+                task,
+                role=wf.role,
+                prompt=prompt,
+                seq=seq,
+                session_stage="pre_workflow_session",
+                label=f"{lp.name}.{wf.name}",
+            )
+            self.journal.append(
+                "workflow-end",
+                plugin=lp.name,
+                workflow=wf.name,
+                status=result.status,
+                story_key=task.story_key,
+            )
+            if wf.blocking and result.status != "completed":
+                self._defer(
+                    task,
+                    f"blocking workflow {wf.name!r} ({lp.name}) did not complete: {result.status}",
+                )
+                return True
+        return False
+
     def _run_story(self, task: StoryTask) -> None:
         ctx = self._emit("pre_story", task)
         if self._vetoed(ctx, task):
@@ -897,6 +952,8 @@ class Engine:
             self._save()
             if decision.action == Action.PROCEED:
                 self._emit("post_dev_phase", task)
+                if self._run_workflows("post_dev_phase", task, task.attempt):
+                    return False
                 return True
             if decision.action == Action.RETRY:
                 if outcome is not None and outcome.fixable:
@@ -963,6 +1020,8 @@ class Engine:
                 dismissed=rj.get("dismissed", 0),
             )
             self._emit("post_review_result", task, role="review", result_json=rj)
+            if self._run_workflows("post_review_result", task, task.review_cycle):
+                return
             if rj.get("clean"):
                 outcome = self._verify_review(task)
                 if outcome.ok:
@@ -1080,8 +1139,11 @@ class Engine:
         prompt: str,
         seq: int,
         session_stage: str | None = None,
+        label: str | None = None,
     ) -> SessionResult:
-        task_id = f"{task.story_key}-{role}-{seq}"
+        # ``label`` names a non-standard session (a plugin-provided workflow) so
+        # its task_id stays distinct from the role's own dev/review attempts.
+        task_id = f"{task.story_key}-{label or role}-{seq}"
         adapter = self.adapters[role]
         cfg = self.policy.adapter.resolved(role)
         env = {

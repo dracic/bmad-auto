@@ -32,6 +32,18 @@ SUPPORTED_API: frozenset[int] = frozenset({1})
 # widget hints.
 SETTING_TYPES = {"bool", "int", "float", "str", "select"}
 
+# Stages at which a plugin-provided workflow may inject an extra agent session
+# (Phase 4). Deliberately small + conservative: both fire *inside* the unit's
+# live worktree with the dev/review work already on disk, so an injected session
+# sees the real tree. Other stages either lack a worktree (run-boundary) or run
+# after teardown (post_story restores the main checkout), so a session there
+# would target the wrong tree — they are intentionally excluded.
+WORKFLOW_STAGES = frozenset({"post_dev_phase", "post_review_result"})
+
+# Roles a workflow session may run as — the engine's two adapters. A workflow
+# names one so it reuses that role's resolved adapter config (model, timeout).
+WORKFLOW_ROLES = frozenset({"dev", "review"})
+
 # Where a manifest was discovered, in overlay precedence order. Recorded so the
 # loader can treat an api_version mismatch as a hard error for builtins but a
 # skip-with-warning for third-party plugins.
@@ -84,6 +96,28 @@ class SettingSpec:
 
 
 @dataclass(frozen=True)
+class WorkflowSpec:
+    """A plugin-provided workflow: an extra agent session injected at a lifecycle
+    stage (the ``[provides]`` surface, implemented in Phase 4).
+
+    A workflow is the conservative form of custom orchestration the plan settled
+    on — no new pipeline stage, just an extra session run through the engine's
+    generic ``_run_session`` path at an allowlisted ``stage`` (see
+    WORKFLOW_STAGES). ``role`` selects which adapter runs it (WORKFLOW_ROLES);
+    ``prompt`` is the agent prompt template, expanding ``{story_key}``,
+    ``{run_id}`` and ``{scripts}`` (the plugin's script dir). A ``blocking``
+    workflow whose session does not complete defers the unit (it routes through
+    the engine's existing defer primitive); a non-blocking one is advisory.
+    """
+
+    name: str
+    stage: str
+    role: str = "dev"
+    prompt: str = ""
+    blocking: bool = False
+
+
+@dataclass(frozen=True)
 class PythonSpec:
     """Optional in-process module. Its presence makes the plugin trust-gated:
     the module is never imported unless the plugin is in ``[plugins] enabled``.
@@ -113,8 +147,9 @@ class PluginManifest:
     hooks: tuple[HookSpec, ...] = ()
     settings: tuple[SettingSpec, ...] = ()
     python: PythonSpec | None = None
-    # custom orchestration items a plugin contributes (wired in a later phase).
-    workflows: tuple[str, ...] = ()
+    # custom orchestration items a plugin contributes: extra agent sessions
+    # injected at a lifecycle stage (parsed from [workflows.<name>] tables).
+    workflows: tuple[WorkflowSpec, ...] = ()
     # extra gitignored paths to seed into a per-unit worktree, mirroring the
     # engine plugin (seed_files = literal project-relative paths, seed_globs =
     # patterns expanded against the main repo). Consumed by worktree priming.
@@ -137,6 +172,9 @@ class PluginManifest:
 
     def setting_defaults(self) -> dict[str, Any]:
         return {s.key: s.default for s in self.settings}
+
+    def workflows_for(self, stage: str) -> tuple[WorkflowSpec, ...]:
+        return tuple(w for w in self.workflows if w.stage == stage)
 
 
 class Plugin:
@@ -225,10 +263,13 @@ __all__ = [
     "API_VERSION",
     "SUPPORTED_API",
     "SETTING_TYPES",
+    "WORKFLOW_STAGES",
+    "WORKFLOW_ROLES",
     "PLUGIN_SOURCES",
     "PluginError",
     "HookSpec",
     "SettingSpec",
+    "WorkflowSpec",
     "PythonSpec",
     "PluginManifest",
     "Plugin",

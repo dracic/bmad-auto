@@ -33,6 +33,7 @@ from .model import (
     Plugin,
     PluginManifest,
     SettingSpec,
+    WorkflowSpec,
 )
 
 
@@ -142,10 +143,31 @@ class PluginRegistry:
         ]
 
     def provided_workflows(self) -> dict[str, tuple[str, ...]]:
-        """plugin name -> declared workflow names (for custom orchestration)."""
+        """plugin name -> declared workflow names (for introspection / docs)."""
         return {
-            lp.manifest.name: lp.manifest.workflows for lp in self._loaded if lp.manifest.workflows
+            lp.manifest.name: tuple(w.name for w in lp.manifest.workflows)
+            for lp in self._loaded
+            if lp.manifest.workflows
         }
+
+    def workflow_stages(self) -> frozenset[str]:
+        """Every stage some loaded plugin binds a workflow to. The engine reads
+        this once to precompute an O(1) injection guard — a run whose plugins
+        provide no workflows pays nothing at the per-stage check."""
+        return frozenset(w.stage for lp in self._loaded for w in lp.manifest.workflows)
+
+    def workflows_for(self, stage: str) -> list[tuple[LoadedPlugin, WorkflowSpec]]:
+        """Every (plugin, workflow) injected at ``stage``, in registry order.
+
+        Only *active* plugins contribute: a data-only/declarative plugin always,
+        an in-process plugin only once enabled+constructed (instance built). An
+        un-enabled or errored ``[python]`` plugin is inert — its workflows must
+        not fire any more than its module runs (same gate as ``_active_for_seeds``)."""
+        out: list[tuple[LoadedPlugin, WorkflowSpec]] = []
+        for lp in self._active_for_seeds():
+            for wf in lp.manifest.workflows_for(stage):
+                out.append((lp, wf))
+        return out
 
     def instances(self) -> list[Plugin]:
         """Constructed, trusted, non-disabled in-process plugins."""

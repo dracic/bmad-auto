@@ -19,11 +19,14 @@ from typing import Any
 
 from .model import (
     SETTING_TYPES,
+    WORKFLOW_ROLES,
+    WORKFLOW_STAGES,
     HookSpec,
     PluginError,
     PluginManifest,
     PythonSpec,
     SettingSpec,
+    WorkflowSpec,
 )
 
 
@@ -97,6 +100,45 @@ def _parse_settings(settings_l: Any, fail) -> tuple[SettingSpec, ...]:
     return tuple(specs)
 
 
+def _parse_workflows(workflows_d: Any, fail) -> tuple[WorkflowSpec, ...]:
+    """Parse ``[workflows.<name>]`` tables — the ``[provides]`` surface. Each is a
+    stage-bound session injection; mirrors ``_parse_hooks`` (name as the table
+    key, like a hook's stage). ``stage`` and ``role`` are validated against the
+    framework's small allowlists so a typo fails loudly at load rather than
+    silently never firing."""
+    if not workflows_d:
+        return ()
+    if not isinstance(workflows_d, dict):
+        raise fail("[workflows] must be a table of [workflows.<name>] tables")
+    specs: list[WorkflowSpec] = []
+    for name, raw in workflows_d.items():
+        if not isinstance(raw, dict):
+            raise fail(f"[workflows.{name}] must be a table")
+        stage = str(raw.get("stage", "")).strip()
+        if stage not in WORKFLOW_STAGES:
+            raise fail(
+                f"[workflows.{name}] stage must be one of {sorted(WORKFLOW_STAGES)}: got {stage!r}"
+            )
+        role = str(raw.get("role", "dev")).strip() or "dev"
+        if role not in WORKFLOW_ROLES:
+            raise fail(
+                f"[workflows.{name}] role must be one of {sorted(WORKFLOW_ROLES)}: got {role!r}"
+            )
+        prompt = str(raw.get("prompt", ""))
+        if not prompt:
+            raise fail(f"[workflows.{name}] requires a 'prompt'")
+        specs.append(
+            WorkflowSpec(
+                name=str(name),
+                stage=stage,
+                role=role,
+                prompt=prompt,
+                blocking=bool(raw.get("blocking", False)),
+            )
+        )
+    return tuple(specs)
+
+
 def _parse_python(python_d: Any, fail) -> PythonSpec | None:
     if python_d is None:
         return None
@@ -132,11 +174,6 @@ def parse_manifest(
     except (TypeError, ValueError):
         raise fail(f"[plugin] api_version must be an integer: got {raw_api!r}") from None
 
-    provides_d = doc.get("provides", {})
-    if provides_d and not isinstance(provides_d, dict):
-        raise fail("[provides] must be a table")
-    workflows = tuple(str(w) for w in (provides_d.get("workflows", ()) if provides_d else ()))
-
     seed_files = tuple(str(s) for s in plugin_d.get("seed_files", ()))
     _check_relative_paths(seed_files, "seed_files", fail)
     seed_globs = tuple(str(s) for s in plugin_d.get("seed_globs", ()))
@@ -151,7 +188,7 @@ def parse_manifest(
         hooks=_parse_hooks(doc.get("hooks"), fail),
         settings=_parse_settings(doc.get("settings"), fail),
         python=_parse_python(doc.get("python"), fail),
-        workflows=workflows,
+        workflows=_parse_workflows(doc.get("workflows"), fail),
         seed_files=seed_files,
         seed_globs=seed_globs,
         priority=int(plugin_d.get("priority", 0)),

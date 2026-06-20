@@ -5,7 +5,7 @@ All notable changes to `bmad-automator` are documented here. The format is based
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
-## [0.4.4] — 2026-06-19
+## [Unreleased]
 
 ### Added
 
@@ -21,6 +21,23 @@ breaking changes may land in a minor release.
   (presentation only; defaults/options referenced from the `policy.py` dataclasses, never
   duplicated), the TUI settings screen renders from a registry, and an enabled plugin's
   `[[settings]]` appear under `[plugins.<name>]`.
+
+### Changed
+
+- **The game-engine layer is now a plugin.** Unity runs entirely through the plugin system, with
+  no engine-specific code in the core loop. Enable it with `[plugins] enabled = ["unity"]` and
+  configure it under `[plugins.unity]` (`editor_mode`, `mcp`, `unity_path`, `ready_timeout_sec`,
+  `ready_grace_sec`). Behavior — the readiness gate, `per_worktree` Editor setup/teardown, MCP
+  agent routing, and Library priming — is unchanged.
+
+### Deprecated
+
+- The `[engine]` policy block is deprecated in favor of `[plugins] enabled = ["unity"]` +
+  `[plugins.unity]`. Existing `[engine]` configs still load but emit a deprecation warning and are
+  folded onto the `unity` plugin; explicit `[plugins.unity]` values win. `[engine]` will be
+  removed in a future release.
+
+## [0.4.4] — 2026-06-19
 
 ### Fixed
 
@@ -38,21 +55,9 @@ breaking changes may land in a minor release.
 
 ### Changed
 
-- **The game-engine layer is now a plugin.** Unity runs entirely through the plugin system, with
-  no engine-specific code in the core loop. Enable it with `[plugins] enabled = ["unity"]` and
-  configure it under `[plugins.unity]` (`editor_mode`, `mcp`, `unity_path`, `ready_timeout_sec`,
-  `ready_grace_sec`). Behavior — the readiness gate, `per_worktree` Editor setup/teardown, MCP
-  agent routing, and Library priming — is unchanged.
 - Unity engine plugin: pin the `unity-mcp-cli` verification stamp to **v0.81.1** (subcommand
   signatures re-checked; no call-site changes). Documents the new upstream **dev-control HTTP
   bridge** (dev-only, off by default, not wired) in the [Game Engine MCP guide](docs/game-engine-mcp-guide.md).
-
-### Deprecated
-
-- The `[engine]` policy block is deprecated in favor of `[plugins] enabled = ["unity"]` +
-  `[plugins.unity]`. Existing `[engine]` configs still load but emit a deprecation warning and are
-  folded onto the `unity` plugin; explicit `[plugins.unity]` values win. `[engine]` will be
-  removed in a future release.
 
 ## [0.4.3] — 2026-06-18
 

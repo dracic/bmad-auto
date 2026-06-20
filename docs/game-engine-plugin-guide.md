@@ -1,153 +1,162 @@
 # Writing a Game Engine plugin
 
-The **Game Engine** layer (`[engine]` in `.automator/policy.toml`) adapts the
-bmad-auto dev/sweep cycle to projects whose work needs a **live engine Editor** —
-e.g. a Unity project the agent drives through an Editor MCP. It is niche and
-**opt-in**: a normal project leaves `[engine] name = ""` and the orchestrator
-behaves exactly as before.
+The **Game Engine** layer adapts the bmad-auto dev/sweep cycle to projects whose
+work needs a **live engine Editor** — e.g. a Unity project the agent drives through
+an Editor MCP. It is niche and **opt-in**: a normal project enables no engine
+plugin and the orchestrator behaves exactly as before.
 
-Unity ships bundled as the reference plugin. This guide is for adding **another
-engine** (Godot, Unreal, …) — or reshaping the Unity one for your project. For
-wiring a specific Editor MCP (IvanMurzak vs CoplayDev, readiness probing, the full
-env-var reference), see the companion [Game Engine MCP guide](game-engine-mcp-guide.md).
+As of the plugin-system migration, **the game engine is just a plugin** on the
+general [plugin system](plugin-authoring-guide.md). There is no separate engine
+machinery: an engine plugin uses the same `plugin.toml` manifest, the same
+[lifecycle hooks](plugin-authoring-guide.md#stage-reference), and the same trust
+model as any other plugin. This guide covers the **engine-specific** slice —
+which stages an Editor binds, the `editor_mode` ↔ isolation coupling, and the env
+a readiness/setup script reads. **Read the [plugin authoring
+guide](plugin-authoring-guide.md) first** for the manifest, settings, hook, and
+trust fundamentals.
 
-> A plugin is pure data + scripts — no Python. If you can write a shell/Python
-> command that exits `0` when your Editor + MCP are ready, you can write a plugin.
+Unity ships bundled as the reference engine plugin
+(`src/automator/data/plugins/unity/`). This guide is for adding **another engine**
+(Godot, Unreal, …) — or reshaping the Unity one for your project. For wiring a
+specific Editor MCP (IvanMurzak vs CoplayDev, readiness probing, the full env-var
+reference), see the companion [Game Engine MCP guide](game-engine-mcp-guide.md).
 
-## How plugins are loaded
+> If you can write a shell/Python command that exits `0` when your Editor + MCP are
+> ready, you can write an engine plugin — no in-process code required.
 
-Plugins work exactly like [CLI adapter profiles](../README.md#other-coding-clis):
-a declarative TOML file plus optional helper scripts, discovered from two places
-and overlaid:
+## How an engine plugin is loaded
+
+Like any plugin, it's a directory with a `plugin.toml` (plus helper scripts),
+discovered and overlaid from:
 
 | Source        | Path                                              | Wins         |
 | ------------- | ------------------------------------------------- | ------------ |
-| Bundled       | `automator/data/engines/<name>/engine.toml`       | base         |
-| Project-local | `<project>/.automator/engines/<name>/engine.toml` | **override** |
+| Bundled       | `automator/data/plugins/<name>/plugin.toml`       | base         |
+| Project-local | `<project>/.automator/plugins/<name>/plugin.toml` | **override** |
 
-A project-local plugin with the **same name** overrides the bundled one; a **new
-name** extends the set. Each plugin lives in its **own directory** — that directory
-is the plugin's `{scripts}` dir (see below), so its `engine.toml` and helper scripts
-sit together. Enable a plugin by name in policy:
+A project-local plugin with the **same name** overrides the bundled one. The
+plugin's directory is its `{scripts}` dir, so its manifest and helper scripts sit
+together.
+
+Enable it in `.automator/policy.toml`:
 
 ```toml
-[engine]
-name = "godot"            # matches the directory name under .automator/engines/
+[plugins]
+enabled = ["unity"]          # or your engine's name
+
+[plugins.unity]
 editor_mode = "shared"
+mcp = "ivanmurzak"
 ```
 
-(See `src/automator/engines/plugin.py` for the loader — `load_engines()` /
-`get_engine()`.)
+> **Legacy `[engine]` still works.** A pre-migration `[engine] name = "unity"`
+> block loads with a deprecation warning, folded into the `[plugins]` allowlist
+> plus a `[plugins.unity]` table. A legacy `.automator/engines/unity/` override
+> dir also still loads through a compatibility shim. Migrate to `[plugins]` when
+> convenient.
 
-## `engine.toml` schema
+## Mapping the Editor lifecycle onto hook stages
 
-Every field maps to the `EnginePlugin` dataclass (`engines/plugin.py`). Only
-`name` is required; everything else defaults to empty/no-op, so a plugin opts into
-exactly the lifecycle hooks it needs.
+An engine binds the orchestrator's **per-story stages** that surround a unit's
+worktree and sessions. The relevant ones (full list in the
+[stage reference](plugin-authoring-guide.md#stage-reference)):
 
-| Field                   | Type           | Default                     | Purpose                                                                                                |
-| ----------------------- | -------------- | --------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `name`                  | string         | —                           | **Required.** Plugin id; must match the policy `engine.name`.                                          |
-| `editor_modes`          | list of string | `["shared","per_worktree"]` | Which modes this plugin supports; the operator picks one in policy.                                    |
-| `ready_cmd`             | string         | `""`                        | Readiness gate — block until Editor + MCP are ready.                                                   |
-| `worktree_setup_cmd`    | string         | `""`                        | `per_worktree` only — make a fresh worktree a usable project + launch its Editor.                      |
-| `worktree_teardown_cmd` | string         | `""`                        | `per_worktree` only — quit that Editor + clean up.                                                     |
-| `verify_cmd`            | string         | `""`                        | Optional batchmode build/test gate.                                                                    |
-| `seed_files`            | list of string | `[]`                        | Project-relative gitignored files to copy into each worktree.                                          |
-| `seed_globs`            | list of string | `[]`                        | Project-relative glob patterns to expand + copy into each worktree (e.g. an MCP-generated skill tree). |
-| `[env]`                 | table          | `{}`                        | Extra environment variables every hook command receives — the override point for plugin/MCP knobs.     |
+| Stage                   | shared mode                       | per_worktree mode                                                                        |
+| ----------------------- | --------------------------------- | ---------------------------------------------------------------------------------------- |
+| `pre_worktree_setup`    | not run                           | per unit, right after the worktree is cut — make it a usable project + launch its Editor |
+| `pre_ready_gate`        | once, before the first session    | per unit, after setup, before the agent runs — block until Editor + MCP are ready        |
+| (agent dev/review)      | drives the operator's live Editor | drives the worktree's managed Editor                                                     |
+| `pre_worktree_teardown` | not run                           | per unit, on completion **and** on pause/escalation — quit the Editor + clean up         |
 
-**`{scripts}` substitution.** Any `*_cmd` template may contain `{scripts}`, which
-the engine expands to the plugin's on-disk directory. This is how a command reaches
-its helper scripts regardless of where the plugin was installed:
+A **blocking** hook at `pre_ready_gate` or `pre_worktree_setup` whose command
+exits non-zero **defers the unit** — bmad-auto never starts a session against a
+half-open Editor. `pre_worktree_teardown` is **observe-only** for veto purposes
+(a veto can't un-tear-down) but the command still **runs** — best-effort, even
+when a unit pauses or escalates, so a managed Editor never outlives its worktree.
 
-```toml
-ready_cmd = 'python3 "{scripts}/godot_ready.py"'
-```
-
-**Seed-path rules.** `seed_files` and `seed_globs` entries must be **project-relative**
-(absolute paths are rejected at load). `seed_globs` are expanded relative to the main
-repo; `seed_files` are literal project-relative paths. See the MCP guide for why and
-when seeding matters.
-
-## The lifecycle hooks (and when each runs)
-
-The engine runs your command templates at fixed points, rendering `{scripts}` and
-injecting the `BMAD_AUTO_*` environment first (see [env contract](#the-environment-contract)).
-A command **exits `0` to proceed**; a non-zero exit (or timeout) **defers the unit**
-with an `ATTENTION` notice — bmad-auto never starts a session against a half-open
-Editor. (Source: `Engine._engine_ready_gate` / `_engine_worktree_setup` /
-`_engine_worktree_teardown` in `src/automator/engine.py`.)
-
-| Hook                    | shared mode                       | per_worktree mode                                   |
-| ----------------------- | --------------------------------- | --------------------------------------------------- |
-| `worktree_setup_cmd`    | not run                           | per unit, right after the worktree is cut           |
-| `ready_cmd`             | once, before the first session    | per unit, after setup, before the agent runs        |
-| (agent dev/review)      | drives the operator's live Editor | drives the worktree's managed Editor                |
-| `worktree_teardown_cmd` | not run                           | per unit, on completion **and** on pause/escalation |
-| `verify_cmd`            | optional, where verification runs | optional, where verification runs                   |
-
-`worktree_teardown_cmd` is **best-effort**: it runs even when a unit pauses or
-escalates so a managed Editor never outlives its worktree, and a non-zero teardown
-exit is logged but does not change the unit's outcome.
+You can implement these as **declarative** `[hooks.<stage>]` shell commands (the
+smallest thing that works), or as an **in-process** `[python]` module when you need
+richer logic. The bundled Unity plugin is in-process because it also does MCP
+agent routing, `editor_mode`↔isolation validation, and Library priming — but a
+simple engine needs none of that.
 
 ## The `editor_mode` ↔ `[scm] isolation` coupling
 
 A live Editor MCP can only act on the folder its Editor has open, and most engines
-bind one Editor per folder and can't be repointed live. So `editor_mode` is coupled
-to `[scm] isolation`, and the policy parser **enforces** it:
+bind one Editor per folder and can't be repointed live. So an engine's
+`editor_mode` setting is coupled to `[scm] isolation`:
 
-- **`shared`** requires `[scm] isolation = "none"` — the agent works **in place** on
-  the project your warm Editor already has open. Zero relaunches, full live MCP, the
-  Editor stays open across stories. This is the recommended starting point.
+- **`shared`** requires `[scm] isolation = "none"` — the agent works **in place**
+  on the project your warm Editor already has open. Zero relaunches, full live MCP,
+  the Editor stays open across stories. The recommended starting point.
 - **`per_worktree`** requires `[scm] isolation = "worktree"` — one **managed Editor
-  per worktree**, run serially, each launched by your setup hook.
+  per worktree**, run serially, each launched by your `pre_worktree_setup` hook.
 
-A mismatch (e.g. `editor_mode = "per_worktree"` with `isolation = "none"`) is a
-hard policy error — both at `bmad-auto` start and on save in the TUI **Game Engine**
-settings section.
+The bundled Unity plugin **enforces** this coupling in its `validate(policy)`
+(raising at startup on a mismatch — e.g. `editor_mode = "per_worktree"` with
+`isolation = "none"`), and the TUI surfaces it on save. An engine plugin you write
+should validate the same way (see
+[`Plugin.validate`](plugin-authoring-guide.md#in-process-hooks)).
 
-**Start with `shared` only.** A new plugin can declare `editor_modes = ["shared"]`
-and skip the setup/teardown hooks entirely — that's the smallest thing that works.
-Add `per_worktree` once the in-place flow is solid.
+**Start with `shared` only.** A new engine plugin can support just `shared` and a
+single `pre_ready_gate` hook — skip setup/teardown entirely. Add `per_worktree`
+once the in-place flow is solid.
 
-## The environment contract
+## The environment a hook script reads
 
-Before running any hook, the engine injects these variables (from the six `[engine]`
-policy keys), on top of the parent environment and your plugin's `[env]` block.
-Your scripts read these — they are the stable interface (source: `engine.py`):
+A declarative hook receives the **generic bus environment** (full table in the
+[authoring guide](plugin-authoring-guide.md#declarative-hooks)) — the run/unit
+identity plus **`BMAD_AUTO_SETTING_<KEY>`** for each of your `[[settings]]`. So a
+readiness script reads its knobs from its own settings:
 
-| Variable                         | Source                                        |
-| -------------------------------- | --------------------------------------------- |
-| `BMAD_AUTO_REPO_ROOT`            | main repo root                                |
-| `BMAD_AUTO_WORKTREE`             | the workspace/worktree the Editor should open |
-| `BMAD_AUTO_RUN_DIR`              | the run directory                             |
-| `BMAD_AUTO_STORY_KEY`            | the current story key                         |
-| `BMAD_AUTO_ENGINE_MCP`           | `engine.mcp`                                  |
-| `BMAD_AUTO_ENGINE_EDITOR_MODE`   | `engine.editor_mode`                          |
-| `BMAD_AUTO_ENGINE_READY_TIMEOUT` | `engine.ready_timeout_sec`                    |
-| `BMAD_AUTO_ENGINE_READY_GRACE`   | `engine.ready_grace_sec`                      |
-| `BMAD_AUTO_UNITY_PATH`           | `engine.unity_path`                           |
+| Variable                  | Source                                    |
+| ------------------------- | ----------------------------------------- |
+| `BMAD_AUTO_WORKTREE`      | the workspace/worktree the Editor opens   |
+| `BMAD_AUTO_REPO_ROOT`     | main repo root                            |
+| `BMAD_AUTO_STORY_KEY`     | the current story key                     |
+| `BMAD_AUTO_SETTING_<KEY>` | each of your plugin's settings (resolved) |
 
-Anything **engine-specific beyond these** (Editor CLI name, server flags, cache
-locations, …) belongs in your plugin's `[env]` block — that's how operators tune a
-plugin without forking its scripts. The Unity plugin exposes a large set of such
-knobs; they're tabled in the [Game Engine MCP guide](game-engine-mcp-guide.md).
+The bundled Unity plugin's in-process module additionally exports
+`BMAD_AUTO_ENGINE_MCP`, `BMAD_AUTO_ENGINE_EDITOR_MODE`,
+`BMAD_AUTO_ENGINE_READY_TIMEOUT`, `BMAD_AUTO_ENGINE_READY_GRACE`, and
+`BMAD_AUTO_UNITY_PATH` for its bundled scripts (derived from its settings) — a
+plugin-internal contract, not part of the generic env. The
+[Game Engine MCP guide](game-engine-mcp-guide.md) tables every knob the Unity
+scripts read.
 
-## Worked example: a minimal `shared`-mode plugin
+## Worked example: a minimal `shared`-mode Godot plugin
 
-The smallest useful plugin is a single readiness gate. Drop two files under
-`<project>/.automator/engines/godot/`:
+The smallest useful engine plugin is a single readiness gate. Drop two files under
+`<project>/.automator/plugins/godot/`:
 
-`engine.toml`:
+`plugin.toml`:
 
 ```toml
+[plugin]
 name = "godot"
-editor_modes = ["shared"]                       # in-place only, to start
-ready_cmd = 'python3 "{scripts}/godot_ready.py"'
+version = "1.0.0"
+api_version = 1
+description = "Drive a Godot project that needs a live Editor + MCP."
 
-[env]
-GODOT_MCP_URL = "http://localhost:9000"         # your knob, read by the script
+[[settings]]
+key = "mcp_url"
+type = "str"
+default = "http://localhost:9000"
+label = "Godot MCP URL"
+help = "Where the readiness probe connects."
+
+[[settings]]
+key = "ready_timeout_sec"
+type = "int"
+default = 600
+label = "Readiness timeout (sec)"
+
+# Readiness gate: block until the Editor + MCP answer. A non-zero exit defers
+# the unit, so a session never starts against a half-open Editor.
+[hooks.pre_ready_gate]
+cmd = 'python3 "{scripts}/godot_ready.py"'
+blocking = true
+timeout_sec = 600
 ```
 
 `godot_ready.py` (exit `0` when the Editor + MCP answer, non-zero otherwise):
@@ -157,9 +166,8 @@ GODOT_MCP_URL = "http://localhost:9000"         # your knob, read by the script
 import os, sys, time, socket
 from urllib.parse import urlparse
 
-url = os.environ.get("GODOT_MCP_URL", "http://localhost:9000")
-deadline = time.time() + int(os.environ.get("BMAD_AUTO_ENGINE_READY_TIMEOUT", "600"))
-time.sleep(max(0, int(os.environ.get("BMAD_AUTO_ENGINE_READY_GRACE", "0"))))  # -1=auto: treat as 0 in shared
+url = os.environ.get("BMAD_AUTO_SETTING_MCP_URL", "http://localhost:9000")
+deadline = time.time() + int(os.environ.get("BMAD_AUTO_SETTING_READY_TIMEOUT_SEC", "600"))
 
 host, port = urlparse(url).hostname, urlparse(url).port or 80
 while time.time() < deadline:
@@ -171,26 +179,37 @@ while time.time() < deadline:
 sys.exit(1)                                       # never came up → unit deferred
 ```
 
-Then enable it:
+Then enable it — and keep `[scm] isolation = "none"` (the default) for `shared`:
 
 ```toml
-[engine]
-name = "godot"
-editor_mode = "shared"     # [scm] isolation must be "none" (the default)
+[plugins]
+enabled = ["godot"]
 ```
 
-That's a complete plugin. Add `worktree_setup_cmd` / `worktree_teardown_cmd` and
-`editor_modes = ["shared","per_worktree"]` when you're ready to give each unit its
-own Editor — see the MCP guide for the per-worktree port-isolation and seeding
-mechanics.
+That's a complete engine plugin. To give each unit its own Editor, add
+`[hooks.pre_worktree_setup]` + `[hooks.pre_worktree_teardown]` and switch
+`[scm] isolation = "worktree"` — see the MCP guide for the per-worktree
+port-isolation and seeding mechanics. If you need the `editor_mode`↔isolation
+validation or MCP agent routing the Unity plugin does, reach for a `[python]`
+module (see the [authoring guide](plugin-authoring-guide.md#in-process-hooks)).
+
+> A **declarative** engine plugin activates as soon as its folder is present (the
+> declarative trust tier). For an engine that's usually what you want. If you'd
+> rather require explicit opt-in via `[plugins] enabled`, give the plugin a
+> `[python]` module — that's trust-gated and won't run until listed. The bundled
+> Unity plugin is in-process for exactly this reason.
 
 ## Reference: the bundled Unity plugin
 
-The canonical example lives at `src/automator/data/engines/unity/`:
+The canonical example lives at `src/automator/data/plugins/unity/`:
 
-- `engine.toml` — declares `ready_cmd`, `worktree_setup_cmd`,
-  `worktree_teardown_cmd`, and `seed_globs = [".claude/skills/*"]`.
-- `unity_ready.py` — readiness gate (branches on `BMAD_AUTO_ENGINE_MCP`).
+- `plugin.toml` — a `[python]` module + five `[[settings]]` (`editor_mode`, `mcp`,
+  `unity_path`, `ready_timeout_sec`, `ready_grace_sec`) + `seed_globs =
+[".claude/skills/*"]`.
+- `unity_plugin.py` — the in-process brain: the readiness gate
+  (`on_pre_ready_gate`), `per_worktree` Editor setup/teardown, MCP agent routing,
+  Library priming, and the `editor_mode`↔`scm.isolation` coupling validation.
+- `unity_ready.py` — readiness gate script (branches on `BMAD_AUTO_ENGINE_MCP`).
 - `unity_setup.py` — `per_worktree` Library priming, `.mcp.json` write, Custom-mode
   pin, and Editor launch.
 - `unity_teardown.py` — Editor quit + MCP-server reap + symlink-Library cleanup.

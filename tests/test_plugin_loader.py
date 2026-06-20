@@ -76,8 +76,11 @@ type = "select"
 options = ["a", "b"]
 default = "a"
 
-[provides]
-workflows = ["lint-sweep"]
+[workflows.lint-sweep]
+stage = "post_dev_phase"
+role = "dev"
+prompt = "/lint-sweep {story_key}"
+blocking = true
 """
 
 
@@ -132,7 +135,11 @@ def test_full_manifest_parses(tmp_path):
     assert next(s for s in full.settings if s.key == "mode").options == ("a", "b")
     # python + provides
     assert full.python.module == "hooks.py" and full.python.cls == "MyPlugin"
-    assert full.workflows == ("lint-sweep",)
+    # [workflows.<name>] -> a stage-bound session injection
+    assert [w.name for w in full.workflows] == ["lint-sweep"]
+    wf = full.workflows[0]
+    assert (wf.stage, wf.role, wf.blocking) == ("post_dev_phase", "dev", True)
+    assert wf.prompt == "/lint-sweep {story_key}"
 
 
 # --------------------------------------------------------- rejections
@@ -170,6 +177,23 @@ def test_full_manifest_parses(tmp_path):
         (
             '[plugin]\nname = "e"\napi_version = 1\n[hooks.pre_run]\nblocking = true\n',
             "requires a 'cmd'",
+        ),
+        # workflow bound to a non-injection stage
+        (
+            '[plugin]\nname = "e"\napi_version = 1\n'
+            '[workflows.w]\nstage = "pre_run"\nprompt = "x"\n',
+            "stage must be one of",
+        ),
+        # workflow with an unknown role
+        (
+            '[plugin]\nname = "e"\napi_version = 1\n'
+            '[workflows.w]\nstage = "post_dev_phase"\nrole = "triage"\nprompt = "x"\n',
+            "role must be one of",
+        ),
+        # workflow with no prompt
+        (
+            '[plugin]\nname = "e"\napi_version = 1\n' '[workflows.w]\nstage = "post_dev_phase"\n',
+            "requires a 'prompt'",
         ),
         # missing [plugin] table
         ("[other]\nx = 1\n", "missing \\[plugin\\] table"),
