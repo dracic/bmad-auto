@@ -7,6 +7,15 @@ breaking changes may land in a minor release.
 
 ## [0.5.1] — 2026-06-20
 
+### Added
+
+- **Manage plugins from the TUI.** The settings screen (`g`) gains a **Plugins** section: a roster
+  of every discovered plugin with an enable toggle (writing `[plugins] enabled`). A plugin's
+  settings appear only once it is enabled — revealed live, hidden otherwise — so the form stays
+  scannable; data-only plugins are always on. Saving now also runs each enabled plugin's coupling
+  check (e.g. unity `editor_mode` ↔ `scm.isolation`), blocking an invalid combo at save time
+  instead of mid-run.
+
 ### Changed
 
 - **Renamed the project and package to `bmad-auto`.** The distributable is now `bmad-auto`
