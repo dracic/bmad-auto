@@ -8,10 +8,8 @@ verify. All creative work happens inside disposable adapter sessions.
 
 from __future__ import annotations
 
-import os
 import shutil
 import signal
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -19,7 +17,6 @@ from typing import Callable
 from . import gates, verify
 from .adapters.base import CodingCLIAdapter, SessionResult, SessionSpec
 from .bmadconfig import ProjectPaths
-from .engines import EnginePlugin, get_engine
 from .escalation import (
     Action,
     critical_escalations,
@@ -38,6 +35,7 @@ from .model import (
     SessionRecord,
     StoryTask,
 )
+from .plugins import HookBus, HookContext, PluginRegistry
 from .policy import Policy
 from .runs import kill_session
 from .sprintstatus import load as load_sprint_status
@@ -102,9 +100,6 @@ class Engine:
     # The engine that installed the process-wide stop handlers; nested
     # auto-sweep runs (same process) see it set and let RunStopped propagate up.
     _stop_signals_owner: "Engine | None" = None
-    # bound on the best-effort per_worktree Editor teardown so a hung Editor-quit
-    # can't stall the whole loop for the full readiness budget on every unit.
-    _ENGINE_TEARDOWN_TIMEOUT = 120
 
     def __init__(
         self,
@@ -119,6 +114,7 @@ class Engine:
         story_filter: str | None = None,
         review_adapter: CodingCLIAdapter | None = None,
         sweep_factory: Callable[[str], None] | None = None,
+        registry: PluginRegistry | None = None,
     ):
         self.paths = paths
         # where code+git work + artifact reads happen. isolation="none" (today's
@@ -138,8 +134,27 @@ class Engine:
         # spawns a child deferred-work sweep run (injected by the CLI to
         # avoid an engine -> sweep import cycle); see _maybe_auto_sweep
         self.sweep_factory = sweep_factory
-        # optional game-engine plugin (Unity, ...); None unless [engine] name is set
-        self._engine = self._load_engine_plugin()
+        # plugin hook bus. Built silently (no journal handed to the registry) so a
+        # zero-plugin run — the only builtin is the data-only `example` — adds
+        # nothing to the journal and stays byte-identical to today. The bus
+        # journals actual hook activity itself; a single "plugins-active" line
+        # records the live plugins only when at least one binds a stage. The
+        # game-engine layer (Unity) is now itself a plugin: enabling it in
+        # [plugins] gives it lifecycle hooks that gate/manage the Editor.
+        self._registry = (
+            registry if registry is not None else PluginRegistry.build(self.paths.repo_root, policy)
+        )
+        # let every in-process plugin reject an incompatible config at startup
+        # (e.g. the Unity plugin's editor_mode↔scm.isolation coupling) so the run
+        # fails fast rather than mid-unit.
+        self._registry.validate(policy)
+        self._bus = HookBus(self._registry, journal)
+        # stages at which some active plugin injects a provided workflow session
+        # (Phase 4). Precomputed once for an O(1) guard so a run whose plugins
+        # provide no workflows stays byte-identical (no extra sessions, no journal).
+        self._workflow_stages = self._registry.workflow_stages()
+        if self._bus.any_active():
+            self.journal.append("plugins-active", plugins=self._bus.active_plugins())
         # stop-signal bookkeeping (see run())
         self._owns_signals = False
         self._stopping = False
@@ -153,10 +168,12 @@ class Engine:
             try:
                 # target-branch setup can raise RunPaused (detached HEAD, unborn
                 # repo), so it must sit inside the pause handler, not before it.
+                self._emit_run_boundary("pre_run")
                 self._ensure_target_branch()
                 self._loop()
                 self.state.finished = True
                 self._gc_run_worktrees()
+                self._emit("post_run")
                 self.journal.append("run-complete")
                 # tear down the run's agent session now that it finished. Only
                 # the outermost engine owns this (nested auto-sweep never sets
@@ -351,19 +368,17 @@ class Engine:
             for profile in profiles:
                 seeds.extend(profile.seed_files)
         seeds.extend(scm.worktree_seed)
-        # per_worktree engine plugin: also pull its MCP-generated skill tree +
-        # extra gitignored configs into the checkout so the worktree's Editor MCP
-        # is reachable (the agent's CLI finds the engine tool skills + client config).
-        engine_globs: list[str] = []
-        if self._engine is not None and self.policy.engine.editor_mode == "per_worktree":
-            seeds.extend(self._engine.seed_files)
-            engine_globs = list(self._engine.seed_globs)
+        # plugins (e.g. the Unity engine) may prime an isolated checkout with
+        # gitignored paths they need — e.g. an MCP-generated skill tree + client
+        # config so the worktree's Editor MCP is reachable. Aggregate every loaded
+        # plugin's declared seeds.
+        seeds.extend(self._registry.seed_files())
         provision_worktree(
             unit.path,
             profiles,
             self.paths.repo_root,
             seed_files=list(dict.fromkeys(seeds)),  # dedupe, preserve order
-            seed_globs=engine_globs,
+            seed_globs=self._registry.seed_globs(),
         )
         self.journal.append(
             "worktree-opened", story_key=task.story_key, branch=unit.branch, path=str(unit.path)
@@ -372,19 +387,21 @@ class Engine:
         prev = self.workspace
         self.workspace = unit.workspace
         try:
-            # per_worktree engine: launch the unit's managed Editor + wait for its
-            # MCP to come up before driving. setup/gate failure leaves the task
-            # DEFERRED and skips drive(); both fall through to _integrate_unit,
-            # which tears the (empty) worktree down via the DEFERRED path.
-            if self._engine_worktree_setup(task, unit.path) and self._engine_ready_gate(
-                task, worktree=unit.path
-            ):
+            # A plugin (e.g. the Unity engine) may launch the unit's managed Editor
+            # at pre_worktree_setup + wait for its MCP at pre_ready_gate before
+            # driving. A veto (defer) at either stage leaves the task DEFERRED and
+            # skips drive(); both fall through to _integrate_unit, which tears the
+            # (empty) worktree down via the DEFERRED path.
+            if self._gate_unit(task):
+                self._emit("post_worktree_setup", task)
                 drive(task)
         finally:
-            # always quit the managed Editor — on success, on a deferral, and on a
-            # RunPaused (spec gate / escalation) propagating through — before the
-            # workspace is restored, so the editor never outlives its worktree.
-            self._engine_worktree_teardown(task, unit.path)
+            # always run teardown — on success, on a deferral, and on a RunPaused
+            # (spec gate / escalation) propagating through — before the workspace is
+            # restored, so a managed Editor never outlives its worktree. Teardown
+            # stages are observe-only (a veto here cannot un-tear-down).
+            self._emit("pre_worktree_teardown", task)
+            self._emit("post_worktree_teardown", task)
             self.workspace = prev
         # reached only on a normal return (DONE or DEFERRED); a RunPaused from the
         # spec gate or an escalation propagates past here, leaving the worktree up.
@@ -399,6 +416,7 @@ class Engine:
         return scm.failed_diff_max_mb * 1_048_576
 
     def _integrate_unit(self, task: StoryTask, unit: UnitWorkspace) -> None:
+        self._emit("pre_integrate", task)
         scm = self.policy.scm
         if task.phase == Phase.DONE:
             # Merge the unit branch into the target branch locally. We open PRs
@@ -425,11 +443,12 @@ class Engine:
 
     def _merge_local(self, task: StoryTask, unit: UnitWorkspace) -> None:
         """Merge a DONE unit's branch into the target branch from the main repo."""
+        self._emit("pre_merge", task)
         scm = self.policy.scm
         repo = self.paths.repo_root
         target = self.state.target_branch
         # A per_worktree Unity Editor can leak asset writes into the *main*
-        # checkout (see _engine_worktree_setup), dirtying the target with the very
+        # checkout (see the unity plugin's worktree setup), dirtying the target with the very
         # files this branch already committed. Reconcile that first: clean only
         # the leaked copies of incoming files; refuse (escalate) if anything dirty
         # falls outside this branch's path set — that may be real operator work.
@@ -474,6 +493,7 @@ class Engine:
             branch=unit.branch,
             target=self.state.target_branch,
         )
+        self._emit("post_merge", task)
         close_unit_workspace(
             unit,
             success=True,
@@ -583,7 +603,9 @@ class Engine:
             if self.max_stories is not None and started >= self.max_stories:
                 self.journal.append("max-stories-reached", count=started)
                 return
+            self._emit("pre_pick_next")
             story = self._pick_next()
+            self._emit("post_pick_next", story_key=(story.key if story is not None else None))
             if story is None:
                 self._maybe_auto_sweep("run-end", "run-end")
                 return
@@ -666,175 +688,210 @@ class Engine:
 
     # ------------------------------------------------------------- per story
 
-    def _load_engine_plugin(self) -> EnginePlugin | None:
-        """Resolve the configured game-engine plugin, or None when disabled."""
-        name = self.policy.engine.name
-        if not name:
+    def _gate_unit(self, task: StoryTask) -> bool:
+        """per_worktree gate: emit ``pre_worktree_setup`` then ``pre_ready_gate``
+        so a plugin (e.g. the Unity engine) can launch + wait for the unit's
+        managed Editor. Returns True to proceed; a veto at either stage routes the
+        unit to DEFERRED/PAUSE via ``_vetoed`` (which raises on pause) and returns
+        False. A zero-plugin run takes the O(1) fast path and proceeds."""
+        ctx = self._emit("pre_worktree_setup", task)
+        if self._vetoed(ctx, task):
+            return False
+        ctx = self._emit("pre_ready_gate", task)
+        if self._vetoed(ctx, task):
+            return False
+        self._emit("post_ready_gate", task)
+        return True
+
+    # --------------------------------------------------------- plugin hook bus
+
+    def _emit(self, stage: str, task: StoryTask | None = None, **fields) -> HookContext | None:
+        """Fire plugin hooks for ``stage``, or return None on the O(1) no-op fast
+        path (no plugin binds the stage → a zero-plugin run does no work). Builds
+        a HookContext from the task + extra fields, dispatches it through the bus,
+        and returns it so the caller can read whitelisted mutations / resolve a
+        veto. ``ctx.shared`` aliases ``state.plugin_shared`` so cross-stage
+        mutations persist automatically."""
+        if not self._bus.active(stage):
             return None
-        plugin = get_engine(name, self.paths.repo_root)
-        mode = self.policy.engine.editor_mode
-        if mode not in plugin.editor_modes:
-            from .engines import EngineError
+        ctx = self._make_context(stage, task, **fields)
+        self._bus.emit(stage, ctx)
+        return ctx
 
-            raise EngineError(
-                f"engine {plugin.name!r} does not support editor_mode {mode!r} "
-                f"(supports {sorted(plugin.editor_modes)})"
+    def _make_context(self, stage: str, task: StoryTask | None, **fields) -> HookContext:
+        base: dict = {
+            "run_id": self.state.run_id,
+            "repo_root": str(self.paths.repo_root),
+            "run_dir": str(self.run_dir),
+            "shared": self.state.plugin_shared,
+            # the dev + review CLI agent ids in this unit's worktree, for a plugin
+            # that routes per-agent config (the Unity engine's MCP routing).
+            "agents": tuple(self._engine_agent_ids()),
+        }
+        if task is not None:
+            base.update(
+                story_key=task.story_key,
+                epic=task.epic,
+                phase=str(task.phase),
+                attempt=task.attempt,
+                worktree=task.worktree_path or str(self.workspace.root),
+                branch=task.branch or None,
             )
-        return plugin
+        base.update(fields)
+        return HookContext(stage, **base)
 
-    def _run_engine_hook(
-        self,
-        command: str,
-        task: StoryTask,
-        *,
-        worktree: Path | None = None,
-        timeout: int | None = None,
-    ) -> tuple[int, str]:
-        """Run one rendered engine command with the BMAD_AUTO_* env the plugin
-        scripts read, returning (returncode, output-tail). Shared by the readiness
-        gate and the per_worktree setup/teardown hooks. ``worktree`` overrides the
-        cwd + BMAD_AUTO_WORKTREE (the engine swaps self.workspace mid-unit, so the
-        callers pass the unit path explicitly); it defaults to the active workspace."""
-        eng = self.policy.engine
-        plugin = self._engine
-        root = worktree if worktree is not None else self.workspace.root
-        limit = eng.ready_timeout_sec if timeout is None else timeout
-        env = dict(os.environ)
-        if plugin is not None:
-            env.update(plugin.env)
-        env.update(
-            {
-                "BMAD_AUTO_REPO_ROOT": str(self.paths.repo_root),
-                "BMAD_AUTO_WORKTREE": str(root),
-                "BMAD_AUTO_RUN_DIR": str(self.run_dir),
-                "BMAD_AUTO_STORY_KEY": task.story_key,
-                "BMAD_AUTO_ENGINE_MCP": eng.mcp,
-                "BMAD_AUTO_ENGINE_EDITOR_MODE": eng.editor_mode,
-                "BMAD_AUTO_ENGINE_READY_TIMEOUT": str(eng.ready_timeout_sec),
-                "BMAD_AUTO_ENGINE_READY_GRACE": str(eng.ready_grace_sec),
-                "BMAD_AUTO_UNITY_PATH": eng.unity_path,
-            }
+    def _vetoed(self, ctx: HookContext | None, task: StoryTask) -> bool:
+        """Route a per-unit veto onto the engine's existing control flow. Returns
+        True if the unit was vetoed (the caller should stop driving it).
+
+        The phase is set *directly* (not via ``advance``) because a veto can fire
+        from a stage with no legal transition to a terminal phase (e.g. PENDING) —
+        the same deliberate move the engine's own gate-failure / DONE-unit paths
+        make. ``skip`` quietly retires the unit (DEFERRED, no notify) so the loop
+        continues and resume sees a terminal task; ``defer`` notifies; ``pause``
+        escalates and raises RunPaused."""
+        if ctx is None:
+            return False
+        veto = ctx.resolved_veto()
+        if veto is None:
+            return False
+        msg = f"plugin {veto.plugin_id!r} vetoed {ctx.stage}: {veto.reason}".rstrip(": ")
+        self.journal.append(
+            "plugin-veto",
+            stage=ctx.stage,
+            action=veto.action,
+            plugin=veto.plugin_id,
+            reason=veto.reason,
+            story_key=task.story_key,
         )
-        # Tell the per_worktree setup which agent MCP configs to point at the
-        # worktree's Editor (dev + review may be different CLIs, each with its own
-        # config file). Omitted when no real profile is loaded so the plugin keeps
-        # its claude-code default.
-        agent_ids = self._engine_agent_ids()
-        if agent_ids:
-            env["BMAD_AUTO_ENGINE_AGENTS"] = ",".join(agent_ids)
-        try:
-            # operator-configured engine command (from the plugin TOML); shell=True
-            # is intentional, mirroring the deterministic verify commands.
-            proc = subprocess.run(  # nosec B602
-                command,
-                shell=True,
-                cwd=str(root),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=limit,
+        if veto.action == "pause":
+            task.phase = Phase.ESCALATED  # deliberate: veto stage may have no legal advance
+            self.journal.append("story-escalated", story_key=task.story_key, reason=msg)
+            gates.notify(
+                self.policy,
+                self.run_dir,
+                f"CRITICAL escalation: {task.story_key}",
+                f"{msg} — resolve, then `bmad-auto resume {self.state.run_id}`",
             )
-            return proc.returncode, (proc.stdout + proc.stderr)[-2000:]
-        except subprocess.TimeoutExpired:
-            return -1, f"timed out after {limit}s"
-
-    def _engine_ready_gate(self, task: StoryTask, worktree: Path | None = None) -> bool:
-        """Block until the engine's Editor + MCP report ready before a unit runs.
-
-        Returns True to proceed; False when the gate fails — the unit is marked
-        DEFERRED and a notification sent, mirroring the worktree-open-failed path.
-        A no-op (True) when no plugin is configured or it declares no ready_cmd."""
-        plugin = self._engine
-        if plugin is None or not plugin.ready_cmd:
-            return True
-        command = plugin.render(plugin.ready_cmd)
-        self.journal.append("engine-ready-wait", story_key=task.story_key, engine=plugin.name)
-        rc, tail = self._run_engine_hook(command, task, worktree=worktree)
-        if rc == 0:
-            self.journal.append("engine-ready", story_key=task.story_key, engine=plugin.name)
-            return True
-        reason = f"engine {plugin.name!r} Editor not ready (rc={rc}): {tail.strip()}"
-        self.journal.append("engine-not-ready", story_key=task.story_key, error=reason)
-        gates.notify(
-            self.policy, self.run_dir, f"engine Editor not ready: {task.story_key}", reason
-        )
-        task.defer_reason = reason
-        task.phase = Phase.DEFERRED
+            self._save()
+            raise RunPaused(msg, PAUSE_ESCALATION, task.story_key)
+        task.defer_reason = msg
+        task.phase = Phase.DEFERRED  # deliberate set; the veto stage may have no legal advance
+        if veto.action == "defer":
+            self.journal.append("story-deferred", story_key=task.story_key, reason=msg)
+            gates.notify(self.policy, self.run_dir, f"story deferred: {task.story_key}", msg)
+        else:  # skip: retire quietly, no human notification
+            self.journal.append("story-skipped", story_key=task.story_key, reason=msg)
         self._save()
-        return False
+        return True
 
-    def _engine_worktree_setup(self, task: StoryTask, worktree: Path) -> bool:
-        """per_worktree: make the fresh worktree a usable engine project + launch
-        its managed Editor before the agent runs. Returns True to proceed; on
-        failure the unit is DEFERRED + a notification sent (mirrors the readiness
-        gate). No-op (True) outside per_worktree or when no setup_cmd is declared.
-
-        Isolation caveat: per_worktree launches a per-path Editor so the agent's
-        asset writes land in the worktree. But if a competing Editor on the *main*
-        project is open (or MCP routing resolves to it), Unity-generated assets
-        (.cs.meta GUIDs, asmdef auto-edits) can leak into the main checkout. That
-        dirties the merge target with the very files the branch already committed;
-        _merge_local now reconciles it (verify.clean_incoming_collisions). A deeper
-        fix — guaranteeing MCP only ever targets the worktree Editor — is a
-        follow-up, not handled here."""
-        plugin = self._engine
-        if (
-            plugin is None
-            or self.policy.engine.editor_mode != "per_worktree"
-            or not plugin.worktree_setup_cmd
-        ):
-            return True
-        command = plugin.render(plugin.worktree_setup_cmd)
-        self.journal.append("engine-setup", story_key=task.story_key, engine=plugin.name)
-        rc, tail = self._run_engine_hook(command, task, worktree=worktree)
-        if rc == 0:
-            self.journal.append("engine-setup-ok", story_key=task.story_key, engine=plugin.name)
-            return True
-        reason = f"engine {plugin.name!r} worktree setup failed (rc={rc}): {tail.strip()}"
-        self.journal.append("engine-setup-failed", story_key=task.story_key, error=reason)
-        gates.notify(
-            self.policy, self.run_dir, f"engine worktree setup failed: {task.story_key}", reason
-        )
-        task.defer_reason = reason
-        task.phase = Phase.DEFERRED
-        self._save()
-        return False
-
-    def _engine_worktree_teardown(self, task: StoryTask, worktree: Path) -> None:
-        """per_worktree: quit the unit's managed Editor + undo its setup. Best
-        effort — runs on success AND on pause/escalation so a live Editor is never
-        left dangling, and a teardown failure only logs (the unit's outcome stands).
-        No-op outside per_worktree or when no teardown_cmd is declared."""
-        plugin = self._engine
-        if (
-            plugin is None
-            or self.policy.engine.editor_mode != "per_worktree"
-            or not plugin.worktree_teardown_cmd
-        ):
+    def _emit_run_boundary(self, stage: str) -> None:
+        """Fire a run-level stage (no task). A ``pause`` veto raises RunPaused so
+        the run records as paused; ``defer``/``skip`` have no per-unit target here
+        and are advisory (the bus already journalled them)."""
+        ctx = self._emit(stage)
+        if ctx is None:
             return
-        command = plugin.render(plugin.worktree_teardown_cmd)
-        self.journal.append("engine-teardown", story_key=task.story_key, engine=plugin.name)
-        rc, tail = self._run_engine_hook(
-            command, task, worktree=worktree, timeout=self._ENGINE_TEARDOWN_TIMEOUT
-        )
-        if rc == 0:
-            self.journal.append("engine-teardown-ok", story_key=task.story_key, engine=plugin.name)
-        else:
-            self.journal.append(
-                "engine-teardown-failed", story_key=task.story_key, error=tail.strip()
+        veto = ctx.resolved_veto()
+        if veto is not None and veto.action == "pause":
+            raise RunPaused(
+                f"plugin {veto.plugin_id!r} vetoed {stage}: {veto.reason}".rstrip(": "),
+                PAUSE_ESCALATION,
+                None,
             )
+
+    def _emit_session_gate(
+        self, task: StoryTask, role: str, prompt: str, env: dict[str, str], session_stage: str
+    ) -> tuple[str, dict[str, str], HookContext | None]:
+        """Fire the role-specific then generic session hooks before a session
+        launches, sharing one context so the generic ``pre_session`` sees the
+        role hook's mutations. Returns the (possibly rewritten) prompt + env and
+        the context (None on the fast path). A veto is left on the context for
+        the caller to turn into a synthesized ``vetoed`` SessionResult."""
+        if not (self._bus.active(session_stage) or self._bus.active("pre_session")):
+            return prompt, env, None
+        ctx = self._make_context(
+            "pre_session", task, role=role, proposed_prompt=prompt, proposed_env=dict(env)
+        )
+        # role-specific stage first (its mutations are visible to pre_session)
+        ctx._stage = session_stage
+        self._bus.emit(session_stage, ctx)
+        ctx._stage = "pre_session"
+        self._bus.emit("pre_session", ctx)
+        if ctx.proposed_prompt is not None:
+            prompt = ctx.proposed_prompt
+        if ctx.proposed_env:
+            env = dict(ctx.proposed_env)
+        return prompt, env, ctx
+
+    def _run_workflows(self, stage: str, task: StoryTask, seq: int) -> bool:
+        """Run every plugin-provided workflow bound to ``stage`` as an extra agent
+        session through the generic ``_run_session`` path — the conservative form
+        of custom orchestration (no new pipeline stage; an injected session in the
+        unit's live worktree). Returns True iff a *blocking* workflow's session
+        did not complete and the unit was therefore deferred (the caller must stop
+        driving it). O(1) no-op when no active plugin provides a workflow here, so
+        a workflow-free run stays byte-identical.
+
+        A workflow session is just another session: it fires ``pre_workflow_session``
+        + ``pre_session`` + ``post_session`` and is recorded on the task like any
+        other, so token budgets and the transcript trail account for it."""
+        if stage not in self._workflow_stages:
+            return False
+        for lp, wf in self._registry.workflows_for(stage):
+            prompt = (
+                lp.manifest.render(wf.prompt)
+                .replace("{story_key}", task.story_key)
+                .replace("{run_id}", self.state.run_id)
+            )
+            self.journal.append(
+                "workflow-start",
+                plugin=lp.name,
+                workflow=wf.name,
+                stage=stage,
+                role=wf.role,
+                story_key=task.story_key,
+            )
+            result = self._run_session(
+                task,
+                role=wf.role,
+                prompt=prompt,
+                seq=seq,
+                session_stage="pre_workflow_session",
+                label=f"{lp.name}.{wf.name}",
+            )
+            self.journal.append(
+                "workflow-end",
+                plugin=lp.name,
+                workflow=wf.name,
+                status=result.status,
+                story_key=task.story_key,
+            )
+            if wf.blocking and result.status != "completed":
+                self._defer(
+                    task,
+                    f"blocking workflow {wf.name!r} ({lp.name}) did not complete: {result.status}",
+                )
+                return True
+        return False
 
     def _run_story(self, task: StoryTask) -> None:
-        # shared-mode engine gate: the agent works in place, so the live Editor
-        # must be up before any session starts. (per_worktree gates inside
-        # _run_isolated, after that worktree's own Editor has been launched.)
-        if self._engine is not None and self.policy.engine.editor_mode == "shared":
-            if not self._engine_ready_gate(task):
-                return
+        ctx = self._emit("pre_story", task)
+        if self._vetoed(ctx, task):
+            return
         if self._isolated:
             self._run_isolated(task, self._drive_story)
         else:
+            # in-place (non-isolated) ready gate: a plugin (e.g. a shared-mode
+            # Unity engine) needs the live Editor up before any session starts.
+            # The per_worktree gate runs inside _run_isolated, after that
+            # worktree's own Editor has launched.
+            ctx = self._emit("pre_ready_gate", task)
+            if self._vetoed(ctx, task):
+                return
+            self._emit("post_ready_gate", task)
             self._drive_story(task)
+        self._emit("post_story", task)
 
     def _drive_story(self, task: StoryTask) -> None:
         if not self._dev_phase(task):
@@ -854,6 +911,8 @@ class Engine:
         self._review_and_commit(task)
 
     def _dev_phase(self, task: StoryTask) -> bool:
+        if self._vetoed(self._emit("pre_dev_phase", task), task):
+            return False
         task.baseline_commit = verify.rev_parse_head(self.workspace.root)
         feedback: Path | None = None
         while True:
@@ -874,6 +933,13 @@ class Engine:
                     # deterministic gates run here too: a broken build must not
                     # reach the (far more expensive) review loop
                     outcome = verify.verify_commands_outcome(self.policy, self.workspace.root)
+            self._emit(
+                "post_dev_verify",
+                task,
+                session_status=result.status,
+                result_json=result.result_json,
+                verify_reason=(outcome.reason if outcome is not None else None),
+            )
             decision = decide_dev(task, result, outcome, self.policy)
             self.journal.append(
                 "dev-decision",
@@ -885,6 +951,9 @@ class Engine:
             )
             self._save()
             if decision.action == Action.PROCEED:
+                self._emit("post_dev_phase", task)
+                if self._run_workflows("post_dev_phase", task, task.attempt):
+                    return False
                 return True
             if decision.action == Action.RETRY:
                 if outcome is not None and outcome.fixable:
@@ -904,6 +973,8 @@ class Engine:
         if not self.policy.review.enabled:
             self._skip_review_and_commit(task)
             return
+        if self._vetoed(self._emit("pre_review_phase", task), task):
+            return
         clean = False
         while task.review_cycle < self.policy.limits.max_review_cycles:
             task.review_cycle += 1
@@ -917,6 +988,13 @@ class Engine:
             )
             advance(task, Phase.REVIEW_VERIFY)
             self._save()
+            self._emit(
+                "post_review_session",
+                task,
+                role="review",
+                session_status=result.status,
+                result_json=result.result_json,
+            )
             decision = decide_review_session(task, result, self.policy)
             if decision.action == Action.PAUSE:
                 self._escalate(task, decision.reason)
@@ -941,6 +1019,9 @@ class Engine:
                 deferred=rj.get("deferred", 0),
                 dismissed=rj.get("dismissed", 0),
             )
+            self._emit("post_review_result", task, role="review", result_json=rj)
+            if self._run_workflows("post_review_result", task, task.review_cycle):
+                return
             if rj.get("clean"):
                 outcome = self._verify_review(task)
                 if outcome.ok:
@@ -984,12 +1065,25 @@ class Engine:
     def _commit(self, task: StoryTask) -> None:
         advance(task, Phase.COMMITTING)
         self._save()
+        message = self._commit_message(task)
+        # pre_commit: a plugin may rewrite the commit message or escalate (pause).
+        # A defer/skip veto would have to unwind a COMMITTING task (no legal move
+        # to DEFERRED), so only pause is honored here — _escalate sets ESCALATED
+        # directly, which COMMITTING does allow.
+        ctx = self._emit("pre_commit", task, proposed_commit_message=message)
+        if ctx is not None:
+            veto = ctx.resolved_veto()
+            if veto is not None and veto.action == "pause":
+                self._escalate(task, f"plugin {veto.plugin_id!r} vetoed pre_commit: {veto.reason}")
+            if ctx.proposed_commit_message:
+                message = ctx.proposed_commit_message
         try:
-            task.commit_sha = verify.commit_story(self.workspace.root, self._commit_message(task))
+            task.commit_sha = verify.commit_story(self.workspace.root, message)
         except verify.GitError as e:
             self._escalate(task, f"commit failed: {e}")
         advance(task, Phase.DONE)
         self.journal.append("story-done", story_key=task.story_key, commit=task.commit_sha)
+        self._emit("post_commit", task)
         self._save()
         weighted = task.tokens.weighted_total(self.policy.limits.cache_read_weight)
         if weighted > self.policy.limits.max_tokens_per_story:
@@ -1038,8 +1132,18 @@ class Engine:
 
     # ------------------------------------------------------------- helpers
 
-    def _run_session(self, task: StoryTask, role: str, prompt: str, seq: int) -> SessionResult:
-        task_id = f"{task.story_key}-{role}-{seq}"
+    def _run_session(
+        self,
+        task: StoryTask,
+        role: str,
+        prompt: str,
+        seq: int,
+        session_stage: str | None = None,
+        label: str | None = None,
+    ) -> SessionResult:
+        # ``label`` names a non-standard session (a plugin-provided workflow) so
+        # its task_id stays distinct from the role's own dev/review attempts.
+        task_id = f"{task.story_key}-{label or role}-{seq}"
         adapter = self.adapters[role]
         cfg = self.policy.adapter.resolved(role)
         env = {
@@ -1052,6 +1156,26 @@ class Engine:
             # tells the dev skill to run its own internal triple-review and
             # finalize straight to done (the orchestrator runs no review session)
             env["BMAD_AUTO_SKIP_REVIEW"] = "1"
+        # plugin session hooks: a role-specific stage (pre_dev_session / fix /
+        # migrate / ...) then the generic pre_session, both able to rewrite the
+        # prompt + env or veto the session. A veto synthesizes a `vetoed` result
+        # so the existing decide_dev/decide_review_session route it (retry → defer).
+        prompt, env, sctx = self._emit_session_gate(
+            task, role, prompt, env, session_stage or f"pre_{role}_session"
+        )
+        if sctx is not None:
+            veto = sctx.resolved_veto()
+            if veto is not None:
+                self.journal.append(
+                    "plugin-veto",
+                    stage=sctx.stage,
+                    action=veto.action,
+                    plugin=veto.plugin_id,
+                    reason=veto.reason,
+                    task_id=task_id,
+                    role=role,
+                )
+                return SessionResult(status="vetoed")
         spec = SessionSpec(
             task_id=task_id,
             role=role,
@@ -1080,6 +1204,13 @@ class Engine:
             task_id=task_id,
             status=result.status,
             tokens=usage.total if usage else None,
+        )
+        self._emit(
+            "post_session",
+            task,
+            role=role,
+            session_status=result.status,
+            result_json=result.result_json,
         )
         return result
 
@@ -1118,6 +1249,7 @@ class Engine:
                 role="dev",
                 prompt=self._dev_prompt(task, feedback),
                 seq=task.attempt,
+                session_stage="pre_fix_session",
             )
             advance(task, Phase.DEV_VERIFY)
             crits = critical_escalations(result.result_json)
@@ -1237,6 +1369,7 @@ class Engine:
 
     def _epic_boundary(self, finished_epic: int, next_epic: int) -> None:
         self.journal.append("epic-boundary", finished=finished_epic, next=next_epic)
+        self._emit("pre_epic_boundary", epic=finished_epic)
         self._maybe_auto_sweep("per-epic", f"epic-{finished_epic}")
         if self.policy.gates.retrospective != "never":
             gates.notify(
@@ -1245,6 +1378,7 @@ class Engine:
                 f"epic {finished_epic} stories complete",
                 "retrospective suggested: run /bmad-retrospective when convenient",
             )
+        self._emit("post_epic_boundary", epic=finished_epic)
         if gates.pause_at_epic_boundary(self.policy):
             self.state.current_epic = next_epic  # don't re-trigger this gate on resume
             self._save()

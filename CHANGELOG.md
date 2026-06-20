@@ -5,6 +5,44 @@ All notable changes to `bmad-automator` are documented here. The format is based
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
+## [0.5.0] — 2026-06-20
+
+### Added
+
+- **Plugin system.** New `automator.plugins` package — a general extension layer: a `plugin.toml`
+  manifest (metadata, declarative `[hooks.<stage>]`, a `[[settings]]` schema, optional in-process
+  `[python]`), a folder-drop loader with builtin/project overlay (and a locked seam for
+  entry-point packaging later), a trust allowlist (`[plugins] enabled` in `policy.toml`), and a
+  registry that isolates plugin failures. A dropped `[python]` plugin is never imported unless
+  explicitly enabled. Plugins can **observe, veto (defer/pause/skip), and mutate** a shared
+  context at every run/sweep lifecycle stage via the hook bus, with an O(1) no-op fast path so
+  zero-plugin runs stay byte-identical.
+- **Dynamic, TOML-driven settings.** The settings schema moves to `data/settings/core.toml`
+  (presentation only; defaults/options referenced from the `policy.py` dataclasses, never
+  duplicated), the TUI settings screen renders from a registry, and an enabled plugin's
+  `[[settings]]` appear under `[plugins.<name>]`.
+- **Workflow plugins.** A plugin can declare a `[workflows.<name>]` table that injects an extra
+  agent session at a lifecycle stage (`post_dev_phase` / `post_review_result`, run by the `dev` or
+  `review` adapter); the prompt substitutes `{story_key}`/`{run_id}`/`{scripts}`. Non-blocking by
+  default (advisory); a blocking workflow that fails routes through the normal defer path. Ships
+  with a worked-example plugin (`examples/plugins/guardrails/`) exercising every extension point and
+  a full [plugin-authoring guide](docs/plugin-authoring-guide.md).
+
+### Changed
+
+- **The game-engine layer is now a plugin.** Unity runs entirely through the plugin system, with
+  no engine-specific code in the core loop. Enable it with `[plugins] enabled = ["unity"]` and
+  configure it under `[plugins.unity]` (`editor_mode`, `mcp`, `unity_path`, `ready_timeout_sec`,
+  `ready_grace_sec`). Behavior — the readiness gate, `per_worktree` Editor setup/teardown, MCP
+  agent routing, and Library priming — is unchanged.
+
+### Deprecated
+
+- The `[engine]` policy block is deprecated in favor of `[plugins] enabled = ["unity"]` +
+  `[plugins.unity]`. Existing `[engine]` configs still load but emit a deprecation warning and are
+  folded onto the `unity` plugin; explicit `[plugins.unity]` values win. `[engine]` will be
+  removed in a future release.
+
 ## [0.4.4] — 2026-06-19
 
 ### Fixed
@@ -307,6 +345,7 @@ enforced in CI.
   implementation phase, driven by a Python control loop with hook-based session transport and
   resumable on-disk run state.
 
+[0.5.0]: https://github.com/pbean/bmad-automator/releases/tag/v0.5.0
 [0.4.4]: https://github.com/pbean/bmad-automator/releases/tag/v0.4.4
 [0.4.3]: https://github.com/pbean/bmad-automator/releases/tag/v0.4.3
 [0.4.2]: https://github.com/pbean/bmad-automator/releases/tag/v0.4.2

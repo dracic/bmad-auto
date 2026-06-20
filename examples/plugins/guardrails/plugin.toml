@@ -1,0 +1,57 @@
+# Guardrails — the worked-example plugin for the bmad-auto plugin system.
+#
+# One small in-process plugin that exercises every extension point a third party
+# is likely to reach for. It is the companion to docs/plugin-authoring-guide.md.
+#
+# It lives under examples/ (NOT src/automator/data/plugins/) on purpose: builtins
+# are auto-discovered on every run, and a builtin with active hooks would break
+# the zero-plugin "byte-identical" guarantee. To try it, copy this folder into a
+# project's .automator/plugins/ and enable it:
+#
+#   [plugins]
+#   enabled = ["guardrails"]
+#
+# Because it declares a [python] module it is trust-gated: dropping the folder in
+# never runs the code — only [plugins] enabled does.
+
+[plugin]
+name = "guardrails"
+version = "1.0.0"
+api_version = 1
+description = "Worked example: a setting, an observe hook, a veto gate, a commit-message mutation, and a provided workflow."
+author = "bmad-auto"
+
+# In-process Python brain. Trust-gated: not imported unless guardrails is in
+# [plugins] enabled. Defaults class = "Plugin"; we name our subclass explicitly.
+[python]
+module = "guardrails.py"
+class = "GuardrailsPlugin"
+
+# Settings render in the settings TUI (under a "guardrails" section) once enabled
+# and persist to [plugins.guardrails] in policy.toml. The plugin reads them via
+# self.settings (manifest defaults overlaid by the operator's policy table).
+[[settings]]
+key = "trailer"
+type = "str"
+default = "Automated-by: bmad-auto guardrails plugin"
+label = "Commit trailer"
+help = "Appended to every commit message the plugin sees at pre_commit. Empty disables it."
+
+[[settings]]
+key = "forbid_epic"
+type = "int"
+default = 0
+min = 0
+label = "Parked epic"
+help = "If > 0, quietly skip every story in this epic. 0 disables the gate."
+
+# A provided workflow: an extra agent session injected at post_dev_phase, run by
+# the 'review' adapter, in the unit's live worktree right after dev work lands.
+# Non-blocking, so a failed session is advisory (logged) and never blocks the
+# story. {story_key} expands to the current story; {run_id} and {scripts} are
+# also available.
+[workflows.doc-sync]
+stage = "post_dev_phase"
+role = "review"
+prompt = "Review the working tree for story {story_key}. If it introduced user-facing changes, update CHANGELOG.md accordingly and make no other edits. If nothing user-facing changed, do nothing."
+blocking = false

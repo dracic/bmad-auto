@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tomllib
+import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,11 @@ SWEEP_AUTO_MODES = {"never", "per-epic", "run-end"}
 ISOLATION_MODES = {"none", "worktree"}
 BRANCH_PER_MODES = {"story", "run"}
 MERGE_STRATEGIES = {"ff", "merge", "squash"}
-EDITOR_MODES = {"shared", "per_worktree"}
+
+# Deprecated [engine] keys, folded into [plugins.unity] at load time. The
+# game-engine layer is now a plugin; [engine] is a one-release compatibility
+# alias (see _fold_deprecated_engine).
+_ENGINE_SETTING_KEYS = ("editor_mode", "mcp", "unity_path", "ready_timeout_sec", "ready_grace_sec")
 
 
 class PolicyError(Exception):
@@ -175,28 +180,21 @@ class ScmPolicy:
 
 
 @dataclass(frozen=True)
-class EnginePolicy:
-    # Game-engine plugin layer (niche, opt-in). name = "" leaves it disabled and
-    # the orchestrator behaves exactly as before. name = "unity" (or any plugin
-    # in automator/data/engines/ or .automator/engines/) turns it on.
-    name: str = ""
-    # shared        -> agent works in place on the project the live Editor already
-    #                  has open (requires scm.isolation = none).
-    # per_worktree  -> one managed Editor per worktree (requires isolation = worktree).
-    editor_mode: str = "shared"
-    # which Editor MCP server the plugin's scripts target; passed through to them.
-    mcp: str = "ivanmurzak"
-    # Editor binary used to launch a per_worktree Editor; "" lets the plugin
-    # auto-detect. Ignored in shared mode (the operator's own Editor is reused).
-    unity_path: str = ""
-    # how long the readiness gate blocks for the Editor + MCP to come up.
-    ready_timeout_sec: int = 600
-    # seconds to wait before the FIRST readiness probe, to let a cold-launched
-    # Editor start before we check it (a fast-failing probe against a not-yet-
-    # listening Editor otherwise gives up early). Counts against ready_timeout_sec.
-    # -1 = auto: the plugin picks a per-mode default (per_worktree launches a cold
-    # Editor so it waits; shared reuses a warm one so it does not).
-    ready_grace_sec: int = -1
+class PluginsPolicy:
+    # Trust allowlist for the plugin system. A plugin folder dropped under
+    # .automator/plugins/ (or shipped under automator/data/plugins/) loads its
+    # declarative manifest — settings + out-of-process shell hooks — regardless.
+    # A plugin that declares an in-process [python] module is NEVER imported or
+    # executed unless its name appears here. Absent table = no plugins trusted,
+    # which reproduces today's behavior exactly.
+    enabled: tuple[str, ...] = ()
+    # Per-plugin settings, parsed from the [plugins.<name>] sub-tables. Each
+    # value is the raw settings dict for that plugin; the plugin's own schema
+    # gives the keys meaning. Read through Policy.plugin_setting(). A plugin
+    # need not be in `enabled` to carry settings here (settings are data, only
+    # in-process [python] is trust-gated), but the settings UI renders a
+    # plugin's section only when it is enabled.
+    settings: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -209,11 +207,17 @@ class Policy:
     adapter: AdapterPolicy = field(default_factory=AdapterPolicy)
     sweep: SweepPolicy = field(default_factory=SweepPolicy)
     scm: ScmPolicy = field(default_factory=ScmPolicy)
-    engine: EnginePolicy = field(default_factory=EnginePolicy)
+    plugins: PluginsPolicy = field(default_factory=PluginsPolicy)
     tui: TuiPolicy = field(default_factory=TuiPolicy)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def plugin_setting(self, name: str, key: str, default: Any = None) -> Any:
+        """A single setting for plugin ``name`` from its [plugins.<name>] table,
+        or ``default`` when unset. The plugin's schema supplies the real default
+        when this is called with the schema default as ``default``."""
+        return self.plugins.settings.get(name, {}).get(key, default)
 
 
 def _section(doc: dict[str, Any], name: str) -> dict[str, Any]:
@@ -235,6 +239,33 @@ def _stage_adapter(adapter_d: dict[str, Any], key: str) -> StageAdapterPolicy:
     )
 
 
+def _validate_plugin_settings(name: str, raw: dict[str, Any], specs: Any) -> None:
+    """Validate a [plugins.<name>] table against its plugin's setting specs
+    (objects exposing key/type/options). Unknown keys and type/option mismatches
+    raise PolicyError; a None schema means the plugin isn't loaded here, skip."""
+    if specs is None:
+        return
+    by_key = {s.key: s for s in specs}
+    for key, value in raw.items():
+        spec = by_key.get(key)
+        if spec is None:
+            raise PolicyError(f"plugins.{name}: unknown setting {key!r}")
+        kind = spec.type
+        if kind == "bool" and not isinstance(value, bool):
+            raise PolicyError(f"plugins.{name}.{key} must be a boolean")
+        # bool is a subclass of int; reject it explicitly for numeric kinds.
+        if kind == "int" and (isinstance(value, bool) or not isinstance(value, int)):
+            raise PolicyError(f"plugins.{name}.{key} must be an integer")
+        if kind == "float" and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise PolicyError(f"plugins.{name}.{key} must be a number")
+        if kind == "str" and not isinstance(value, str):
+            raise PolicyError(f"plugins.{name}.{key} must be a string")
+        if kind == "select" and value not in spec.options:
+            raise PolicyError(
+                f"plugins.{name}.{key} must be one of {list(spec.options)}: got {value!r}"
+            )
+
+
 def load(path: Path | None) -> Policy:
     """Load policy from a TOML file; a missing file yields all defaults."""
     if path is None or not path.is_file():
@@ -245,8 +276,15 @@ def load(path: Path | None) -> Policy:
         raise PolicyError(f"{path}: {e}") from e
 
 
-def loads(text: str) -> Policy:
-    """Parse and validate policy TOML text; empty text yields all defaults."""
+def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
+    """Parse and validate policy TOML text; empty text yields all defaults.
+
+    ``plugin_schemas`` optionally maps a plugin name to its sequence of setting
+    specs (objects with ``key``/``type``/``options`` attributes). When given,
+    every present ``[plugins.<name>]`` table whose plugin is in the mapping is
+    validated against that schema: unknown keys and type/option mismatches raise
+    PolicyError. Plugin tables without a supplied schema pass through untouched
+    (a plugin may not be loaded in every context that reads policy)."""
     try:
         doc: dict[str, Any] = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
@@ -260,7 +298,8 @@ def loads(text: str) -> Policy:
     adapter_d = _section(doc, "adapter")
     sweep_d = _section(doc, "sweep")
     scm_d = _section(doc, "scm")
-    engine_d = _section(doc, "engine")
+    engine_d = _section(doc, "engine")  # deprecated; folded into [plugins] below
+    plugins_d = _section(doc, "plugins")
     tui_d = _section(doc, "tui")
 
     gates = GatesPolicy(
@@ -388,35 +427,24 @@ def loads(text: str) -> Policy:
         )
     if scm.failed_diff_max_mb < 1:
         raise PolicyError(f"scm.failed_diff_max_mb must be >= 1: got {scm.failed_diff_max_mb}")
-    engine = EnginePolicy(
-        name=str(engine_d.get("name", EnginePolicy.name)),
-        editor_mode=str(engine_d.get("editor_mode", EnginePolicy.editor_mode)),
-        mcp=str(engine_d.get("mcp", EnginePolicy.mcp)),
-        unity_path=str(engine_d.get("unity_path", EnginePolicy.unity_path)),
-        ready_timeout_sec=int(engine_d.get("ready_timeout_sec", EnginePolicy.ready_timeout_sec)),
-        ready_grace_sec=int(engine_d.get("ready_grace_sec", EnginePolicy.ready_grace_sec)),
-    )
-    if engine.editor_mode not in EDITOR_MODES:
-        raise PolicyError(
-            f"engine.editor_mode must be one of {sorted(EDITOR_MODES)}: got {engine.editor_mode!r}"
-        )
-    if engine.ready_timeout_sec < 1:
-        raise PolicyError(f"engine.ready_timeout_sec must be >= 1: got {engine.ready_timeout_sec}")
-    # editor_mode and scm.isolation are coupled: a live Editor MCP must act on the
-    # same folder the agent edits. shared = the agent's warm Editor on the checkout
-    # in place (no worktree); per_worktree = one Editor per isolated worktree.
-    if engine.name:
-        if engine.editor_mode == "shared" and scm.isolation != "none":
-            raise PolicyError(
-                "engine.editor_mode = 'shared' requires scm.isolation = 'none' "
-                f"(the agent works in place on the live Editor's checkout); got "
-                f"scm.isolation = {scm.isolation!r}"
-            )
-        if engine.editor_mode == "per_worktree" and scm.isolation != "worktree":
-            raise PolicyError(
-                "engine.editor_mode = 'per_worktree' requires scm.isolation = 'worktree'; "
-                f"got scm.isolation = {scm.isolation!r}"
-            )
+    raw_enabled = plugins_d.get("enabled", ())
+    if isinstance(raw_enabled, str) or not isinstance(raw_enabled, (list, tuple)):
+        raise PolicyError("plugins.enabled must be a list of plugin names")
+    enabled = [str(n) for n in raw_enabled]
+    # Every key under [plugins] other than `enabled` that is a table is a
+    # per-plugin settings sub-table ([plugins.<name>]).
+    plugin_settings = {
+        str(k): dict(v) for k, v in plugins_d.items() if k != "enabled" and isinstance(v, dict)
+    }
+    # The game-engine layer is now a plugin. Fold a deprecated [engine] block into
+    # [plugins] (enable the named plugin + map its keys to [plugins.<name>]) so
+    # existing Unity configs keep working for one release; explicit [plugins.*]
+    # values win over the folded ones.
+    _fold_deprecated_engine(engine_d, enabled, plugin_settings)
+    if plugin_schemas:
+        for name, raw_settings in plugin_settings.items():
+            _validate_plugin_settings(name, raw_settings, plugin_schemas.get(name))
+    plugins = PluginsPolicy(enabled=tuple(enabled), settings=plugin_settings)
     tui = TuiPolicy(low_frame_rate=bool(tui_d.get("low_frame_rate", TuiPolicy.low_frame_rate)))
     return Policy(
         gates=gates,
@@ -427,9 +455,38 @@ def loads(text: str) -> Policy:
         adapter=adapter,
         sweep=sweep,
         scm=scm,
-        engine=engine,
+        plugins=plugins,
         tui=tui,
     )
+
+
+def _fold_deprecated_engine(
+    engine_d: dict[str, Any], enabled: list[str], plugin_settings: dict[str, dict[str, Any]]
+) -> None:
+    """Translate a legacy ``[engine]`` block into the plugin surface in place.
+
+    ``[engine] name = "unity"`` becomes ``[plugins] enabled = ["unity"]`` plus a
+    ``[plugins.unity]`` table carrying editor_mode/mcp/unity_path/ready_*; the
+    editor_mode↔scm.isolation coupling is now validated by the plugin itself
+    (``UnityPlugin.validate``), not here. A no-op when ``[engine]`` is absent or
+    its ``name`` is empty (the old "disabled" state)."""
+    if not engine_d:
+        return
+    warnings.warn(
+        "[engine] in policy.toml is deprecated; the game-engine layer is now a "
+        'plugin. Use [plugins] enabled = ["unity"] with a [plugins.unity] table. '
+        "[engine] will be removed in a future release.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    name = str(engine_d.get("name", "")).strip()
+    if not name:
+        return
+    if name not in enabled:
+        enabled.append(name)
+    folded = {k: engine_d[k] for k in _ENGINE_SETTING_KEYS if k in engine_d}
+    # explicit [plugins.<name>] values take precedence over the folded [engine] ones
+    plugin_settings[name] = {**folded, **plugin_settings.get(name, {})}
 
 
 POLICY_TEMPLATE = """\
@@ -514,22 +571,25 @@ max_parallel = 1             # units in flight at once (parallel fan-out unbuilt
 seed_adapter_defaults = true # seed each loaded adapter's default gitignored configs into worktrees
 worktree_seed = []           # extra gitignored files to copy into each worktree, on top of adapter defaults
 
-[engine]
-# Niche, opt-in game-engine layer for projects whose dev/sweep cycle drives a
-# live engine Editor (e.g. a Unity project the agent controls via an Editor MCP).
-# Leave name empty for normal projects — nothing changes.
-name = ""                    # "" = disabled. "unity" enables the bundled Unity plugin.
-# editor_mode couples with [scm] isolation, because a live Editor MCP must act on
-# the same folder the agent edits:
-#   shared       -> agent works in place on the project the live Editor already has
-#                   open. Requires scm.isolation = "none". Zero relaunches.
-#   per_worktree -> one managed Editor per worktree. Requires scm.isolation = "worktree".
-editor_mode = "shared"       # shared | per_worktree
-mcp = "ivanmurzak"           # which Editor MCP the plugin scripts target: ivanmurzak | coplaydev
-unity_path = ""              # Editor binary for a per_worktree launch ("" = auto-detect; unused in shared)
-ready_timeout_sec = 600      # how long the readiness gate waits for the Editor + MCP to come up
-ready_grace_sec = -1         # delay before the first readiness probe (lets a cold Editor start);
-                             # -1 = auto (per_worktree waits, shared does not). Counts against ready_timeout_sec.
+[plugins]
+# Plugin trust allowlist. A plugin dropped under .automator/plugins/<name>/ loads
+# its declarative manifest (settings + out-of-process shell hooks) automatically.
+# A plugin that ships an in-process [python] module is NEVER imported or run
+# unless its name is listed here. Empty = no plugins trusted (today's behavior).
+enabled = []                 # e.g. ["unity", "my-lint-plugin"]
+
+# The game-engine layer is a plugin. For a Unity project whose dev/sweep cycle
+# drives a live Editor via an Editor MCP, enable it above and configure it here:
+#   [plugins.unity]
+#   editor_mode = "shared"       # shared (live Editor; requires scm.isolation = "none")
+#                                # | per_worktree (one Editor per worktree; requires
+#                                #   scm.isolation = "worktree")
+#   mcp = "ivanmurzak"           # which Editor MCP the scripts target: ivanmurzak | coplaydev
+#   unity_path = ""              # Editor binary for a per_worktree launch ("" = auto-detect)
+#   ready_timeout_sec = 600      # how long the readiness gate waits for the Editor + MCP
+#   ready_grace_sec = -1         # delay before the first probe (-1 = auto: per_worktree waits)
+# (The legacy [engine] block still loads with a deprecation warning, folded into
+#  [plugins.unity] — migrate to [plugins] when convenient.)
 
 [tui]
 # low_frame_rate = true caps Textual to 15fps and disables animations (sets

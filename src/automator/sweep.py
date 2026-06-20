@@ -456,6 +456,7 @@ class SweepEngine(Engine):
         predicate. Caveat: on crash-resume of a cycle whose only progress was
         already-resolved closes, the replayed (idempotent) closes report 0 and
         the run stops with no-progress; errs toward stopping, never loops."""
+        self._emit("pre_sweep_cycle", phase=str(cycle))
         plan = self._ensure_triage(open_now, cycle)
         closed = self._close_resolved(plan)
         answers, decisions_closed = self._decisions_phase(plan)
@@ -463,6 +464,7 @@ class SweepEngine(Engine):
         if self.decisions_only:
             self.journal.append("sweep-decisions-only", bundles_not_run=len(bundles))
             self._prune_pre_answers()
+            self._emit("post_sweep_cycle", phase=str(cycle))
             return False
         for bundle in bundles:
             self._run_bundle(bundle, cycle)
@@ -472,6 +474,7 @@ class SweepEngine(Engine):
             if self.state.tasks[self._bundle_key(b.name, cycle)].phase == Phase.DONE
         )
         self._prune_pre_answers()
+        self._emit("post_sweep_cycle", phase=str(cycle))
         return closed > 0 or decisions_closed > 0 or bundles_done > 0
 
     def _prune_pre_answers(self) -> None:
@@ -540,7 +543,9 @@ class SweepEngine(Engine):
         dirname = bundle.name if cycle == 1 else f"c{cycle}-{bundle.name}"
         task.bundle_file = str(self._write_intent(bundle, dirname))
         self._save()
+        self._emit("pre_bundle", task)
         self._run_story(task)
+        self._emit("post_bundle", task)
 
     # ------------------------------------------------------------ migration
 
@@ -594,6 +599,7 @@ class SweepEngine(Engine):
                 role="triage",
                 prompt=self._migrate_prompt(manifest_path, feedback),
                 seq=task.attempt,
+                session_stage="pre_migrate_session",
             )
             advance(task, Phase.TRIAGE_VERIFY)
             self._save()
@@ -629,6 +635,7 @@ class SweepEngine(Engine):
                     entries_now=len(post),
                     open_now=sum(1 for e in post if e.open),
                 )
+                self._emit("post_migrate", task)
                 return
             # never re-prompt over a half-broken rewrite; the baseline reset
             # covers tracked files, the explicit write covers an untracked
@@ -717,6 +724,7 @@ class SweepEngine(Engine):
                     blocked=len(plan.blocked),
                     skip=len(plan.skip),
                 )
+                self._emit("post_triage", task)
                 return plan
             if task.attempt >= self.policy.sweep.max_triage_attempts:
                 self._escalate(task, "triage output failed validation: " + "; ".join(errors))
@@ -734,6 +742,7 @@ class SweepEngine(Engine):
     # ------------------------------------------------------ ledger phases
 
     def _close_resolved(self, plan: TriagePlan) -> int:
+        self._emit("pre_close_resolved")
         ledger = self.workspace.paths.deferred_work
         closed = []
         for entry in plan.already_resolved:
@@ -744,6 +753,7 @@ class SweepEngine(Engine):
         if closed:
             self.journal.append("sweep-resolved-closed", dw_ids=closed)
         self._commit_ledger("chore(sweep): close resolved deferred-work entries")
+        self._emit("post_close_resolved")
         return len(closed)
 
     def _decisions_phase(self, plan: TriagePlan) -> tuple[dict[str, dict[str, str]], int]:
@@ -801,6 +811,7 @@ class SweepEngine(Engine):
                     f"decision needed: {decision.id}",
                     decision.question,
                 )
+                self._emit("pre_decision", story_key=decision.id)
                 option = self.prompter.ask(decision)
                 answers[decision.id] = {
                     "key": option.key,
@@ -818,6 +829,7 @@ class SweepEngine(Engine):
                     effect=option.effect,
                 )
                 self._apply_decision_effect(decision, option)
+                self._emit("post_decision", story_key=decision.id, decision_action=option.effect)
                 answered_interactively = True
                 if option.effect == "close":
                     closed += 1
@@ -866,6 +878,7 @@ class SweepEngine(Engine):
     def _materialize_bundles(
         self, plan: TriagePlan, answers: dict[str, dict[str, str]]
     ) -> list[Bundle]:
+        self._emit("pre_materialize_bundles")
         bundles = list(plan.bundles)
         for decision in plan.decisions:
             answer = answers.get(decision.id)
@@ -929,6 +942,7 @@ class SweepEngine(Engine):
             dropped = [b.name for b in bundles[self.max_bundles :]]
             self.journal.append("sweep-bundles-truncated", dropped=dropped)
             bundles = bundles[: self.max_bundles]
+        self._emit("post_materialize_bundles")
         return bundles
 
     def _write_intent(self, bundle: Bundle, dirname: str) -> Path:
