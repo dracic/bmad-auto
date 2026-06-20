@@ -16,7 +16,10 @@ calls into a plugin is wired in a later phase.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .context import HookContext
 
 # The framework's current plugin-API version. A manifest declares the api_version
 # it was written against; the loader compares it against SUPPORTED_API. Bumping
@@ -149,7 +152,18 @@ class Plugin:
     Subclasses MUST NOT do expensive or side-effecting work in ``__init__``;
     construction happens at registry build time and a raised exception disables
     the instance (failure isolation).
+
+    Hook dispatch: the bus calls ``hook(stage, ctx)``, which routes to an
+    ``on_<stage>(ctx)`` method if the subclass defines one (else a no-op). A
+    handler observes ``ctx`` (read-only fields), mutates the whitelisted
+    ``proposed_*`` fields / ``ctx.shared``, and/or calls ``ctx.veto(action,
+    reason)``. Set the class attribute ``fail_closed = True`` to make a raised
+    exception veto (defer) the unit instead of failing open.
     """
+
+    # opt-in: a handler raising disables the instance either way (failure
+    # isolation); fail_closed additionally vetoes (defers) the current unit.
+    fail_closed: bool = False
 
     def __init__(self, manifest: PluginManifest, settings: dict[str, Any]):
         self.manifest = manifest
@@ -158,6 +172,13 @@ class Plugin:
     @property
     def name(self) -> str:
         return self.manifest.name
+
+    def hook(self, stage: str, ctx: "HookContext") -> None:
+        """Route a stage to its ``on_<stage>`` handler, if defined. The bus wraps
+        this call for failure isolation, so a subclass handler may raise freely."""
+        handler = getattr(self, f"on_{stage}", None)
+        if handler is not None:
+            handler(ctx)
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<Plugin {self.manifest.name!r} v{self.manifest.version}>"

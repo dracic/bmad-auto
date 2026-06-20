@@ -13,6 +13,8 @@ build on this in later phases.
 
 from __future__ import annotations
 
+from .bus import HookBus
+from .context import VETO_ACTIONS, HookContext, Veto
 from .loader import (
     ENTRY_POINT_GROUP,
     USER_PLUGINS_REL,
@@ -50,6 +52,10 @@ __all__ = [
     "PluginError",
     "PluginUntrusted",
     "PluginRegistry",
+    "HookBus",
+    "HookContext",
+    "Veto",
+    "VETO_ACTIONS",
     "discover",
     "load_plugins",
     "get_plugin",

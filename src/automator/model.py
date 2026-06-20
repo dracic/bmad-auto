@@ -224,6 +224,10 @@ class RunState:
     # resolved once at run start (default = the branch checked out then) and
     # pinned so resume keeps targeting the same branch.
     target_branch: str = ""
+    # free-form scratch space shared across plugin hooks (HookContext.shared).
+    # Persisted so a plugin's cross-stage state survives pause/resume; values
+    # MUST be JSON-serializable. Empty + untouched on a zero-plugin run.
+    plugin_shared: dict[str, Any] = field(default_factory=dict)
     tasks: dict[str, StoryTask] = field(default_factory=dict)
 
     @property
@@ -256,6 +260,7 @@ class RunState:
             "sweep_cycle": self.sweep_cycle,
             "sweeps_triggered": self.sweeps_triggered,
             "target_branch": self.target_branch,
+            "plugin_shared": self.plugin_shared,
             "tasks": {k: t.to_dict() for k, t in self.tasks.items()},
         }
 
@@ -276,5 +281,6 @@ class RunState:
             sweep_cycle=int(d.get("sweep_cycle", 1)),
             sweeps_triggered=[str(s) for s in d.get("sweeps_triggered", [])],
             target_branch=str(d.get("target_branch", "")),
+            plugin_shared=dict(d.get("plugin_shared", {})),
             tasks={k: StoryTask.from_dict(t) for k, t in d.get("tasks", {}).items()},
         )
