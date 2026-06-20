@@ -9,6 +9,19 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **Test Architect (TEA) plugin.** New bundled, opt-in `tea` plugin that wires the BMAD
+  Test Architect Enterprise module into every run and sweep as advisory-by-default quality steps.
+  Enable with `[plugins] enabled = ["tea"]`; it injects six TEA workflows — test-design, ATDD,
+  automate (after dev) and trace, NFR, test-review (after review) — and fails fast at startup if
+  TEA isn't installed (`npx bmad-method install` → Test Architect). Each step is individually
+  toggleable; the three gate steps (`trace`/`nfr`/`review`) can be flipped to **blocking**, so a
+  failing FAIL/CONCERNS gate escalates the unit for human review at commit instead of landing
+  (fail-open: a missing or unparseable artifact never blocks). See the
+  [TEA plugin guide](docs/tea-plugin-guide.md).
+- **Settings-driven workflow `enabled` / `blocking`.** A plugin can let an operator disable a
+  `[workflows.<name>]` step or flip its gate from policy via the `<name>_enabled` / `<name>_blocking`
+  setting convention — no code, and byte-identical for plugins that don't declare them. Documented
+  in the [plugin authoring guide](docs/plugin-authoring-guide.md#making-a-workflow-configurable).
 - **Manage plugins from the TUI.** The settings screen (`g`) gains a **Plugins** section: a roster
   of every discovered plugin with an enable toggle (writing `[plugins] enabled`). A plugin's
   settings appear only once it is enabled — revealed live, hidden otherwise — so the form stays
