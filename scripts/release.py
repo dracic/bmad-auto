@@ -211,8 +211,11 @@ def last_release_tag() -> str | None:
 
 
 def dirty_paths() -> list[str]:
-    out = _git_out("status", "--porcelain")
-    return [line[3:] for line in out.splitlines() if line.strip()]
+    # NUL-delimited and *unstripped*: porcelain status codes lead with a space for
+    # worktree-only changes (e.g. " M CHANGELOG.md"), which `.strip()` would corrupt
+    # into "M CHANGELOG.md" — dropping the real path's first character.
+    out = _run(["git", "status", "--porcelain", "-z"], capture=True).stdout
+    return [entry[3:] for entry in out.split("\0") if entry]
 
 
 def tui_changed_since(tag: str | None) -> bool:

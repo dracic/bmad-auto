@@ -87,6 +87,17 @@ class RunSummary:
         return "\n".join(lines)
 
 
+# CLI profile name -> the agent id the Unity-MCP CLI's `setup-mcp` expects (see
+# `unity-mcp-cli setup-mcp --list`). All but claude differ only by claude's
+# "-code" suffix; codex/gemini/cursor and any custom profile pass through as-is.
+_SETUP_MCP_AGENT_IDS = {"claude": "claude-code"}
+
+
+def _setup_mcp_agent_id(profile_name: str) -> str:
+    """Map a CLI profile name to its Unity-MCP `setup-mcp` agent id."""
+    return _SETUP_MCP_AGENT_IDS.get(profile_name, profile_name)
+
+
 class Engine:
     # The engine that installed the process-wide stop handlers; nested
     # auto-sweep runs (same process) see it set and let RunStopped propagate up.
@@ -285,6 +296,19 @@ class Engine:
                 seen[profile.name] = profile
         return list(seen.values())
 
+    def _engine_agent_ids(self) -> list[str]:
+        """The Unity-MCP `setup-mcp` agent ids for every CLI that runs in a
+        worktree (dev + review). A worktree can host more than one agent — e.g.
+        dev=claude, review=codex — and each reads its own MCP config file, so the
+        per_worktree setup must point every one of them at the worktree's Editor,
+        not just the dev agent. Deduped, order-preserving; empty for test fakes."""
+        ids: list[str] = []
+        for profile in self._worktree_profiles():
+            agent = _setup_mcp_agent_id(profile.name)
+            if agent not in ids:
+                ids.append(agent)
+        return ids
+
     def _run_isolated(self, task: StoryTask, drive: Callable[[StoryTask], None]) -> None:
         """Run one unit's `drive` body in a fresh per-unit worktree, then merge
         it back into the target branch. `drive` either returns (DONE/DEFERRED →
@@ -402,29 +426,47 @@ class Engine:
     def _merge_local(self, task: StoryTask, unit: UnitWorkspace) -> None:
         """Merge a DONE unit's branch into the target branch from the main repo."""
         scm = self.policy.scm
+        repo = self.paths.repo_root
+        target = self.state.target_branch
+        # A per_worktree Unity Editor can leak asset writes into the *main*
+        # checkout (see _engine_worktree_setup), dirtying the target with the very
+        # files this branch already committed. Reconcile that first: clean only
+        # the leaked copies of incoming files; refuse (escalate) if anything dirty
+        # falls outside this branch's path set — that may be real operator work.
+        try:
+            cleaned = verify.clean_incoming_collisions(repo, target, unit.branch)
+        except verify.GitError as e:
+            reason = (
+                f"merge of {unit.branch} into {target} blocked: the target checkout has "
+                f"uncommitted changes that are not part of this branch (likely a Unity "
+                f"Editor wrote into the main project) — clean them, then "
+                f"`bmad-auto resume {self.state.run_id}`. {e}"
+            )
+            self._keep_branch_and_escalate(task, unit, reason)  # always raises RunPaused
+            return
+        if cleaned:
+            self.journal.append(
+                "merge-target-cleaned",
+                story_key=task.story_key,
+                branch=unit.branch,
+                paths=cleaned,
+            )
         try:
             verify.merge_branch(
-                self.paths.repo_root,
+                repo,
                 unit.branch,
                 strategy=scm.merge_strategy,
                 message=self._merge_message(task),
             )
         except verify.GitError as e:
-            # conflict against the target: keep the branch for manual merge.
-            # The unit committed cleanly (phase is already DONE, which has no
-            # legal transition), so set ESCALATED directly rather than via
-            # advance(), then pause for the operator.
-            close_unit_workspace(
-                unit,
-                success=False,
-                keep_failed=True,
-                run_dir=self.run_dir,
-                unit_key=task.story_key,
-                delete_branch=False,
-                diff_max_file_bytes=self._failed_diff_max_bytes(),
+            # genuine content conflict against the target: keep the branch for
+            # manual merge. The unit committed cleanly (phase is already DONE,
+            # which has no legal transition), so escalate directly.
+            reason = (
+                f"merge of {unit.branch} into {target} failed "
+                f"(content conflict against the target): {e}"
             )
-            reason = f"merge of {unit.branch} into {self.state.target_branch} failed: {e}"
-            self._escalate_unit(task, reason)  # always raises RunPaused
+            self._keep_branch_and_escalate(task, unit, reason)  # always raises RunPaused
             return  # defensive: never fall through to the success teardown below
         self.journal.append(
             "unit-merged",
@@ -440,6 +482,21 @@ class Engine:
             unit_key=task.story_key,
             delete_branch=scm.delete_branch,
         )
+
+    def _keep_branch_and_escalate(self, task: StoryTask, unit: UnitWorkspace, reason: str) -> None:
+        """Preserve a DONE unit's branch (no delete, kept for manual merge) and
+        escalate. Shared by the two merge-back failure paths: a target dirtied
+        with stray work, and a genuine content conflict."""
+        close_unit_workspace(
+            unit,
+            success=False,
+            keep_failed=True,
+            run_dir=self.run_dir,
+            unit_key=task.story_key,
+            delete_branch=False,
+            diff_max_file_bytes=self._failed_diff_max_bytes(),
+        )
+        self._escalate_unit(task, reason)  # always raises RunPaused
 
     def _escalate_unit(self, task: StoryTask, reason: str) -> None:
         """Mark a DONE unit ESCALATED, notify, and pause the run. DONE has no
@@ -658,6 +715,13 @@ class Engine:
                 "BMAD_AUTO_UNITY_PATH": eng.unity_path,
             }
         )
+        # Tell the per_worktree setup which agent MCP configs to point at the
+        # worktree's Editor (dev + review may be different CLIs, each with its own
+        # config file). Omitted when no real profile is loaded so the plugin keeps
+        # its claude-code default.
+        agent_ids = self._engine_agent_ids()
+        if agent_ids:
+            env["BMAD_AUTO_ENGINE_AGENTS"] = ",".join(agent_ids)
         try:
             # operator-configured engine command (from the plugin TOML); shell=True
             # is intentional, mirroring the deterministic verify commands.
@@ -703,7 +767,16 @@ class Engine:
         """per_worktree: make the fresh worktree a usable engine project + launch
         its managed Editor before the agent runs. Returns True to proceed; on
         failure the unit is DEFERRED + a notification sent (mirrors the readiness
-        gate). No-op (True) outside per_worktree or when no setup_cmd is declared."""
+        gate). No-op (True) outside per_worktree or when no setup_cmd is declared.
+
+        Isolation caveat: per_worktree launches a per-path Editor so the agent's
+        asset writes land in the worktree. But if a competing Editor on the *main*
+        project is open (or MCP routing resolves to it), Unity-generated assets
+        (.cs.meta GUIDs, asmdef auto-edits) can leak into the main checkout. That
+        dirties the merge target with the very files the branch already committed;
+        _merge_local now reconciles it (verify.clean_incoming_collisions). A deeper
+        fix — guaranteeing MCP only ever targets the worktree Editor — is a
+        follow-up, not handled here."""
         plugin = self._engine
         if (
             plugin is None
