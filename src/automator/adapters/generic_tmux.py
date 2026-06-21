@@ -61,12 +61,26 @@ class GenericTmuxAdapter(CodingCLIAdapter):
         profile: CLIProfile,
         binary: str | None = None,
         extra_args: tuple[str, ...] | None = None,
+        usage_grace_s: float | None = None,
+        stop_without_result_nudges: int | None = None,
     ):
         self.run_dir = run_dir
         self.policy = policy
         self.profile = profile
         # None = use the profile's default bypass flags; a tuple replaces them
         self.extra_args = extra_args
+        # Effective timing knobs: an explicit [adapter]/[adapter.<stage>] override
+        # wins, else the CLI profile's shipped default, else the global fallback.
+        self._usage_grace_s = usage_grace_s if usage_grace_s is not None else profile.usage_grace_s
+        self._stop_nudges = (
+            stop_without_result_nudges
+            if stop_without_result_nudges is not None
+            else (
+                profile.stop_without_result_nudges
+                if profile.stop_without_result_nudges is not None
+                else policy.limits.stop_without_result_nudges
+            )
+        )
         self.name = f"{profile.name}-tmux"
         self.binary = binary or profile.binary
         self.session_name = f"bmad-auto-{run_dir.name}"
@@ -192,7 +206,7 @@ class GenericTmuxAdapter(CodingCLIAdapter):
         deadline = time.monotonic() + spec.timeout_s
         session_id: str | None = None
         transcript_path: str | None = None
-        nudges_left = self.policy.limits.stop_without_result_nudges
+        nudges_left = self._stop_nudges
 
         while True:
             remaining = deadline - time.monotonic()
@@ -309,4 +323,14 @@ class GenericTmuxAdapter(CodingCLIAdapter):
     def read_usage(self, result: SessionResult) -> TokenUsage | None:
         if not result.transcript_path:
             return None
-        return tally_usage(self.profile.usage_parser, Path(result.transcript_path))
+        path = Path(result.transcript_path)
+        # Some CLIs flush their token totals only on shutdown (Copilot writes
+        # modelMetrics in the trailing session.shutdown line, ~1s after the
+        # turn-end hook). Poll up to the effective grace so we don't sample the
+        # transcript before the totals land. grace 0 = read once (today's path).
+        deadline = time.monotonic() + self._usage_grace_s
+        while True:
+            usage = tally_usage(self.profile.usage_parser, path)
+            if usage is not None or time.monotonic() >= deadline:
+                return usage
+            time.sleep(RESULT_POLL_S)

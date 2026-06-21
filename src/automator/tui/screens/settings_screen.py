@@ -193,7 +193,7 @@ class SettingsScreen(Screen[None]):
             elif spec.kind in ("int", "float"):
                 yield Input(
                     value=None if raw is None else str(raw),
-                    placeholder=f"default: {spec.default}",
+                    placeholder=spec.placeholder or f"default: {spec.default}",
                     type="integer" if spec.kind == "int" else "number",
                     validators=[Number(minimum=spec.minimum, maximum=spec.maximum)],
                     valid_empty=True,

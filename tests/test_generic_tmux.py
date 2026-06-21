@@ -13,9 +13,11 @@ import time
 
 import pytest
 
-from automator.adapters.base import SessionSpec
+from automator.adapters import generic_tmux
+from automator.adapters.base import SessionResult, SessionSpec
 from automator.adapters.generic_tmux import GenericTmuxAdapter
 from automator.adapters.profile import get_profile
+from automator.model import TokenUsage
 from automator.policy import LimitsPolicy, Policy
 
 HAVE_TMUX = shutil.which("tmux") is not None
@@ -147,6 +149,88 @@ def test_await_result_grace_expires_fast(tmp_path):
     start = time.monotonic()
     assert adapter._await_result("t1", grace_s=0.2) is None
     assert time.monotonic() - start < 5
+
+
+def _usage_adapter(tmp_path, profile_name, **kw) -> GenericTmuxAdapter:
+    return GenericTmuxAdapter(
+        run_dir=tmp_path / "run",
+        policy=Policy(limits=LimitsPolicy()),
+        profile=get_profile(profile_name),
+        **kw,
+    )
+
+
+def test_effective_timing_knobs_precedence(tmp_path):
+    # copilot ships grace 8 / nudges 5; with no override the profile value wins
+    cop = _usage_adapter(tmp_path, "copilot")
+    assert cop._usage_grace_s == 8.0
+    assert cop._stop_nudges == 5
+    # claude ships neither -> grace 0, nudges from the global limits default (1)
+    cla = _usage_adapter(tmp_path, "claude")
+    assert cla._usage_grace_s == 0.0
+    assert cla._stop_nudges == 1
+    # an explicit [adapter]/[adapter.<stage>] override beats the profile default
+    over = _usage_adapter(tmp_path, "copilot", usage_grace_s=2.0, stop_without_result_nudges=9)
+    assert over._usage_grace_s == 2.0
+    assert over._stop_nudges == 9
+
+
+def test_effective_nudges_fall_back_to_global_limits(tmp_path):
+    # claude carries no profile nudge value, so the global limits value flows through
+    cla = GenericTmuxAdapter(
+        run_dir=tmp_path / "run",
+        policy=Policy(limits=LimitsPolicy(stop_without_result_nudges=4)),
+        profile=get_profile("claude"),
+    )
+    assert cla._stop_nudges == 4
+    # the copilot profile floor still wins over a lower global default
+    cop = GenericTmuxAdapter(
+        run_dir=tmp_path / "run2",
+        policy=Policy(limits=LimitsPolicy(stop_without_result_nudges=2)),
+        profile=get_profile("copilot"),
+    )
+    assert cop._stop_nudges == 5
+
+
+def test_read_usage_polls_for_late_metrics(tmp_path, monkeypatch):
+    # copilot ships usage_grace_s = 8.0, so read_usage retries until metrics land
+    adapter = _usage_adapter(tmp_path, "copilot")
+    usage = TokenUsage(input_tokens=10)
+    calls: list[str] = []
+
+    def fake_tally(parser, path):
+        calls.append(parser)
+        return None if len(calls) < 3 else usage
+
+    monkeypatch.setattr(generic_tmux, "tally_usage", fake_tally)
+    monkeypatch.setattr(generic_tmux.time, "sleep", lambda *_: None)
+    result = SessionResult(status="completed", transcript_path=str(tmp_path / "events.jsonl"))
+    assert adapter.read_usage(result) is usage
+    assert len(calls) == 3  # polled past the early None reads
+
+
+def test_read_usage_single_read_when_no_grace(tmp_path, monkeypatch):
+    # claude has usage_grace_s = 0.0 -> read exactly once, never sleeps
+    adapter = _usage_adapter(tmp_path, "claude")
+    calls: list[str] = []
+
+    def fake_tally(parser, path):
+        calls.append(parser)
+        return None
+
+    def no_sleep(*_):
+        raise AssertionError("read_usage must not sleep when the grace is 0")
+
+    monkeypatch.setattr(generic_tmux, "tally_usage", fake_tally)
+    monkeypatch.setattr(generic_tmux.time, "sleep", no_sleep)
+    result = SessionResult(status="completed", transcript_path=str(tmp_path / "x.jsonl"))
+    assert adapter.read_usage(result) is None
+    assert len(calls) == 1
+
+
+def test_read_usage_none_without_transcript(tmp_path):
+    adapter = _usage_adapter(tmp_path, "copilot")
+    assert adapter.read_usage(SessionResult(status="completed")) is None
 
 
 def _write_fake_cli(tmp_path):
