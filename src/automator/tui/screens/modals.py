@@ -73,7 +73,10 @@ class StartRunModal(BaseDialog):
                 valid_empty=True,
                 id="epic",
             )
-            yield Input(placeholder="story key — blank for all", id="story")
+            yield Input(
+                placeholder="story — 3-1, 3.1, slug, or full key (blank for all)",
+                id="story",
+            )
             yield Input(
                 placeholder="max stories — blank for no limit",
                 type="integer",

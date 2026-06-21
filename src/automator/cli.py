@@ -177,6 +177,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.dry_run:
         return _dry_run(paths, pol, args)
 
+    try:
+        sprintstatus.select_actionable(
+            sprintstatus.load(paths.sprint_status), args.epic, args.story
+        )
+    except sprintstatus.SprintStatusError as e:
+        print(e, file=sys.stderr)
+        return 1
+
     if not verify.worktree_clean(paths.repo_root):
         print("git worktree is not clean — commit or stash first", file=sys.stderr)
         return 1
@@ -243,13 +251,11 @@ def _dry_run(paths: bmadconfig.ProjectPaths, pol, args: argparse.Namespace) -> i
         return _render_invocation(pol, paths.project, role, prompt)
 
     ss = sprintstatus.load(paths.sprint_status)
-    queue = [
-        s
-        for s in ss.stories
-        if s.status in sprintstatus.ACTIONABLE_STATUSES
-        and (args.epic is None or s.epic == args.epic)
-        and (args.story is None or s.key == args.story)
-    ]
+    try:
+        queue = sprintstatus.select_actionable(ss, args.epic, args.story)
+    except sprintstatus.SprintStatusError as e:
+        print(e, file=sys.stderr)
+        return 1
     if args.max_stories is not None:
         queue = queue[: args.max_stories]
     if not queue:
@@ -897,7 +903,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run_p = add("run", cmd_run, "run the orchestration loop")
     run_p.add_argument("--epic", type=int, help="only stories from this epic")
-    run_p.add_argument("--story", help="only this story key")
+    run_p.add_argument("--story", help="story: E-S / E.S, a slug fragment, or full key")
     run_p.add_argument("--max-stories", type=int, help="stop after N stories")
     run_p.add_argument("--dry-run", action="store_true", help="print the plan, spawn nothing")
     run_p.add_argument("--run-id", help=argparse.SUPPRESS)  # pre-assigned id (used by the TUI)

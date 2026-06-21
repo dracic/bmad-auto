@@ -39,7 +39,7 @@ from .plugins import HookBus, HookContext, PluginRegistry
 from .policy import Policy
 from .runs import kill_session
 from .sprintstatus import load as load_sprint_status
-from .sprintstatus import next_actionable
+from .sprintstatus import next_actionable, parse_selector
 from .statemachine import advance
 from .workspace import (
     UnitWorkspace,
@@ -131,6 +131,9 @@ class Engine:
         self.max_stories = max_stories
         self.epic_filter = epic_filter
         self.story_filter = story_filter
+        # widen --story interpretation: full key, short ref (3-1/3.1), bare
+        # number (+ --epic), or slug fragment. See sprintstatus.StorySelector.
+        self._selector = parse_selector(epic_filter, story_filter)
         # spawns a child deferred-work sweep run (injected by the CLI to
         # avoid an engine -> sweep import cycle); see _maybe_auto_sweep
         self.sweep_factory = sweep_factory
@@ -628,10 +631,7 @@ class Engine:
             story = next_actionable(ss, skip)
             if story is None:
                 return None
-            if self.epic_filter is not None and story.epic != self.epic_filter:
-                skip.add(story.key)
-                continue
-            if self.story_filter is not None and story.key != self.story_filter:
+            if not self._selector.matches(story):
                 skip.add(story.key)
                 continue
             return story
