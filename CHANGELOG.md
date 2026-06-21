@@ -37,6 +37,10 @@ breaking changes may land in a minor release.
   check (e.g. unity `editor_mode` ↔ `scm.isolation`), blocking an invalid combo at save time
   instead of mid-run.
 
+- **MIT license + open-source community files.** The project is now MIT-licensed (© BMad Code, LLC)
+  with a trademark notice, and ships `CONTRIBUTING`, `SECURITY`, `CODE_OF_CONDUCT`, and GitHub
+  issue/PR templates as it becomes a first-class citizen in the BMAD org.
+
 ### Changed
 
 - **Renamed the project and package to `bmad-auto`.** The distributable is now `bmad-auto`
