@@ -104,6 +104,56 @@ def test_unknown_role_resolves_to_base(tmp_path):
     assert pol.adapter.resolved("retro") == policy.ResolvedAdapter("claude", "", None)
 
 
+def test_adapter_timing_knobs_base_and_per_stage(tmp_path):
+    p = tmp_path / "policy.toml"
+    p.write_text("""
+[adapter]
+name = "copilot"
+usage_grace_s = 3.5
+[adapter.review]
+stop_without_result_nudges = 7
+""")
+    pol = policy.load(p)
+    assert pol.adapter.usage_grace_s == 3.5
+    assert pol.adapter.stop_without_result_nudges is None
+    # base usage_grace_s inherits into every stage; review adds a nudge override
+    review = pol.adapter.resolved("review")
+    assert review.usage_grace_s == 3.5
+    assert review.stop_without_result_nudges == 7
+    # dev inherits the base grace and leaves nudges unset (= fall back to profile/global)
+    dev = pol.adapter.resolved("dev")
+    assert dev.usage_grace_s == 3.5
+    assert dev.stop_without_result_nudges is None
+
+
+def test_adapter_timing_knobs_default_none(tmp_path):
+    # unset = None on both base and stages, so the adapter falls back to the profile
+    pol = policy.load(None)
+    assert pol.adapter.usage_grace_s is None
+    assert pol.adapter.stop_without_result_nudges is None
+    assert pol.adapter.resolved("dev").usage_grace_s is None
+    assert pol.adapter.resolved("dev").stop_without_result_nudges is None
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("[adapter]\nusage_grace_s = -1\n", r"adapter\.usage_grace_s"),
+        ("[adapter]\nstop_without_result_nudges = -1\n", r"adapter\.stop_without_result_nudges"),
+        ("[adapter.review]\nusage_grace_s = -1\n", r"adapter\.review\.usage_grace_s"),
+        (
+            "[adapter.review]\nstop_without_result_nudges = -1\n",
+            r"adapter\.review\.stop_without_result_nudges",
+        ),
+    ],
+)
+def test_adapter_timing_knobs_reject_negatives(tmp_path, body, match):
+    p = tmp_path / "policy.toml"
+    p.write_text(body)
+    with pytest.raises(policy.PolicyError, match=match):
+        policy.load(p)
+
+
 def test_legacy_model_keys_rejected(tmp_path):
     p = tmp_path / "policy.toml"
     p.write_text('[adapter]\nmodel_dev = "haiku"\n')

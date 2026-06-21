@@ -43,6 +43,24 @@ def test_builtin_profiles_load():
         "sessionEnd": "SessionEnd",
     }
     assert profiles["copilot"].usage_parser == "copilot-events"
+    # copilot writes token totals only on shutdown (poll grace) and fires
+    # agentStop per turn (multi-turn reviews need more nudges)
+    assert profiles["copilot"].usage_grace_s == 8.0
+    assert profiles["copilot"].stop_without_result_nudges == 5
+    # other built-ins keep the defaults: read usage once, inherit the global nudge limit
+    for name in ("claude", "codex", "gemini"):
+        assert profiles[name].usage_grace_s == 0.0
+        assert profiles[name].stop_without_result_nudges is None
+
+
+def test_usage_grace_and_nudges_default_when_unset(tmp_path):
+    # MINIMAL_PROFILE omits both -> 0.0 / None
+    profiles_dir = tmp_path / ".automator" / "profiles"
+    profiles_dir.mkdir(parents=True)
+    (profiles_dir / "mycli.toml").write_text(MINIMAL_PROFILE)
+    prof = load_profiles(tmp_path)["mycli"]
+    assert prof.usage_grace_s == 0.0
+    assert prof.stop_without_result_nudges is None
 
 
 def test_seed_files_default_empty_when_unset(tmp_path):
@@ -126,6 +144,14 @@ def test_user_profile_overlay(tmp_path):
                 'seed_files = ["/etc/passwd"]\n[hooks]',
             ),
             "seed_files",
+        ),
+        (
+            MINIMAL_PROFILE.replace("[hooks]", "usage_grace_s = -1\n[hooks]"),
+            "usage_grace_s",
+        ),
+        (
+            MINIMAL_PROFILE.replace("[hooks]", "stop_without_result_nudges = -2\n[hooks]"),
+            "stop_without_result_nudges",
         ),
     ],
 )

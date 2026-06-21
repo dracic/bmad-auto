@@ -75,6 +75,8 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
                 policy=policy,
                 profile=profile,
                 extra_args=cfg.extra_args,
+                usage_grace_s=cfg.usage_grace_s,
+                stop_without_result_nudges=cfg.stop_without_result_nudges,
             )
         adapters[role] = by_cfg[cfg]
     return adapters

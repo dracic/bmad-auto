@@ -58,6 +58,17 @@ class CLIProfile:
     model_flag: str = "--model"
     env: dict[str, str] = field(default_factory=dict)
     usage_parser: str = "none"
+    # seconds to keep polling the transcript for token usage after the session
+    # ends. 0 = read once (the totals are already there). CLIs that flush their
+    # token totals only on shutdown (Copilot writes modelMetrics in the trailing
+    # session.shutdown line, ~1s after the turn-end hook) need a small grace so
+    # read_usage doesn't sample the transcript before the totals land.
+    usage_grace_s: float = 0.0
+    # per-adapter floor for Stop-without-result nudges; None = use the global
+    # limits.stop_without_result_nudges. CLIs that fire a turn-end hook PER
+    # response turn (Copilot's agentStop) end a parallel-subagent phase across
+    # several turns, so the global default of 1 declares them stalled too early.
+    stop_without_result_nudges: int | None = None
     first_run_note: str = ""
     # project-relative gitignored configs (MCP/CLI settings) this CLI needs but
     # that a `git worktree add` checkout omits; provision_worktree copies them in
@@ -107,6 +118,15 @@ def _parse_profile(doc: dict, source: str) -> CLIProfile:
     if usage_parser not in USAGE_PARSERS:
         raise fail(f"usage_parser must be one of {sorted(USAGE_PARSERS)}: got {usage_parser!r}")
 
+    usage_grace_s = float(doc.get("usage_grace_s", 0.0))
+    if usage_grace_s < 0:
+        raise fail(f"usage_grace_s must be >= 0: got {usage_grace_s}")
+
+    raw_nudges = doc.get("stop_without_result_nudges")
+    stop_nudges = None if raw_nudges is None else int(raw_nudges)
+    if stop_nudges is not None and stop_nudges < 0:
+        raise fail(f"stop_without_result_nudges must be >= 0: got {stop_nudges}")
+
     skill_tree = str(doc.get("skill_tree", ".claude/skills"))
     if not skill_tree or Path(skill_tree).is_absolute():
         raise fail("skill_tree must be a project-relative path")
@@ -127,6 +147,8 @@ def _parse_profile(doc: dict, source: str) -> CLIProfile:
         model_flag=str(doc.get("model_flag", "--model")),
         env={str(k): str(v) for k, v in doc.get("env", {}).items()},
         usage_parser=usage_parser,
+        usage_grace_s=usage_grace_s,
+        stop_without_result_nudges=stop_nudges,
         first_run_note=str(doc.get("first_run_note", "")),
         seed_files=seed_files,
     )

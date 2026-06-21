@@ -148,8 +148,8 @@ bmad-auto init --project <project-root> --cli claude --cli codex --cli gemini
 
 Run with no `--cli` and `init` registers hooks for every CLI the `policy.toml` references,
 so a dual-client setup that's already configured in policy needs no extra flags. Names must
-be exactly `claude`, `codex`, or `gemini` — `init` errors on an unknown profile and lists the
-valid ones.
+be exactly `claude`, `codex`, `gemini`, or `copilot` — `init` errors on an unknown profile and
+lists the valid ones.
 
 ### First-run notes
 
@@ -164,6 +164,10 @@ them to whoever owns the machine:
   Requires Codex ≥ 0.139.
 - **gemini** — authenticate once (browser OAuth or `GEMINI_API_KEY`). Requires Gemini CLI
   ≥ 0.46.
+- **copilot** — run `copilot` once in the project and authenticate (`gh` / a Copilot
+  subscription). Requires the Copilot **CLI** GA (≥ 2026-02) — _not_ the VS Code extension.
+  **Pin a capable model**: the free default (GPT-5 mini) silently skips steps in the
+  multi-step dev/review skills; set `[adapter] model = "claude-sonnet-4-6"` (→ `--model`).
 
 ### Skill location
 

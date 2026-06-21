@@ -104,6 +104,9 @@ class StageAdapterPolicy:
     name: str | None = None
     model: str | None = None
     extra_args: tuple[str, ...] | None = None
+    # None = inherit from [adapter] (which itself falls back to the CLI profile)
+    usage_grace_s: float | None = None
+    stop_without_result_nudges: int | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,10 @@ class ResolvedAdapter:
     model: str
     # None = use the profile's default bypass flags; a list replaces them
     extra_args: tuple[str, ...] | None
+    # None = fall back to the CLI profile's default (usage_grace_s) / the global
+    # limits.stop_without_result_nudges respectively
+    usage_grace_s: float | None = None
+    stop_without_result_nudges: int | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +130,10 @@ class AdapterPolicy:
     # kill the run's bmad-auto-<id> tmux session when it finishes (False keeps
     # it around for post-run inspection)
     cleanup_session_on_finish: bool = True
+    # None = inherit from the selected CLI profile / global limits (see
+    # ResolvedAdapter); a value overrides the profile's shipped default.
+    usage_grace_s: float | None = None
+    stop_without_result_nudges: int | None = None
     dev: StageAdapterPolicy = field(default_factory=StageAdapterPolicy)
     review: StageAdapterPolicy = field(default_factory=StageAdapterPolicy)
     triage: StageAdapterPolicy = field(default_factory=StageAdapterPolicy)
@@ -130,12 +141,21 @@ class AdapterPolicy:
     def resolved(self, role: str) -> ResolvedAdapter:
         stage = {"dev": self.dev, "review": self.review, "triage": self.triage}.get(role)
         if stage is None:
-            return ResolvedAdapter(self.name, self.model, self.extra_args)
+            return ResolvedAdapter(
+                self.name,
+                self.model,
+                self.extra_args,
+                self.usage_grace_s,
+                self.stop_without_result_nudges,
+            )
         name = stage.name if stage.name is not None else self.name
         # model and extra_args are client-specific: inherit from the base only
         # when the stage runs the same client; a client switch falls back to
         # that profile's defaults (CLI default model, profile bypass flags).
         same_client = name == self.name
+        # usage_grace_s / stop_without_result_nudges are benign timing knobs that
+        # mean "fall back to the profile default" when None, so plain stage ??
+        # base inheritance is safe regardless of a client switch.
         return ResolvedAdapter(
             name=name,
             model=(stage.model if stage.model is not None else (self.model if same_client else "")),
@@ -143,6 +163,14 @@ class AdapterPolicy:
                 stage.extra_args
                 if stage.extra_args is not None
                 else (self.extra_args if same_client else None)
+            ),
+            usage_grace_s=(
+                stage.usage_grace_s if stage.usage_grace_s is not None else self.usage_grace_s
+            ),
+            stop_without_result_nudges=(
+                stage.stop_without_result_nudges
+                if stage.stop_without_result_nudges is not None
+                else self.stop_without_result_nudges
             ),
         )
 
@@ -253,6 +281,26 @@ def _section(doc: dict[str, Any], name: str) -> dict[str, Any]:
     return value
 
 
+def _opt_grace(d: dict[str, Any], where: str) -> float | None:
+    raw = d.get("usage_grace_s")
+    if raw is None:
+        return None
+    value = float(raw)
+    if value < 0:
+        raise PolicyError(f"{where}.usage_grace_s must be >= 0: got {value}")
+    return value
+
+
+def _opt_nudges(d: dict[str, Any], where: str) -> int | None:
+    raw = d.get("stop_without_result_nudges")
+    if raw is None:
+        return None
+    value = int(raw)
+    if value < 0:
+        raise PolicyError(f"{where}.stop_without_result_nudges must be >= 0: got {value}")
+    return value
+
+
 def _stage_adapter(adapter_d: dict[str, Any], key: str) -> StageAdapterPolicy:
     raw = adapter_d.get(key, {})
     if not isinstance(raw, dict):
@@ -262,6 +310,8 @@ def _stage_adapter(adapter_d: dict[str, Any], key: str) -> StageAdapterPolicy:
         name=None if raw.get("name") is None else str(raw["name"]),
         model=None if raw.get("model") is None else str(raw["model"]),
         extra_args=None if raw_extra is None else tuple(str(a) for a in raw_extra),
+        usage_grace_s=_opt_grace(raw, f"adapter.{key}"),
+        stop_without_result_nudges=_opt_nudges(raw, f"adapter.{key}"),
     )
 
 
@@ -382,6 +432,8 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
         cleanup_session_on_finish=bool(
             adapter_d.get("cleanup_session_on_finish", AdapterPolicy.cleanup_session_on_finish)
         ),
+        usage_grace_s=_opt_grace(adapter_d, "adapter"),
+        stop_without_result_nudges=_opt_nudges(adapter_d, "adapter"),
         dev=_stage_adapter(adapter_d, "dev"),
         review=_stage_adapter(adapter_d, "review"),
         triage=_stage_adapter(adapter_d, "triage"),
@@ -568,6 +620,11 @@ model = ""                   # empty = CLI default model
 cleanup_session_on_finish = true  # kill the run's tmux session when it finishes (false keeps it for inspection)
 # extra_args replaces the profile's default permission-bypass flags when set:
 # extra_args = ["--permission-mode", "bypassPermissions"]
+# Optional overrides of the CLI profile's own defaults (unset = inherit the
+# profile's shipped value; copilot ships usage_grace_s = 8 and
+# stop_without_result_nudges = 5):
+# usage_grace_s = 8.0                # seconds to poll the transcript for token usage after a session ends
+# stop_without_result_nudges = 5     # result-less Stop signals tolerated before a session is called stalled
 
 # Per-stage overrides for the dev, review and sweep-triage passes. Unset keys
 # inherit from [adapter] when the stage runs the same client; a stage that
@@ -579,6 +636,7 @@ cleanup_session_on_finish = true  # kill the run's tmux session when it finishes
 # [adapter.review]
 # name = "codex"
 # model = "gpt-5-codex"
+# stop_without_result_nudges = 5     # e.g. a multi-turn review needs more nudges than dev
 # [adapter.triage]
 # model = "opus"
 

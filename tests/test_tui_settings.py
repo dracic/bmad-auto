@@ -93,6 +93,25 @@ def test_scalar_added_next_to_existing_stage_table_parses(tmp_path):
     assert pol.adapter.dev.model == "opus"
 
 
+def test_adapter_timing_knobs_round_trip(tmp_path):
+    # unset -> inherit (None on base and stages); set a number -> persisted;
+    # clear -> back to inherit. Mirrors how the TUI int/float collect maps an
+    # empty box to None (delete key) and a value to the parsed number.
+    doc = fresh_doc(tmp_path)
+    base = policy_mod.loads(doc.dumps()).adapter
+    assert base.usage_grace_s is None and base.stop_without_result_nudges is None
+
+    doc.set("adapter", "usage_grace_s", 6.0)
+    doc.set("adapter.review", "stop_without_result_nudges", 5)
+    pol = policy_mod.loads(doc.dumps())
+    assert pol.adapter.usage_grace_s == 6.0
+    assert pol.adapter.resolved("review").stop_without_result_nudges == 5
+    assert doc.validate() is None
+
+    doc.set("adapter", "usage_grace_s", None)
+    assert policy_mod.loads(doc.dumps()).adapter.usage_grace_s is None
+
+
 def test_validate_surfaces_policy_error(tmp_path):
     doc = fresh_doc(tmp_path)
     doc.set("gates", "mode", "bogus")
