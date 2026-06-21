@@ -6,29 +6,32 @@
 # needed" keeps parallel skill phases (e.g. review layers) actually spawning
 # subagents, same as codex.
 #
-# Hook events are registered under Copilot's VS Code-compatible PascalCase names
-# (Stop/SessionStart/SessionEnd/PreCompact, same set as claude). That casing makes
-# Copilot emit SNAKE_CASE payloads (session_id, transcript_path, cwd) — exactly
-# what the shared relay reads — and the Stop payload carries transcript_path, so no
-# relay change is needed and a future usage_parser gets the transcript for free.
-# (The camelCase names agentStop/sessionStart emit camelCase payloads the relay
-# would miss.) NOTE: an enterprise policy permissions.disableBypassPermissionsMode
-# = 'disable' suppresses the --allow-all-* flags and will block unattended runs.
+# Hook events (verified against Copilot CLI 1.0.63 via `bmad-auto probe-adapter
+# copilot --probe`): the turn-end event is `agentStop` — PascalCase `Stop` does
+# NOT fire on this build, so it must NOT be registered (it yields no completion
+# signal and every session reads as a timeout). `sessionStart`/`sessionEnd` cover
+# session lifecycle; Copilot has no PreCompact equivalent. Payload keys are
+# camelCase (sessionId, transcriptPath, cwd) regardless of event-name casing, and
+# the `agentStop` payload carries `transcriptPath` + `stopReason: end_turn` — the
+# shared relay reads both camelCase and snake_case, so the usage_parser gets the
+# transcript. CAVEAT: single build/OS (1.0.63, macOS); a future build may alias
+# `Stop`. NOTE: an enterprise policy permissions.disableBypassPermissionsMode =
+# 'disable' suppresses the --allow-all-* flags and will block unattended runs.
 name = "copilot"
 binary = "copilot"
 prompt_template = "LOAD the FULL .agents/skills/{skill}/SKILL.md, read its entire contents and follow its directions exactly, using subagents as needed: {args}"
 launch_args = ["-i"]
 bypass_args = ["--allow-all-tools", "--allow-all-paths"]
 model_flag = "--model"
-usage_parser = "none"
+usage_parser = "copilot-events"
 first_run_note = "run `copilot` once and authenticate (gh / Copilot subscription); requires Copilot CLI GA (>= 2026-02)"
 skill_tree = ".agents/skills"
 # .github/copilot/settings.json is the inline hook config (and can also hold MCP
 # servers) — gitignored in many projects, so a worktree checkout omits it and
-# isolated sessions lose it; seeded first, then the Stop hook is merged in.
+# isolated sessions lose it; seeded first, then the agentStop hook is merged in.
 seed_files = [".github/copilot/settings.json"]
 
 [hooks]
 dialect = "copilot-settings-json"
 config_path = ".github/copilot/settings.json"
-events = { Stop = "Stop", SessionStart = "SessionStart", SessionEnd = "SessionEnd", PreCompact = "PreCompact" }
+events = { agentStop = "Stop", sessionStart = "SessionStart", sessionEnd = "SessionEnd" }

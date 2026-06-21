@@ -16,6 +16,12 @@ transcript that yields nothing reads as None (untracked), not zero.
                  message id is re-emitted as it accretes content, so the
                  last occurrence per id wins, then unique messages are
                  summed. `input` includes the cached portion.
+- copilot-events: ~/.copilot/session-state/<session>/events.jsonl; some
+                 entries carry `data.modelMetrics.<model>.usage`
+                 {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens,
+                 reasoningTokens} that is CUMULATIVE per model, so the last
+                 entry bearing modelMetrics holds the session totals (summed
+                 across models). reasoningTokens fold into output.
 """
 
 from __future__ import annotations
@@ -34,6 +40,8 @@ def read_usage(parser: str, transcript_path: Path) -> TokenUsage | None:
         return tally_codex_rollout(transcript_path)
     if parser == "gemini-chat":
         return tally_gemini_chat(transcript_path)
+    if parser == "copilot-events":
+        return tally_copilot_events(transcript_path)
     return None
 
 
@@ -147,6 +155,42 @@ def tally_gemini_chat(transcript_path: Path) -> TokenUsage | None:
                 input_tokens=max(0, _int(tokens.get("input")) - cached),
                 output_tokens=_int(tokens.get("output")) + _int(tokens.get("thoughts")),
                 cache_read_tokens=cached,
+            )
+        )
+    return total
+
+
+# --------------------------------------------------------- copilot-events
+
+
+def tally_copilot_events(transcript_path: Path) -> TokenUsage | None:
+    # data.modelMetrics.<model>.usage is cumulative per model, so the LAST entry
+    # carrying modelMetrics holds the session totals; sum across its models.
+    # (Schema verified against a single Copilot CLI 1.0.63 events.jsonl — revisit
+    # the cumulative/multi-model assumption if a newer build disagrees.)
+    last: dict[str, Any] | None = None
+    for entry in _jsonl_entries(transcript_path):
+        data = entry.get("data")
+        if not isinstance(data, dict):
+            continue
+        metrics = data.get("modelMetrics")
+        if isinstance(metrics, dict) and metrics:
+            last = metrics
+    if last is None:
+        return None
+    total = TokenUsage()
+    for model_metrics in last.values():
+        if not isinstance(model_metrics, dict):
+            continue
+        usage = model_metrics.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        total.add(
+            TokenUsage(
+                input_tokens=_int(usage.get("inputTokens")),
+                output_tokens=_int(usage.get("outputTokens")) + _int(usage.get("reasoningTokens")),
+                cache_read_tokens=_int(usage.get("cacheReadTokens")),
+                cache_creation_tokens=_int(usage.get("cacheWriteTokens")),
             )
         )
     return total

@@ -65,10 +65,10 @@ def test_merge_hooks_copilot_entry_shape():
     settings, _ = merge_hooks({}, _registrations(profile), profile.hooks.dialect)
     assert settings["version"] == 1  # Copilot hook configs are versioned
     # Copilot stores the handler dict directly in the event list (no "hooks" wrapper)
-    handler = settings["hooks"]["Stop"][0]
+    handler = settings["hooks"]["agentStop"][0]
     assert handler["type"] == "command"
     assert handler["timeoutSec"] == 60  # Copilot hook timeouts are seconds
-    # registered under the native event but relaying the canonical name
+    # registered under the native event (agentStop) but relaying the canonical name
     assert handler["command"].endswith("bmad_auto_hook.py Stop")
 
 
@@ -94,9 +94,10 @@ def test_install_into_copilot(tmp_path):
     assert install_into(tmp_path, clis=("copilot",)) == 0
     settings = json.loads((tmp_path / ".github" / "copilot" / "settings.json").read_text())
     assert settings["version"] == 1
-    # registered under VS Code-compatible PascalCase names (snake_case payloads)
-    assert set(settings["hooks"]) == {"Stop", "SessionStart", "SessionEnd", "PreCompact"}
-    cmd = settings["hooks"]["Stop"][0]["command"]
+    # registered under the camelCase native names Copilot 1.0.63 actually fires
+    # (agentStop is turn-end; PascalCase Stop never fires); relay still gets canonical
+    assert set(settings["hooks"]) == {"agentStop", "sessionStart", "sessionEnd"}
+    cmd = settings["hooks"]["agentStop"][0]["command"]
     # absolute path baked in (no $CLAUDE_PROJECT_DIR equivalent in copilot)
     assert str(tmp_path.resolve()) in cmd and cmd.endswith(" Stop")
     # skills land in the shared .agents/skills tree
@@ -106,7 +107,7 @@ def test_install_into_copilot(tmp_path):
     # idempotent re-run does not duplicate the bare handler
     assert install_into(tmp_path, clis=("copilot",)) == 0
     settings = json.loads((tmp_path / ".github" / "copilot" / "settings.json").read_text())
-    assert len(settings["hooks"]["Stop"]) == 1
+    assert len(settings["hooks"]["agentStop"]) == 1
 
 
 def test_install_into_full(tmp_path):

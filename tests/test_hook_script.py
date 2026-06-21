@@ -55,6 +55,21 @@ def test_conversation_id_fallback(tmp_path):
     assert json.loads(files[0].read_text())["session_id"] == "conv-9"
 
 
+def test_camelcase_payload(tmp_path):
+    """Copilot payloads carry camelCase sessionId / transcriptPath."""
+    env = {"BMAD_AUTO_RUN_DIR": str(tmp_path), "BMAD_AUTO_TASK_ID": "t1"}
+    payload = {
+        "sessionId": "cop-7",
+        "transcriptPath": "/home/u/.copilot/session-state/cop-7/events.jsonl",
+        "stopReason": "end_turn",
+    }
+    proc = run_hook("Stop", env, payload)
+    assert proc.returncode == 0
+    event = json.loads(next((tmp_path / "events").glob("*.json")).read_text())
+    assert event["session_id"] == "cop-7"
+    assert event["transcript_path"].endswith("events.jsonl")
+
+
 def test_tolerates_garbage_stdin(tmp_path):
     env = {"BMAD_AUTO_RUN_DIR": str(tmp_path), "BMAD_AUTO_TASK_ID": "t1"}
     proc = run_hook("SessionEnd", env, None)  # empty stdin

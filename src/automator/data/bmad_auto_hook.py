@@ -2,9 +2,12 @@
 """Coding-CLI hook relay for bmad-auto. Stdlib only.
 
 Each CLI's hook config registers this script under its native event names
-(Claude/Codex: SessionStart/Stop/..., Gemini: AfterAgent for Stop) but always
-passes the CANONICAL event name as argv[1] — the orchestrator only ever sees
-canonical events. Reads the hook payload from stdin and writes one event file
+(Claude/Codex: SessionStart/Stop/..., Gemini: AfterAgent for Stop, Copilot:
+agentStop for Stop) but always passes the CANONICAL event name as argv[1] — the
+orchestrator only ever sees canonical events. Payload keys vary too: snake_case
+(claude/codex), conversation_id (cursor), or camelCase (copilot's sessionId/
+transcriptPath); the field extraction below tries each. Reads the hook payload
+from stdin and writes one event file
 into the orchestrator's run directory. No-ops (exit 0) unless the session was
 spawned by bmad-auto (detected via env vars set on the tmux window), so
 normal interactive sessions are unaffected.
@@ -34,8 +37,12 @@ def main() -> int:
         "ts": ts,
         "event": event_name,
         "task_id": task_id,
-        "session_id": payload.get("session_id") or payload.get("conversation_id"),
-        "transcript_path": payload.get("transcript_path"),
+        # Payload keys vary by CLI: snake_case (claude/codex), conversation_id
+        # (cursor), or camelCase (copilot's sessionId/transcriptPath). Try each.
+        "session_id": (
+            payload.get("session_id") or payload.get("conversation_id") or payload.get("sessionId")
+        ),
+        "transcript_path": payload.get("transcript_path") or payload.get("transcriptPath"),
         "cwd": payload.get("cwd"),
     }
     events_dir = os.path.join(run_dir, "events")

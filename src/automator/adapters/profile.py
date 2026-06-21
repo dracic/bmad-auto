@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 
-USAGE_PARSERS = {"claude-jsonl", "codex-rollout", "gemini-chat", "none"}
+USAGE_PARSERS = {"claude-jsonl", "codex-rollout", "gemini-chat", "copilot-events", "none"}
 HOOK_DIALECTS = {
     "claude-settings-json",
     "codex-hooks-json",
