@@ -78,6 +78,36 @@ def is_run(run_dir: Path) -> bool:
     return (run_dir / STATE_FILE).is_file()
 
 
+class RunRefError(Exception):
+    """A run ref matched no run, or was ambiguous."""
+
+
+def short_ref(run_id: str) -> str:
+    """The trailing hex segment — the minimal handle users type."""
+    return run_id.rsplit("-", 1)[-1]
+
+
+def resolve_run_dir(project: Path, ref: str) -> Path:
+    """Full or partial run id -> its run dir. An exact id wins outright;
+    otherwise a partial matches when the trailing segment starts with `ref` or
+    the full id ends with `ref` (run ids are date-prefixed, so the tail is what
+    distinguishes them). Raises RunRefError on no match / ambiguity."""
+    exact = run_dir_for(project, ref)
+    if is_run(exact):
+        return exact
+    matches = [
+        d
+        for d in list_run_dirs(project)
+        if short_ref(d.name).startswith(ref) or d.name.endswith(ref)
+    ]
+    if not matches:
+        raise RunRefError(f"no such run: {ref}")
+    if len(matches) > 1:
+        listing = "\n".join(f"  {d.name}" for d in matches)
+        raise RunRefError(f"ambiguous run ref {ref!r} matches {len(matches)} runs:\n{listing}")
+    return matches[0]
+
+
 def read_pid(run_dir: Path) -> int | None:
     """The recorded engine pid, or None when missing/unparseable."""
     try:

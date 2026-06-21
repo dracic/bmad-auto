@@ -454,9 +454,10 @@ def _resume_paused_run(project: Path, run_dir: Path) -> int:
 
 def cmd_resume(args: argparse.Namespace) -> int:
     project = _project(args)
-    run_dir = project / RUNS_DIR / args.run_id
-    if not runs.is_run(run_dir):
-        print(f"no such run: {args.run_id}", file=sys.stderr)
+    try:
+        run_dir = runs.resolve_run_dir(project, args.run_id)
+    except runs.RunRefError as e:
+        print(str(e), file=sys.stderr)
         return 1
     return _resume_paused_run(project, run_dir)
 
@@ -473,10 +474,12 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     from .model import PAUSE_ESCALATION, Phase
 
     project = _project(args)
-    run_dir = runs.run_dir_for(project, args.run_id)
-    if not runs.is_run(run_dir):
-        print(f"no such run: {args.run_id}", file=sys.stderr)
+    try:
+        run_dir = runs.resolve_run_dir(project, args.run_id)
+    except runs.RunRefError as e:
+        print(str(e), file=sys.stderr)
         return 1
+    args.run_id = run_dir.name  # normalize so echoed hints show the full id
     state = load_state(run_dir)
     if state.paused_stage != PAUSE_ESCALATION:
         print(
@@ -589,7 +592,11 @@ def cmd_decisions(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     project = _project(args)
     if args.run_id:
-        run_dir = project / RUNS_DIR / args.run_id
+        try:
+            run_dir = runs.resolve_run_dir(project, args.run_id)
+        except runs.RunRefError as e:
+            print(str(e), file=sys.stderr)
+            return 1
     else:
         run_dir = runs.latest_run_dir(project)
     if run_dir is None or not (run_dir / "state.json").is_file():
@@ -629,11 +636,32 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_list(args: argparse.Namespace) -> int:
+    from .tui.data import discover_runs  # import-safe: data.py has no textual imports
+
+    project = _project(args)
+    infos = discover_runs(project)  # oldest first
+    if not infos:
+        print("no runs found")
+        return 0
+    print(f"{'REF':6} {'TYPE':6} {'STATUS':10} RUN ID")
+    for ri in infos:
+        print(f"{runs.short_ref(ri.run_id):6} {ri.run_type:6} {ri.status:10} {ri.run_id}")
+    return 0
+
+
 def cmd_attach(args: argparse.Namespace) -> int:
     from .tui import launch  # import-safe: launch.py has no textual imports
 
     project = _project(args)
-    run_dir = project / RUNS_DIR / args.run_id if args.run_id else runs.latest_run_dir(project)
+    if args.run_id:
+        try:
+            run_dir = runs.resolve_run_dir(project, args.run_id)
+        except runs.RunRefError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+    else:
+        run_dir = runs.latest_run_dir(project)
     if run_dir is None:
         print("no runs found", file=sys.stderr)
         return 1
@@ -657,10 +685,12 @@ def cmd_attach(args: argparse.Namespace) -> int:
 
 def cmd_stop(args: argparse.Namespace) -> int:
     project = _project(args)
-    run_dir = runs.run_dir_for(project, args.run_id)
-    if not runs.is_run(run_dir):
-        print(f"no such run: {args.run_id}", file=sys.stderr)
+    try:
+        run_dir = runs.resolve_run_dir(project, args.run_id)
+    except runs.RunRefError as e:
+        print(str(e), file=sys.stderr)
         return 1
+    args.run_id = run_dir.name
     if not runs.stop_run(run_dir):
         print(f"run {args.run_id} already finished", file=sys.stderr)
         return 1
@@ -670,10 +700,12 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 def cmd_delete(args: argparse.Namespace) -> int:
     project = _project(args)
-    run_dir = runs.run_dir_for(project, args.run_id)
-    if not runs.is_run(run_dir):
-        print(f"no such run: {args.run_id}", file=sys.stderr)
+    try:
+        run_dir = runs.resolve_run_dir(project, args.run_id)
+    except runs.RunRefError as e:
+        print(str(e), file=sys.stderr)
         return 1
+    args.run_id = run_dir.name
     if runs.engine_alive(run_dir):
         if not args.force:
             print(
@@ -689,10 +721,12 @@ def cmd_delete(args: argparse.Namespace) -> int:
 
 def cmd_archive(args: argparse.Namespace) -> int:
     project = _project(args)
-    run_dir = runs.run_dir_for(project, args.run_id)
-    if not runs.is_run(run_dir):
-        print(f"no such run: {args.run_id}", file=sys.stderr)
+    try:
+        run_dir = runs.resolve_run_dir(project, args.run_id)
+    except runs.RunRefError as e:
+        print(str(e), file=sys.stderr)
         return 1
+    args.run_id = run_dir.name
     if runs.engine_alive(run_dir):
         if not args.force:
             print(
@@ -872,8 +906,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=f"bmad-auto {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    def add(name: str, func, help: str) -> argparse.ArgumentParser:
-        p = sub.add_parser(name, help=help)
+    def add(name: str, func, help: str, *, aliases=()) -> argparse.ArgumentParser:
+        p = sub.add_parser(name, help=help, aliases=aliases)
         p.add_argument("--project", default=".", help="target project root (default: cwd)")
         p.set_defaults(func=func)
         return p
@@ -965,6 +999,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="list the pending decisions without answering them",
     )
+
+    add("list", cmd_list, "list runs/sweeps with their short ref", aliases=["ls"])
 
     status_p = add("status", cmd_status, "show run + sprint state")
     status_p.add_argument("run_id", nargs="?")

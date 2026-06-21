@@ -5,6 +5,16 @@ All notable changes to `bmad-auto` are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
+## [0.6.1] — unreleased
+
+### Added
+
+- **Short run refs (Docker-style).** Every command that takes a run id (`status`, `attach`,
+  `resume`, `resolve`, `stop`, `delete`, `archive`) now accepts a partial — the tail after the
+  last `-` (e.g. `a1b2`, or as few chars as stay unique). Full ids still work; an ambiguous ref
+  fails listing the candidates. New `bmad-auto list` (alias `ls`) prints each run/sweep with its
+  short ref, type, and status.
+
 ## [0.6.0] — 2026-06-20
 
 ### Fixed

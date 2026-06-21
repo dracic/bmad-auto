@@ -198,6 +198,41 @@ def test_status_surfaces_missed_decision_count(project, capsys):
     assert "decisions awaiting an answer: 1" in capsys.readouterr().out
 
 
+def test_status_resolves_partial_ref(project, capsys):
+    _make_run_with_decision(project, run_id="20260101-000000-aaaa")
+    # the trailing segment alone resolves to the full run
+    assert cli.main(["status", "--project", str(project.project), "aaaa"]) == 0
+    assert "run 20260101-000000-aaaa" in capsys.readouterr().out
+
+
+def test_status_unknown_ref_errors(project, capsys):
+    _make_run_with_decision(project, run_id="20260101-000000-aaaa")
+    assert cli.main(["status", "--project", str(project.project), "zzzz"]) == 1
+    assert "no such run: zzzz" in capsys.readouterr().err
+
+
+def test_status_ambiguous_ref_errors(project, capsys):
+    _make_run_with_decision(project, run_id="20260101-000000-aa11")
+    _make_run_with_decision(project, run_id="20260102-000000-aa22")
+    assert cli.main(["status", "--project", str(project.project), "aa"]) == 1
+    assert "ambiguous run ref 'aa' matches 2 runs" in capsys.readouterr().err
+
+
+def test_list_shows_short_refs(project, capsys):
+    _make_run_with_decision(project, run_id="20260101-000000-aaaa")
+    _make_run_with_decision(project, run_id="20260102-000000-bbbb")
+    assert cli.main(["list", "--project", str(project.project)]) == 0
+    out = capsys.readouterr().out
+    assert "REF" in out
+    assert "aaaa" in out and "bbbb" in out
+    assert "20260101-000000-aaaa" in out
+
+
+def test_list_no_runs(project, capsys):
+    assert cli.main(["list", "--project", str(project.project)]) == 0
+    assert "no runs found" in capsys.readouterr().out
+
+
 def test_attach_records_return_pane_inside_tmux(project, monkeypatch):
     from automator.tui import launch
 
