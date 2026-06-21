@@ -177,6 +177,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.dry_run:
         return _dry_run(paths, pol, args)
 
+    try:
+        sprintstatus.select_actionable(
+            sprintstatus.load(paths.sprint_status), args.epic, args.story
+        )
+    except sprintstatus.SprintStatusError as e:
+        print(e, file=sys.stderr)
+        return 1
+
     if not verify.worktree_clean(paths.repo_root):
         print("git worktree is not clean — commit or stash first", file=sys.stderr)
         return 1
@@ -243,13 +251,11 @@ def _dry_run(paths: bmadconfig.ProjectPaths, pol, args: argparse.Namespace) -> i
         return _render_invocation(pol, paths.project, role, prompt)
 
     ss = sprintstatus.load(paths.sprint_status)
-    queue = [
-        s
-        for s in ss.stories
-        if s.status in sprintstatus.ACTIONABLE_STATUSES
-        and (args.epic is None or s.epic == args.epic)
-        and (args.story is None or s.key == args.story)
-    ]
+    try:
+        queue = sprintstatus.select_actionable(ss, args.epic, args.story)
+    except sprintstatus.SprintStatusError as e:
+        print(e, file=sys.stderr)
+        return 1
     if args.max_stories is not None:
         queue = queue[: args.max_stories]
     if not queue:
@@ -448,9 +454,10 @@ def _resume_paused_run(project: Path, run_dir: Path) -> int:
 
 def cmd_resume(args: argparse.Namespace) -> int:
     project = _project(args)
-    run_dir = project / RUNS_DIR / args.run_id
-    if not runs.is_run(run_dir):
-        print(f"no such run: {args.run_id}", file=sys.stderr)
+    try:
+        run_dir = runs.resolve_run_dir(project, args.run_id)
+    except runs.RunRefError as e:
+        print(str(e), file=sys.stderr)
         return 1
     return _resume_paused_run(project, run_dir)
 
@@ -467,10 +474,12 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     from .model import PAUSE_ESCALATION, Phase
 
     project = _project(args)
-    run_dir = runs.run_dir_for(project, args.run_id)
-    if not runs.is_run(run_dir):
-        print(f"no such run: {args.run_id}", file=sys.stderr)
+    try:
+        run_dir = runs.resolve_run_dir(project, args.run_id)
+    except runs.RunRefError as e:
+        print(str(e), file=sys.stderr)
         return 1
+    args.run_id = run_dir.name  # normalize so echoed hints show the full id
     state = load_state(run_dir)
     if state.paused_stage != PAUSE_ESCALATION:
         print(
@@ -583,7 +592,11 @@ def cmd_decisions(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     project = _project(args)
     if args.run_id:
-        run_dir = project / RUNS_DIR / args.run_id
+        try:
+            run_dir = runs.resolve_run_dir(project, args.run_id)
+        except runs.RunRefError as e:
+            print(str(e), file=sys.stderr)
+            return 1
     else:
         run_dir = runs.latest_run_dir(project)
     if run_dir is None or not (run_dir / "state.json").is_file():
@@ -623,11 +636,32 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_list(args: argparse.Namespace) -> int:
+    from .tui.data import discover_runs  # import-safe: data.py has no textual imports
+
+    project = _project(args)
+    infos = discover_runs(project)  # oldest first
+    if not infos:
+        print("no runs found")
+        return 0
+    print(f"{'REF':6} {'TYPE':6} {'STATUS':10} RUN ID")
+    for ri in infos:
+        print(f"{runs.short_ref(ri.run_id):6} {ri.run_type:6} {ri.status:10} {ri.run_id}")
+    return 0
+
+
 def cmd_attach(args: argparse.Namespace) -> int:
     from .tui import launch  # import-safe: launch.py has no textual imports
 
     project = _project(args)
-    run_dir = project / RUNS_DIR / args.run_id if args.run_id else runs.latest_run_dir(project)
+    if args.run_id:
+        try:
+            run_dir = runs.resolve_run_dir(project, args.run_id)
+        except runs.RunRefError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+    else:
+        run_dir = runs.latest_run_dir(project)
     if run_dir is None:
         print("no runs found", file=sys.stderr)
         return 1
@@ -651,10 +685,12 @@ def cmd_attach(args: argparse.Namespace) -> int:
 
 def cmd_stop(args: argparse.Namespace) -> int:
     project = _project(args)
-    run_dir = runs.run_dir_for(project, args.run_id)
-    if not runs.is_run(run_dir):
-        print(f"no such run: {args.run_id}", file=sys.stderr)
+    try:
+        run_dir = runs.resolve_run_dir(project, args.run_id)
+    except runs.RunRefError as e:
+        print(str(e), file=sys.stderr)
         return 1
+    args.run_id = run_dir.name
     if not runs.stop_run(run_dir):
         print(f"run {args.run_id} already finished", file=sys.stderr)
         return 1
@@ -664,10 +700,12 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 def cmd_delete(args: argparse.Namespace) -> int:
     project = _project(args)
-    run_dir = runs.run_dir_for(project, args.run_id)
-    if not runs.is_run(run_dir):
-        print(f"no such run: {args.run_id}", file=sys.stderr)
+    try:
+        run_dir = runs.resolve_run_dir(project, args.run_id)
+    except runs.RunRefError as e:
+        print(str(e), file=sys.stderr)
         return 1
+    args.run_id = run_dir.name
     if runs.engine_alive(run_dir):
         if not args.force:
             print(
@@ -683,10 +721,12 @@ def cmd_delete(args: argparse.Namespace) -> int:
 
 def cmd_archive(args: argparse.Namespace) -> int:
     project = _project(args)
-    run_dir = runs.run_dir_for(project, args.run_id)
-    if not runs.is_run(run_dir):
-        print(f"no such run: {args.run_id}", file=sys.stderr)
+    try:
+        run_dir = runs.resolve_run_dir(project, args.run_id)
+    except runs.RunRefError as e:
+        print(str(e), file=sys.stderr)
         return 1
+    args.run_id = run_dir.name
     if runs.engine_alive(run_dir):
         if not args.force:
             print(
@@ -866,8 +906,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=f"bmad-auto {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    def add(name: str, func, help: str) -> argparse.ArgumentParser:
-        p = sub.add_parser(name, help=help)
+    def add(name: str, func, help: str, *, aliases=()) -> argparse.ArgumentParser:
+        p = sub.add_parser(name, help=help, aliases=aliases)
         p.add_argument("--project", default=".", help="target project root (default: cwd)")
         p.set_defaults(func=func)
         return p
@@ -897,7 +937,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run_p = add("run", cmd_run, "run the orchestration loop")
     run_p.add_argument("--epic", type=int, help="only stories from this epic")
-    run_p.add_argument("--story", help="only this story key")
+    run_p.add_argument("--story", help="story: E-S / E.S, a slug fragment, or full key")
     run_p.add_argument("--max-stories", type=int, help="stop after N stories")
     run_p.add_argument("--dry-run", action="store_true", help="print the plan, spawn nothing")
     run_p.add_argument("--run-id", help=argparse.SUPPRESS)  # pre-assigned id (used by the TUI)
@@ -959,6 +999,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="list the pending decisions without answering them",
     )
+
+    add("list", cmd_list, "list runs/sweeps with their short ref", aliases=["ls"])
 
     status_p = add("status", cmd_status, "show run + sprint state")
     status_p.add_argument("run_id", nargs="?")

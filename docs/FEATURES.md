@@ -161,6 +161,7 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 - `bmad-auto resume <run-id>` — continue a paused/interrupted run.
 - `bmad-auto resolve <run-id>` — resolve a CRITICAL escalation, then re-arm + resume.
 - `bmad-auto decisions` — answer deferred-work decisions past sweeps left unanswered (`--list` to just show them).
+- `bmad-auto list` (`ls`) — list every run/sweep with its short ref, type, and status.
 - `bmad-auto status [<run-id>]` — run + sprint summary with per-story token totals.
 - `bmad-auto attach [<run-id>]` — tmux-attach to a run's live agent session.
 - `bmad-auto stop <run-id>` — stop a live run (engine + agent session).
@@ -169,4 +170,4 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 - `bmad-auto cleanup` — remove leftover tmux artifacts for finished/stopped runs.
 - `bmad-auto clean` — reclaim disk from concluded runs per `[cleanup]`: tear down worktrees a mid-flight stop orphaned, trim heavy `worktrees/` from runs kept for history, archive/delete past the retention window (`--dry-run`, `--keep`, `--retain N`, `--hard`).
 - `bmad-auto tui` — the interactive dashboard (`--low-frame-rate` for slow/SSH links).
-- Every command takes `--project <dir>` (default: current directory).
+- Every command takes `--project <dir>` (default: current directory). Any `<run-id>` accepts a partial — the tail after the last `-`, shortened to any unique prefix.

@@ -5,6 +5,8 @@ import re
 import subprocess
 import tarfile
 
+import pytest
+
 from automator import runs
 from automator.journal import load_state, save_state
 from automator.model import RunState
@@ -84,6 +86,44 @@ def test_run_dir_for_and_is_run(tmp_path):
     assert runs.run_dir_for(tmp_path, "r1") == run_dir
     assert runs.is_run(run_dir)
     assert not runs.is_run(tmp_path / ".automator" / "runs" / "nope")
+
+
+def test_short_ref():
+    assert runs.short_ref("20260620-143025-a1b2") == "a1b2"
+
+
+def test_resolve_run_dir_exact_and_partial(tmp_path):
+    target = _make_run(tmp_path, "20260620-143025-a1b2")
+    _make_run(tmp_path, "20260619-101010-c3d4")
+    # exact full id
+    assert runs.resolve_run_dir(tmp_path, "20260620-143025-a1b2") == target
+    # full trailing segment
+    assert runs.resolve_run_dir(tmp_path, "a1b2") == target
+    # prefix of the trailing segment
+    assert runs.resolve_run_dir(tmp_path, "a1") == target
+    # a longer tail of the id (endswith)
+    assert runs.resolve_run_dir(tmp_path, "025-a1b2") == target
+
+
+def test_resolve_run_dir_no_match(tmp_path):
+    _make_run(tmp_path, "20260620-143025-a1b2")
+    with pytest.raises(runs.RunRefError, match="no such run: zzzz"):
+        runs.resolve_run_dir(tmp_path, "zzzz")
+
+
+def test_resolve_run_dir_ambiguous(tmp_path):
+    _make_run(tmp_path, "20260620-143025-a1b2")
+    _make_run(tmp_path, "20260619-101010-a1c9")
+    with pytest.raises(runs.RunRefError, match="ambiguous run ref 'a1' matches 2 runs"):
+        runs.resolve_run_dir(tmp_path, "a1")
+
+
+def test_resolve_run_dir_exact_wins_over_ambiguity(tmp_path):
+    # An exact id resolves even when another run's id ends with it (which would
+    # otherwise be an ambiguous partial match).
+    exact = _make_run(tmp_path, "20260620-143025-a1b2")
+    _make_run(tmp_path, "20260101-000000-20260620-143025-a1b2")  # ends with the exact id
+    assert runs.resolve_run_dir(tmp_path, "20260620-143025-a1b2") == exact
 
 
 def test_read_pid_missing_and_garbage(tmp_path):

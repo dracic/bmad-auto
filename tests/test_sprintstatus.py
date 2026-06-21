@@ -88,6 +88,77 @@ def test_story_status_reread(project):
     assert sprintstatus.story_status(project.sprint_status, "9-9-z") is None
 
 
+def test_parse_selector_forms():
+    # full key — exact match intent
+    sel = sprintstatus.parse_selector(None, "3-1-user-auth")
+    assert (sel.epic, sel.num, sel.key, sel.slug) == (3, 1, "3-1-user-auth", None)
+    # short refs: hyphen and dot are equivalent
+    for ref in ("3-1", "3.1"):
+        sel = sprintstatus.parse_selector(None, ref)
+        assert (sel.epic, sel.num, sel.key, sel.slug) == (3, 1, None, None)
+    # bare number resolves against --epic
+    sel = sprintstatus.parse_selector(3, "1")
+    assert (sel.epic, sel.num, sel.slug) == (3, 1, None)
+    # slug fragment
+    sel = sprintstatus.parse_selector(None, "user-auth")
+    assert (sel.epic, sel.num, sel.slug) == (None, None, "user-auth")
+    # epic only — not targeted
+    sel = sprintstatus.parse_selector(3, None)
+    assert sel.epic == 3 and not sel.is_targeted
+
+
+def test_parse_selector_bare_number_needs_epic():
+    with pytest.raises(sprintstatus.SprintStatusError, match="ambiguous story '1'"):
+        sprintstatus.parse_selector(None, "1")
+
+
+def test_parse_selector_epic_conflict():
+    with pytest.raises(sprintstatus.SprintStatusError, match="conflicts"):
+        sprintstatus.parse_selector(2, "3-1")
+    with pytest.raises(sprintstatus.SprintStatusError, match="conflicts"):
+        sprintstatus.parse_selector(2, "3-1-user-auth")
+
+
+def test_select_actionable_short_ref_and_epic_story(project):
+    write_sprint(
+        project,
+        {"3-1-user-auth": "ready-for-dev", "3-2-foo": "backlog", "4-1-bar": "backlog"},
+    )
+    ss = sprintstatus.load(project.sprint_status)
+    for epic, story in [(None, "3-1"), (None, "3.1"), (3, "1"), (None, "user-auth")]:
+        got = sprintstatus.select_actionable(ss, epic, story)
+        assert [s.key for s in got] == ["3-1-user-auth"]
+    # epic only selects every actionable story in the epic
+    assert [s.key for s in sprintstatus.select_actionable(ss, 3, None)] == [
+        "3-1-user-auth",
+        "3-2-foo",
+    ]
+
+
+def test_select_actionable_targeted_not_actionable(project):
+    write_sprint(project, {"3-1-user-auth": "ready-for-dev", "3-2-foo": "done"})
+    ss = sprintstatus.load(project.sprint_status)
+    with pytest.raises(
+        sprintstatus.SprintStatusError,
+        match=r"story 3-2 matched 3-2-foo but its status is 'done'",
+    ):
+        sprintstatus.select_actionable(ss, None, "3-2")
+
+
+def test_select_actionable_ambiguous_slug(project):
+    write_sprint(project, {"3-1-user-auth": "backlog", "4-2-admin-auth": "backlog"})
+    ss = sprintstatus.load(project.sprint_status)
+    with pytest.raises(sprintstatus.SprintStatusError, match="ambiguous"):
+        sprintstatus.select_actionable(ss, None, "auth")
+
+
+def test_select_actionable_no_match(project):
+    write_sprint(project, {"3-1-user-auth": "backlog"})
+    ss = sprintstatus.load(project.sprint_status)
+    with pytest.raises(sprintstatus.SprintStatusError, match="no story matches"):
+        sprintstatus.select_actionable(ss, None, "9-9")
+
+
 def test_missing_file_raises(project):
     with pytest.raises(sprintstatus.SprintStatusError, match="not found"):
         sprintstatus.load(project.sprint_status)

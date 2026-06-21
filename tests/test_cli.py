@@ -3,6 +3,7 @@
 import argparse
 import json
 
+import pytest
 from conftest import install_bmad_config, write_sprint
 
 from automator import cli
@@ -66,6 +67,36 @@ def test_dry_run_renders_per_stage_commands(project, capsys):
     assert "claude" in dev_line and "--model opus" in dev_line
     assert review_line.split("review:")[1].strip().startswith("codex ")
     assert "--model gpt-5-codex" in review_line
+
+
+@pytest.mark.parametrize(
+    "epic,story",
+    [(None, "3-1"), (None, "3.1"), (3, "1"), (None, "user-auth"), (None, "3-1-user-auth")],
+)
+def test_dry_run_selects_story_by_short_ref(project, capsys, epic, story):
+    write_sprint(
+        project,
+        {"3-1-user-auth": "ready-for-dev", "3-2-foo": "backlog", "4-1-bar": "backlog"},
+    )
+    _write_policy(project.project)
+    pol = policy_mod.load(project.project / ".automator" / "policy.toml")
+    args = argparse.Namespace(epic=epic, story=story, max_stories=None)
+
+    assert cli._dry_run(project, pol, args) == 0
+    out = capsys.readouterr().out
+    assert "3-1-user-auth" in out
+    assert "3-2-foo" not in out and "4-1-bar" not in out
+
+
+def test_dry_run_reports_targeted_not_actionable(project, capsys):
+    write_sprint(project, {"3-1-user-auth": "ready-for-dev", "3-2-foo": "done"})
+    _write_policy(project.project)
+    pol = policy_mod.load(project.project / ".automator" / "policy.toml")
+    args = argparse.Namespace(epic=None, story="3-2", max_stories=None)
+
+    assert cli._dry_run(project, pol, args) == 1
+    err = capsys.readouterr().err
+    assert "3-2 matched 3-2-foo" in err and "not actionable" in err
 
 
 def _make_run_with_decision(project, run_id="20260101-000000-aaaa", dw_id="DW-1"):
@@ -165,6 +196,41 @@ def test_status_surfaces_missed_decision_count(project, capsys):
     # status needs a run to report; the decision run dir doubles as one
     assert cli.main(["status", "--project", str(project.project)]) == 0
     assert "decisions awaiting an answer: 1" in capsys.readouterr().out
+
+
+def test_status_resolves_partial_ref(project, capsys):
+    _make_run_with_decision(project, run_id="20260101-000000-aaaa")
+    # the trailing segment alone resolves to the full run
+    assert cli.main(["status", "--project", str(project.project), "aaaa"]) == 0
+    assert "run 20260101-000000-aaaa" in capsys.readouterr().out
+
+
+def test_status_unknown_ref_errors(project, capsys):
+    _make_run_with_decision(project, run_id="20260101-000000-aaaa")
+    assert cli.main(["status", "--project", str(project.project), "zzzz"]) == 1
+    assert "no such run: zzzz" in capsys.readouterr().err
+
+
+def test_status_ambiguous_ref_errors(project, capsys):
+    _make_run_with_decision(project, run_id="20260101-000000-aa11")
+    _make_run_with_decision(project, run_id="20260102-000000-aa22")
+    assert cli.main(["status", "--project", str(project.project), "aa"]) == 1
+    assert "ambiguous run ref 'aa' matches 2 runs" in capsys.readouterr().err
+
+
+def test_list_shows_short_refs(project, capsys):
+    _make_run_with_decision(project, run_id="20260101-000000-aaaa")
+    _make_run_with_decision(project, run_id="20260102-000000-bbbb")
+    assert cli.main(["list", "--project", str(project.project)]) == 0
+    out = capsys.readouterr().out
+    assert "REF" in out
+    assert "aaaa" in out and "bbbb" in out
+    assert "20260101-000000-aaaa" in out
+
+
+def test_list_no_runs(project, capsys):
+    assert cli.main(["list", "--project", str(project.project)]) == 0
+    assert "no runs found" in capsys.readouterr().out
 
 
 def test_attach_records_return_pane_inside_tmux(project, monkeypatch):

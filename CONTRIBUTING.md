@@ -90,7 +90,7 @@ trunk fmt        # auto-format changed files
 trunk check      # lint + format verification (what CI runs)
 ```
 
-Releases are cut by maintainers — see [RELEASING.md](RELEASING.md) for the version-bump and changelog workflow. The version field is validated in CI; if you touch it, run `uv run --no-project python scripts/sync_version.py --check`.
+Releases are cut by maintainers. The version field is validated in CI; if you touch it, run `uv run --no-project python scripts/sync_version.py --check`.
 
 ---
 
@@ -98,7 +98,7 @@ Releases are cut by maintainers — see [RELEASING.md](RELEASING.md) for the ver
 
 ### Target Branch
 
-Submit PRs to the `main` branch. We use trunk-based development. Releases are cut from `main` (see [RELEASING.md](RELEASING.md)).
+Submit PRs to the `main` branch. We use trunk-based development. Releases are cut from `main`.
 
 ### PR Size
 
