@@ -5,6 +5,25 @@ All notable changes to `bmad-auto` are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
+## [0.6.0] — 2026-06-20
+
+### Fixed
+
+- **Rollback no longer wipes non-automator files.** A failed in-place attempt previously ran
+  `git reset --hard` + a blanket `git clean -fd` over the whole checkout, which could delete a
+  project's `_bmad-output/` and any other untracked files (only `.automator/` and two artifact
+  subdirs were spared). The orchestrator now never runs a blanket `git clean`: it reverts the
+  attempt's tracked changes and removes only the untracked files **that run created**, preserving
+  pre-existing untracked files and the entire `_bmad-output/` tree.
+
+### Changed
+
+- **Auto-rollback is now opt-in (`[scm] rollback_on_failure`, default off).** With it off the
+  orchestrator never touches your working tree on a failed attempt — it pauses the run with bold
+  manual-recovery instructions (back up untracked files → `git reset --hard <baseline>` → restore).
+  Turn it on for the safe automatic rollback above (it discards the attempt's uncommitted work, so
+  it warns when it fires). Worktree isolation (`scm.isolation = "worktree"`) sidesteps this entirely.
+
 ## [0.5.1] — 2026-06-20
 
 ### Added
@@ -396,6 +415,7 @@ enforced in CI.
   implementation phase, driven by a Python control loop with hook-based session transport and
   resumable on-disk run state.
 
+[0.6.0]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.6.0
 [0.5.1]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.5.1
 [0.5.0]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.5.0
 [0.4.4]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.4.4
