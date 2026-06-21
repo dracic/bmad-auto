@@ -46,6 +46,7 @@ TRANSCRIPT_GLOBS = {
     "claude-jsonl": "~/.claude/projects/*/*.jsonl",
     "codex-rollout": "~/.codex/sessions/*/*/*/rollout-*.jsonl",
     "gemini-chat": "~/.gemini/tmp/*/chats/session-*.jsonl",
+    "copilot-events": "~/.copilot/session-state/*/events.jsonl",
 }
 # Fallback family glob keyed by the `cli` name, so a CLI whose usage_parser is
 # still "none" (e.g. copilot, freshly added) still gets transcript discovery.
@@ -450,7 +451,11 @@ def _probe_argv(profile: CLIProfile, binary: str, hints: Hints) -> list[str]:
     argv = [
         binary,
         *profile.launch_args,
-        profile.render_prompt(PROBE_PROMPT),
+        # Send the probe prompt verbatim, NOT through profile.render_prompt: a
+        # content-free turn has no skill name, so a skill-templating prompt_template
+        # (copilot, codex) would render a nonexistent .../skills//SKILL.md path the
+        # agent hunts for, and the turn never ends within the probe timeout.
+        PROBE_PROMPT,
         *profile.bypass_args,
     ]
     if hints.model:

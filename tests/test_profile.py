@@ -35,6 +35,14 @@ def test_builtin_profiles_load():
     assert ".claude/settings.json" in profiles["claude"].seed_files
     assert profiles["codex"].seed_files == (".codex/config.toml",)
     assert profiles["gemini"].seed_files == (".gemini/settings.json",)
+    # copilot: turn-end is agentStop (Copilot 1.0.63 never fires PascalCase Stop),
+    # no PreCompact equivalent, and its events.jsonl parser is wired up
+    assert profiles["copilot"].hooks.events == {
+        "agentStop": "Stop",
+        "sessionStart": "SessionStart",
+        "sessionEnd": "SessionEnd",
+    }
+    assert profiles["copilot"].usage_parser == "copilot-events"
 
 
 def test_seed_files_default_empty_when_unset(tmp_path):

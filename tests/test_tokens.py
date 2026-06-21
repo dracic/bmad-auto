@@ -1,7 +1,13 @@
 import json
 
 from automator.model import TokenUsage
-from automator.tokens import read_usage, tally, tally_codex_rollout, tally_gemini_chat
+from automator.tokens import (
+    read_usage,
+    tally,
+    tally_codex_rollout,
+    tally_copilot_events,
+    tally_gemini_chat,
+)
 
 
 def test_weighted_total():
@@ -168,8 +174,69 @@ def test_gemini_chat_without_tokens_is_none(tmp_path):
     assert tally_gemini_chat(tmp_path / "nope.jsonl") is None
 
 
+def test_copilot_events_last_cumulative_across_models(tmp_path):
+    # shape from ~/.copilot/session-state/<session>/events.jsonl: per line
+    # {id, type, data:{...}}; data.modelMetrics.<model>.usage is cumulative.
+    lines = [
+        {"id": "e0", "type": "session_start", "data": {"sessionId": "s1"}},
+        # an earlier, smaller cumulative snapshot — superseded by the last one
+        {
+            "id": "e1",
+            "type": "metrics",
+            "data": {"modelMetrics": {"gpt-5-mini": {"usage": {"inputTokens": 100}}}},
+        },
+        {"id": "e2", "type": "message", "data": {"content": "noise"}},
+        # final cumulative snapshot, two models — totals come from here
+        {
+            "id": "e3",
+            "type": "metrics",
+            "data": {
+                "modelMetrics": {
+                    "gpt-5-mini": {
+                        "usage": {
+                            "inputTokens": 500,
+                            "outputTokens": 60,
+                            "cacheReadTokens": 200,
+                            "cacheWriteTokens": 30,
+                            "reasoningTokens": 5,
+                        }
+                    },
+                    "gpt-5": {
+                        "usage": {
+                            "inputTokens": 40,
+                            "outputTokens": 8,
+                            "reasoningTokens": 2,
+                        }
+                    },
+                }
+            },
+        },
+    ]
+    path = tmp_path / "events.jsonl"
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\nnot json\n")
+
+    usage = tally_copilot_events(path)
+    assert usage.input_tokens == 540  # 500 + 40
+    assert usage.output_tokens == 75  # (60 + 5) + (8 + 2), reasoning folded in
+    assert usage.cache_read_tokens == 200
+    assert usage.cache_creation_tokens == 30
+
+
+def test_copilot_events_without_metrics_is_none(tmp_path):
+    path = tmp_path / "events.jsonl"
+    path.write_text(json.dumps({"id": "e0", "type": "message", "data": {"content": "hi"}}) + "\n")
+    assert tally_copilot_events(path) is None
+    assert tally_copilot_events(tmp_path / "nope.jsonl") is None
+
+
 def test_read_usage_dispatch(tmp_path):
     path = tmp_path / "t.jsonl"
     path.write_text(json.dumps({"usage": {"input_tokens": 1, "output_tokens": 2}}) + "\n")
     assert read_usage("claude-jsonl", path).total == 3
     assert read_usage("none", path) is None
+
+    cop = tmp_path / "events.jsonl"
+    cop.write_text(
+        json.dumps({"data": {"modelMetrics": {"m": {"usage": {"inputTokens": 7}}}}}) + "\n"
+    )
+    assert read_usage("copilot-events", cop).input_tokens == 7

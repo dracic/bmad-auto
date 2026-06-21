@@ -150,15 +150,25 @@ unknown CLI without `--binary` fails and lists the available profiles.
 
 ## Worked example: copilot
 
-The bundled `copilot` profile ships with `usage_parser = "none"` — Copilot's
-token-usage schema hadn't been captured when the profile landed. That's exactly
-the gap `probe-adapter` closes:
+The `copilot` profile was finalized from a real probe run — a good illustration of
+why `probe-adapter` exists, because the as-drafted profile was wrong in ways no doc
+would reveal:
 
 ```bash
 bmad-auto probe-adapter copilot --probe --project /tmp/scratch
 ```
 
-captures the `Stop` payload (confirming `session_id` / `transcript_path` casing),
-locates `~/.copilot/session-state/*/events.jsonl`, and infers its token schema —
-the data needed to write a `copilot-*` parser in `tokens.py` and flip the profile's
-`usage_parser` off `"none"`. Confirm the `mkdtemp` dir is gone afterward.
+On Copilot CLI 1.0.63 this surfaced three corrections:
+
+- **Turn-end event.** The draft registered PascalCase `Stop`, which never fires —
+  the turn-end hook is `agentStop` (camelCase). Without this, every session reads
+  as a timeout. The profile now maps `agentStop = "Stop"` (and `sessionStart` /
+  `sessionEnd`; there is no `PreCompact` equivalent).
+- **Payload casing.** Keys are camelCase (`sessionId`, `transcriptPath`), not
+  snake_case — so the shared relay (`bmad_auto_hook.py`) reads both casings.
+- **Token schema.** The probe located `~/.copilot/session-state/*/events.jsonl` and
+  inferred its token fields (`data.modelMetrics.<model>.usage.*`), which became the
+  `copilot-events` parser in `tokens.py`; the profile's `usage_parser` is now wired
+  to it instead of `"none"`.
+
+Confirm the `mkdtemp` dir is gone afterward.
