@@ -5,6 +5,30 @@ All notable changes to `bmad-auto` are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
+## [0.6.4] — 2026-06-21
+
+### Fixed
+
+- **Copilot token usage now records (was always 0).** Copilot writes its token totals only in
+  the trailing `session.shutdown` events line, ~1s after `agentStop` — usage was sampled before
+  it landed. `read_usage` now polls the transcript for a short grace, driven by a new per-profile
+  `usage_grace_s` (8s for `copilot`, 0 elsewhere = read once).
+- **Copilot multi-turn reviews no longer stall.** `agentStop` fires per response turn, so a
+  parallel-subagent review ends several turns and tripped the global `stop_without_result_nudges`
+  default of 1. New per-adapter floor (5 for `copilot`), overridable per stage via `[adapter.review]`.
+
+### Added
+
+- **`[adapter] usage_grace_s` / `stop_without_result_nudges`** (base + per-stage
+  `[adapter.dev|review|triage]`), editable in the settings TUI. Unset = inherit the CLI profile's
+  shipped default.
+
+### Changed
+
+- **Copilot docs.** Pin a capable model — the free GPT-5 mini default silently skips steps in
+  multi-step dev/review — and it's the Copilot **CLI** binary that's supported, not the VS Code
+  extension.
+
 ## [0.6.3] — 2026-06-21
 
 ### Fixed
@@ -467,6 +491,7 @@ enforced in CI.
   implementation phase, driven by a Python control loop with hook-based session transport and
   resumable on-disk run state.
 
+[0.6.4]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.6.4
 [0.6.3]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.6.3
 [0.6.2]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.6.2
 [0.6.1]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.6.1
