@@ -10,14 +10,14 @@ plus the orchestrator that invokes them. Standard BMAD installs are never
 modified; the skills are automator-owned forks maintained against their upstream
 counterparts.
 
-| Component           | Forked from          | Role                                                                                                                                              |
-| ------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bmad-auto`         | — (this repo, Git)   | the orchestrator: ralph-loop, hooks, tmux adapters, TUI. CLI `bmad-auto`. Installed by `bmad-auto-setup` from Git.                                |
-| `bmad-auto-dev`     | `bmad-quick-dev`     | unattended implementation: story key / feedback file / dw-bundle → spec + code + result.json                                                      |
-| `bmad-auto-review`  | `bmad-code-review`   | unattended adversarial review of a dev spec in a fresh context                                                                                    |
-| `bmad-auto-resolve` | — (automator-native) | interactive CRITICAL-escalation resolution: a human disambiguates a frozen spec so a paused story can be re-driven (`/bmad-auto-resolve <story>`) |
-| `bmad-auto-sweep`   | — (automator-native) | read-only deferred-work ledger triage                                                                                                             |
-| `bmad-auto-setup`   | — (scaffolded)       | registers the module in `_bmad/config.yaml` + `module-help.csv`, **installs the orchestrator tool from Git**, runs `bmad-auto init` + `validate`  |
+| Component           | Forked from          | Role                                                                                                                                                                                                                                                   |
+| ------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bmad-auto`         | — (this repo, Git)   | the orchestrator: ralph-loop, hooks, tmux adapters, TUI. CLI `bmad-auto`. Installed by `bmad-auto-setup` from Git.                                                                                                                                     |
+| `bmad-auto-dev`     | — (first-class)      | machine-first unattended implementation: story key / feedback file / dw-bundle → spec + code + result.json. A standalone skill (no longer a `bmad-quick-dev` fork); canonical source is the bmm-core skill upstream, vendored here for wheel bundling. |
+| `bmad-auto-review`  | `bmad-code-review`   | unattended adversarial review of a dev spec in a fresh context                                                                                                                                                                                         |
+| `bmad-auto-resolve` | — (automator-native) | interactive CRITICAL-escalation resolution: a human disambiguates a frozen spec so a paused story can be re-driven (`/bmad-auto-resolve <story>`)                                                                                                      |
+| `bmad-auto-sweep`   | — (automator-native) | read-only deferred-work ledger triage                                                                                                                                                                                                                  |
+| `bmad-auto-setup`   | — (scaffolded)       | registers the module in `_bmad/config.yaml` + `module-help.csv`, **installs the orchestrator tool from Git**, runs `bmad-auto init` + `validate`                                                                                                       |
 
 ## Install into a project
 
@@ -61,11 +61,22 @@ overrides as `bmad-auto-dev.toml` / `bmad-auto-review.toml`.
   <https://github.com/bmad-code-org/bmad-auto> (`src/automator`, `pyproject.toml`
   are canonical at the repo root). (The skills, by contrast, ride along inside
   the package wheel.)
-- The forks keep the upstream file structure. To pull upstream improvements:
-  `diff -r <bmad-install>/bmad-quick-dev bmad-auto-dev`, merge manually.
-- Do **not** rename the result.json `workflow` values (`"quick-dev"`,
-  `"code-review"`, `"deferred-sweep-triage"`) or the `plan-code-review` route —
-  they are machine contracts validated by the orchestrator, not skill names.
+- `bmad-auto-review` is still a fork of `bmad-code-review` and keeps the upstream
+  file structure. To pull upstream improvements:
+  `diff -r <bmad-install>/bmad-code-review bmad-auto-review`, merge manually.
+- `bmad-auto-dev` is **no longer a `bmad-quick-dev` fork** — it is a standalone
+  machine-first skill whose canonical source is the bmm-core skill upstream
+  (`src/bmm-skills/4-implementation/bmad-auto-dev/` in BMAD-METHOD). The copy
+  here is a vendored mirror for wheel bundling: sync it from upstream rather than
+  re-deriving it from `bmad-quick-dev`.
+- Do **not** rename the result.json `workflow` values — they are machine
+  contracts the orchestrator validates, not skill names:
+  - `bmad-auto-dev` → `"auto-dev"` (checked by `verify.DEV_WORKFLOW` in
+    `verify_dev` / `verify_dev_bundle`).
+  - sweep triage / migrate → `"deferred-sweep-triage"` / `"deferred-sweep-migrate"`
+    (checked in `sweep.py`).
+  - `bmad-auto-review` → `"code-review"` (informational only — `verify_review`
+    is not handed the result.json, so this value is not enforced).
 
 Validate after changes (from the repo root):
 

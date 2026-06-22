@@ -5,6 +5,30 @@ All notable changes to `bmad-auto` are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
+## [Unreleased]
+
+### Changed
+
+- **`bmad-auto-dev` rebuilt as a standalone machine-first skill.** It was a fork of `bmad-quick-dev`
+  carrying an interactive workflow plus an `automation-mode.md` decision table whose only job was to
+  override that interactivity. It is now four lean steps (resolve → plan → implement → finalize) with
+  the orchestrator contract (invocation, escalation, result schema) stated up front — no greeting,
+  menus, or HALTs to override. Epic-context compilation, previous-story continuity, and the inline
+  three-layer adversarial review are all preserved: with `review.enabled = false` the dev session
+  runs that inline triple-review itself before finalizing to `done` (a judge that did the planning is
+  better-informed); with `review.enabled = true` the orchestrator runs a separate fresh-context
+  review session instead. Mirrors the upstream draft bmad-code-org/BMAD-METHOD#2498 (renamed
+  `bmad-dev-auto` → `bmad-auto-dev` to match the orchestrator's `/bmad-auto-dev` invocation). No
+  engine change was required.
+
+### Added
+
+- **`result.json` `workflow` is now an enforced contract on the dev path.** `verify_dev` /
+  `verify_dev_bundle` reject a mismatch against `verify.DEV_WORKFLOW` (`"auto-dev"`); the skill emits
+  `"auto-dev"` instead of the misleading legacy `"quick-dev"`. Review's `"code-review"` stays
+  informational by design — `verify_review` is purely disk-derived and is never handed the
+  result.json (documented in `src/automator/data/skills/README.md`).
+
 ## [0.6.4] — 2026-06-21
 
 ### Fixed

@@ -60,7 +60,7 @@ def wt_dev_effect(project, story_key):
         return SessionResult(
             status="completed",
             result_json={
-                "workflow": "quick-dev",
+                "workflow": "auto-dev",
                 "story_key": story_key,
                 "spec_file": str(sp),
                 "baseline_commit": baseline,

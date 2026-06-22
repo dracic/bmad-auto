@@ -339,7 +339,7 @@ def test_sweep_worktree_bundle_merges_to_target(project):
         return SessionResult(
             status="completed",
             result_json={
-                "workflow": "quick-dev",
+                "workflow": "auto-dev",
                 "story_key": "dw-fix",
                 "spec_file": str(sp),
                 "baseline_commit": baseline,
@@ -790,7 +790,7 @@ def test_review_ledger_gate_routes_fix_session(project):
         mark_ledger_done(project, ["DW-1"])
         return SessionResult(
             status="completed",
-            result_json={"workflow": "quick-dev", "escalations": []},
+            result_json={"workflow": "auto-dev", "escalations": []},
         )
 
     engine, adapter = make_sweep(
@@ -857,7 +857,7 @@ def test_escalated_bundle_resume_skips_it_and_runs_rest(project):
         return SessionResult(
             status="completed",
             result_json={
-                "workflow": "quick-dev",
+                "workflow": "auto-dev",
                 "escalations": [
                     {
                         "type": "bundle-item-blocked",
@@ -1053,7 +1053,7 @@ def test_repeat_failed_bundle_not_rebuilt(project):
             triage_effect(plan1),
             # bad-fix: spec never reaches in-review -> dev verify fails -> deferred
             lambda spec: SessionResult(
-                status="completed", result_json={"workflow": "quick-dev", "escalations": []}
+                status="completed", result_json={"workflow": "auto-dev", "escalations": []}
             ),
             bundle_dev_effect(project, "good-fix", ["DW-2"]),
             bundle_review_effect(project, "good-fix"),
@@ -1124,7 +1124,7 @@ def test_repeat_resume_mid_cycle_two(project):
         return SessionResult(
             status="completed",
             result_json={
-                "workflow": "quick-dev",
+                "workflow": "auto-dev",
                 "escalations": [
                     {"type": "bundle-item-blocked", "severity": "CRITICAL", "detail": "no"}
                 ],

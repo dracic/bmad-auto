@@ -29,7 +29,7 @@ ts=$(date +%s%N)
 mkdir -p "$BMAD_AUTO_RUN_DIR/events" "$BMAD_AUTO_RUN_DIR/tasks/$BMAD_AUTO_TASK_ID"
 printf '{"ts": %s, "event": "SessionStart", "task_id": "%s", "session_id": "fake-1"}' \\
     "$ts" "$BMAD_AUTO_TASK_ID" > "$BMAD_AUTO_RUN_DIR/events/$ts-$BMAD_AUTO_TASK_ID-SessionStart.json"
-echo "{\\"workflow\\": \\"quick-dev\\", \\"prompt\\": \\"$prompt\\"}" \\
+echo "{\\"workflow\\": \\"auto-dev\\", \\"prompt\\": \\"$prompt\\"}" \\
     > "$BMAD_AUTO_RUN_DIR/tasks/$BMAD_AUTO_TASK_ID/result.json"
 ts2=$(( ts + 1 ))
 printf '{"ts": %s, "event": "Stop", "task_id": "%s", "session_id": "fake-1"}' \\
@@ -268,7 +268,7 @@ def test_tmux_end_to_end_with_fake_cli(tmp_path, profile_name):
         subprocess.run(["tmux", "kill-session", "-t", adapter.session_name], capture_output=True)
 
     assert result.status == "completed"
-    assert result.result_json["workflow"] == "quick-dev"
+    assert result.result_json["workflow"] == "auto-dev"
     # the fake echoes back the rendered prompt it received
     assert result.result_json["prompt"] == adapter.profile.render_prompt(spec.prompt)
     assert result.session_id == "fake-1"
@@ -308,7 +308,7 @@ def test_tmux_reused_task_id_ignores_stale_artifacts(tmp_path):
         subprocess.run(["tmux", "kill-session", "-t", adapter.session_name], capture_output=True)
 
     assert result.status == "completed"
-    assert result.result_json["workflow"] == "quick-dev"  # fresh, not "STALE"
+    assert result.result_json["workflow"] == "auto-dev"  # fresh, not "STALE"
     assert result.session_id == "fake-1"  # fresh session, not "old"
 
 

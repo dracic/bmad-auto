@@ -82,7 +82,7 @@ def spec_path(paths: ProjectPaths, story_key: str) -> Path:
 
 
 def dev_effect(paths: ProjectPaths, story_key: str):
-    """Simulate a successful quick-dev automation session."""
+    """Simulate a successful bmad-auto-dev automation session."""
 
     def effect(spec: SessionSpec) -> SessionResult:
         baseline = rev_parse_head(paths.project)
@@ -97,7 +97,7 @@ def dev_effect(paths: ProjectPaths, story_key: str):
         return SessionResult(
             status="completed",
             result_json={
-                "workflow": "quick-dev",
+                "workflow": "auto-dev",
                 "story_key": story_key,
                 "spec_file": str(sp),
                 "baseline_commit": baseline,
@@ -207,8 +207,8 @@ def triage_effect(result_json: dict):
 
 
 def bundle_dev_effect(paths: ProjectPaths, name: str, dw_ids, mark_ledger: bool = True):
-    """Simulate a quick-dev bundle session (--dw-bundle): edits code, writes
-    the bundle spec, and (like step-auto-finalize bundle mode) marks the
+    """Simulate a bmad-auto-dev bundle session (--dw-bundle): edits code, writes
+    the bundle spec, and (like step-04-finalize bundle mode) marks the
     bundle's ledger entries done."""
 
     def effect(spec: SessionSpec) -> SessionResult:
@@ -224,7 +224,7 @@ def bundle_dev_effect(paths: ProjectPaths, name: str, dw_ids, mark_ledger: bool 
         return SessionResult(
             status="completed",
             result_json={
-                "workflow": "quick-dev",
+                "workflow": "auto-dev",
                 "story_key": f"dw-{name}",
                 "spec_file": str(sp),
                 "baseline_commit": baseline,

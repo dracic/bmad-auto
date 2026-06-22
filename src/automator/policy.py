@@ -59,7 +59,7 @@ class NotifyPolicy:
 @dataclass(frozen=True)
 class ReviewPolicy:
     # When False, the orchestrator skips the separate bmad-auto-review session;
-    # the dev session runs quick-dev's own internal triple-review instead and
+    # the bmad-auto-dev session runs its own inline triple-review instead and
     # finalizes the story straight to done.
     enabled: bool = True
 
@@ -608,9 +608,8 @@ desktop = true               # notify-send, best-effort
 file = true                  # ATTENTION file in the run dir
 
 [review]
-# enabled = true  -> run the separate bmad-auto-review session after each dev pass
-#                    (quick-dev's own internal triple-review is skipped in this mode).
-# enabled = false -> skip that session; the dev pass runs quick-dev's internal
+# enabled = true  -> run the separate bmad-auto-review session after each dev pass.
+# enabled = false -> skip that session; the bmad-auto-dev pass runs its own inline
 #                    triple-review instead and finalizes the story straight to done.
 enabled = true
 

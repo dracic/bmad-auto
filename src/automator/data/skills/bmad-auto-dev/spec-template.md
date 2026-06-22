@@ -13,7 +13,7 @@ context: [] # optional: `{project-root}/`-prefixed paths to project-wide standar
      Cohesive cross-layer stories (DB+BE+UI) stay in ONE file.
      IMPORTANT: Remove all HTML comments when filling this template. -->
 
-<frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
+<frozen-after-approval reason="orchestrator-owned intent locked at approval — the automated workflow must not modify it; only a human renegotiation (e.g. via bmad-auto-resolve) may change it">
 
 ## Intent
 
@@ -25,13 +25,9 @@ context: [] # optional: `{project-root}/`-prefixed paths to project-wide standar
 
 ## Boundaries & Constraints
 
-<!-- Three tiers: Always = invariant rules. Ask First = human-gated decisions. Never = out of scope + forbidden approaches. -->
+<!-- Two tiers: Always = invariant rules. Never = out of scope + forbidden approaches. -->
 
 **Always:** INVARIANT_RULES
-
-**Ask First:** DECISIONS_REQUIRING_HUMAN_APPROVAL
-
-<!-- Agent: if any of these trigger during execution, HALT and ask the user before proceeding. -->
 
 **Never:** NON_GOALS_AND_FORBIDDEN_APPROACHES
 

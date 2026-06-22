@@ -445,7 +445,7 @@ def test_critical_escalation_pauses_and_resume_continues(project):
     escalating = SessionResult(
         status="completed",
         result_json={
-            "workflow": "quick-dev",
+            "workflow": "auto-dev",
             "escalations": [{"type": "missing-config", "severity": "CRITICAL", "detail": "boom"}],
         },
     )
@@ -528,7 +528,7 @@ def test_dev_verify_command_failure_routes_feedback_fix(project):
         return SessionResult(
             status="completed",
             result_json={
-                "workflow": "quick-dev",
+                "workflow": "auto-dev",
                 "story_key": "1-1-a",
                 "spec_file": str(sp),
                 "baseline_commit": rev_parse_head(project.project),
@@ -583,7 +583,7 @@ def test_review_verify_failure_routes_fix_session_then_rereview(project):
     def fix(spec):
         marker.write_text("ok\n")
         return SessionResult(
-            status="completed", result_json={"workflow": "quick-dev", "escalations": []}
+            status="completed", result_json={"workflow": "auto-dev", "escalations": []}
         )
 
     policy = Policy(

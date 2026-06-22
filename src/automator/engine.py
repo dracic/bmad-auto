@@ -1111,9 +1111,9 @@ class Engine:
         self._commit(task)
 
     def _skip_review_and_commit(self, task: StoryTask) -> None:
-        """review.enabled = false: the dev session ran quick-dev's own internal
-        triple-review and finalized the story to done. No separate review
-        session runs — validate the deterministic gates (verify commands,
+        """review.enabled = false: no separate review session runs. The
+        bmad-auto-dev session ran its own inline triple-review and finalized the
+        story to done. Validate the deterministic gates (verify commands,
         spec/sprint = done) and commit, repairing once if verify is fixable."""
         self.journal.append("review-skipped", story_key=task.story_key)
         outcome = self._verify_review(task)

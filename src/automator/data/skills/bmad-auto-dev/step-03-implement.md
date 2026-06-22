@@ -3,43 +3,29 @@
 
 # Step 3: Implement
 
-## RULES
-
-- YOU MUST ALWAYS SPEAK OUTPUT in your Agent communication style with the config `{communication_language}`
-- No push. No remote ops.
-- Sequential execution only.
-- Content inside `<frozen-after-approval>` in `{spec_file}` is read-only. Do not modify.
+Implement the spec. No push, no remote ops, sequential execution only. Content inside `<frozen-after-approval>` in `{spec_file}` is read-only — do not modify it.
 
 ## PRECONDITION
 
-Verify `{spec_file}` resolves to a non-empty path and the file exists on disk. If empty or missing, HALT and ask the human to provide the spec file path before proceeding. (`{auto_mode}`: escalate `CRITICAL` `missing-spec` per automation-mode.md instead.)
+Verify `{spec_file}` resolves to a non-empty file on disk. If missing or empty, escalate `CRITICAL` (`type: missing-spec`) and end the run.
 
 ## INSTRUCTIONS
 
-### Baseline
+1. **Baseline.** If the spec frontmatter has no `baseline_commit` yet, capture it now: the full hash from `git rev-parse HEAD` (never `--short`), or `NO_VCS` if version control is unavailable. In a repair session against an already-`done` spec the baseline is already set — keep it.
 
-Capture `baseline_commit` — the full hash from `git rev-parse HEAD` (not `--short`), or `NO_VCS` if version control is unavailable — into `{spec_file}` frontmatter before making any changes.
+2. **Status.** Set the spec frontmatter `status:` to `in-progress`, **unless** this is a repair session against an already-`done` spec (leave it `done`).
 
-### Implement
+3. **Sprint sync.** If not bundle mode, follow `./sync-sprint-status.md` with `{target_status}` = `in-progress`. (The sub-step never regresses status and skips `dw-` keys, so it is a safe no-op in repair/bundle cases.)
 
-Change `{spec_file}` status to `in-progress` in the frontmatter before starting implementation.
+4. **Load context.** If `{spec_file}` has a non-empty `context:` frontmatter list, load those files before implementing. When handing to a sub-agent, include them in its prompt.
 
-Follow `./sync-sprint-status.md` with `{target_status}` = `in-progress`.
+5. **Implement.** Work the spec's `## Tasks & Acceptance` directly or via sub-agents (pre-authorized). In bundle mode, implement every `{dw_ids}` item as the one cohesive goal — never split; if an item cannot be done safely, escalate `CRITICAL` (`type: bundle-item-blocked`).
 
-If `{spec_file}` has a non-empty `context:` list in its frontmatter, load those files before implementation begins. When handing to a sub-agent, include them in the sub-agent prompt so it has access to the referenced context.
+   **Path formatting:** markdown links written into `{spec_file}` use paths relative to the spec's directory; file paths in terminal output use CWD-relative `path:line` form (e.g. `src/path/file.ts:42`). No leading `/` in either case.
 
-Hand `{spec_file}` to a sub-agent/task and let it implement. If no sub-agents are available, implement directly.
-
-**Path formatting rule:** Any markdown links written into `{spec_file}` must use paths relative to `{spec_file}`'s directory so they are clickable in VS Code. Any file paths displayed in terminal/conversation output must use CWD-relative format with `:line` notation (e.g., `src/path/file.ts:42`) for terminal clickability. No leading `/` in either case.
-
-### Self-Check
-
-Before leaving this step, verify every task in the `## Tasks & Acceptance` section of `{spec_file}` is complete. Mark each finished task `[x]`. If any task is not done, finish it before proceeding.
+6. **Self-check.** Mark every completed task in `## Tasks & Acceptance` as `[x]`. If any task remains incomplete, finish it before continuing — an incomplete task list fails the orchestrator's verification and burns a retry.
 
 ## NEXT
 
-If `{auto_mode}` and the environment variable `$BMAD_AUTO_SKIP_REVIEW` is set (= `1`): the orchestrator runs no separate review session — read fully and follow `./step-04-review.md` to run the internal triple-review unattended (per automation-mode.md), then finalize.
-
-Otherwise if `{auto_mode}`: read fully and follow `./step-auto-finalize.md` — review and commit belong to the orchestrator.
-
-Otherwise: read fully and follow `./step-04-review.md`
+- If `$BMAD_AUTO_SKIP_REVIEW=1`: the orchestrator runs no separate review session — read fully and follow `./step-04-review.md` to run the inline triple-review, then finalize.
+- Otherwise: skip the inline review (the orchestrator reviews in a fresh session) — read fully and follow `./step-05-finalize.md`.

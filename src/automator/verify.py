@@ -23,6 +23,13 @@ from .sprintstatus import story_status
 GIT_TIMEOUT_S = 120
 COMMAND_TIMEOUT_S = 30 * 60
 
+# result.json `workflow` value the bmad-auto-dev skill must report. A machine
+# contract: a mismatch means the wrong skill produced the artifacts, so we
+# reject rather than trust them. (Sweep's triage/migrate workflows have their
+# own constants in sweep.py; the review skill is verified by on-disk artifacts
+# only and is not handed its result.json.)
+DEV_WORKFLOW = "auto-dev"
+
 # Repo-relative posix path of the orchestrator config, for git pathspecs.
 POLICY_FILE_REL = POLICY_FILE.as_posix()
 # The orchestrator's own working dir (.automator/) — config, ledger, run state,
@@ -550,6 +557,12 @@ def verify_dev(
     if not spec_path.is_file():
         return VerifyOutcome.retry(f"claimed spec file does not exist: {spec_path}")
 
+    workflow = rj.get("workflow")
+    if workflow != DEV_WORKFLOW:
+        return VerifyOutcome.retry(
+            f"dev result.json workflow is {workflow!r}, expected {DEV_WORKFLOW!r}"
+        )
+
     # With review disabled, the dev session runs its own internal review and
     # finalizes straight to done; otherwise it hands off at in-review.
     expected = "in-review" if review_enabled else "done"
@@ -598,6 +611,12 @@ def verify_dev_bundle(
     spec_path = resolve_spec_path(str(spec_file), paths)
     if not spec_path.is_file():
         return VerifyOutcome.retry(f"claimed spec file does not exist: {spec_path}")
+
+    workflow = rj.get("workflow")
+    if workflow != DEV_WORKFLOW:
+        return VerifyOutcome.retry(
+            f"dev result.json workflow is {workflow!r}, expected {DEV_WORKFLOW!r}"
+        )
 
     # With review disabled, the dev session finalizes the bundle straight to done.
     expected = "in-review" if review_enabled else "done"

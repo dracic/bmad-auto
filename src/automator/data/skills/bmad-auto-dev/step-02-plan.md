@@ -4,45 +4,41 @@ deferred_work_file: '{implementation_artifacts}/deferred-work.md'
 
 # Step 2: Plan
 
-## RULES
-
-- YOU MUST ALWAYS SPEAK OUTPUT in your Agent communication style with the config `{communication_language}`
-- No intermediate approvals.
+Turn the intent into a "Ready for Development" spec at `{spec_file}`. No intermediate approvals — self-review stands in for the human checkpoint.
 
 ## INSTRUCTIONS
 
-1. Draft resume check. If `{spec_file}` exists with `status: draft`, read it and capture the verbatim `<frozen-after-approval>...</frozen-after-approval>` block as `preserved_intent`. Otherwise `preserved_intent` is empty.
-2. Investigate codebase. _Isolate deep exploration in sub-agents/tasks where available. To prevent context snowballing, instruct subagents to give you distilled summaries only._
-3. Read `./spec-template.md` fully. Fill it out based on the intent and investigation. If `{preserved_intent}` is non-empty, substitute it for the `<frozen-after-approval>` block in your filled spec before writing. Write the result to `{spec_file}`.
-4. Self-review against READY FOR DEVELOPMENT standard.
-5. If intent gaps exist, do not fantasize, do not leave open questions, HALT and ask the human. (`{auto_mode}`: escalate `CRITICAL` `intent-gap` per automation-mode.md instead.)
-6. Token count check (see SCOPE STANDARD). If spec exceeds 4000 tokens:
-   - Show user the token count.
-   - HALT and ask human: `[S] Split — carve off secondary goals` | `[K] Keep full spec — accept the risks` (`{auto_mode}`: choose **S** without asking.)
-   - On **S**: Propose the split — name each secondary goal. Append deferred goals to `{deferred_work_file}` following `./deferred-work-format.md`. Rewrite the current spec to cover only the main goal — do not surgically carve sections out; regenerate the spec for the narrowed scope. Continue to checkpoint.
-   - On **K**: Continue to checkpoint with full spec.
+1. **Draft resume check.** If `{spec_file}` exists with `status: draft`, read it and capture the verbatim `<frozen-after-approval>...</frozen-after-approval>` block as `{preserved_intent}`. Otherwise `{preserved_intent}` is empty.
 
-### CHECKPOINT 1
+2. **Load planning context.**
 
-**If `{auto_mode}`:** do not present the menu or note below. Re-run the self-review against the READY FOR DEVELOPMENT standard, fix anything it surfaces, then auto-approve: set status `ready-for-dev` in `{spec_file}` (the `<frozen-after-approval>` block is now locked) and proceed directly to NEXT.
+   **Story mode** (`{story_key}` is set and does not start with `dw-`) — Epic story path:
+   1. **Check for a valid cached epic context.** Look for `{implementation_artifacts}/epic-{epic_num}-context.md`. It is **valid** when it exists, is non-empty, starts with `# Epic {epic_num} Context:`, and no file in `{planning_artifacts}` is newer.
+      - Valid → load it as the primary planning context; do not load raw planning docs. Go to step 2.3.
+      - Missing/empty/invalid → compile it (step 2.2).
+   2. **Compile epic context** by following `./compile-epic-context.md` — preferred via a sub-agent (pass the epic number, the epics file path, `{planning_artifacts}`, and output path `{implementation_artifacts}/epic-{epic_num}-context.md`); inline fallback if sub-agents are unavailable or the spawn fails. Then verify the output exists, is non-empty, and starts with `# Epic {epic_num} Context:`. If verification fails, escalate `CRITICAL` (`type: epic-context-failure`) and end the run. Otherwise load it.
+   3. **Previous-story continuity.** Scan `{implementation_artifacts}` for specs in the same epic with a lower `{story_num}`. Load the most recent `done` spec (highest story number below current) and extract its Code Map, Design Notes, Spec Change Log, and task list as continuity context. If no `done` spec exists but an `in-review` one does for a lower story, load it as context too (no human to ask — proceed).
 
-Present summary. Display the spec file path as a CWD-relative path (no leading `/`) so it is clickable in the terminal. If token count exceeded 4000 and user chose [K], include the token count and explain why it may be a problem.
+   **Bundle mode** (`{story_key}` starts with `dw-`): skip epic context and continuity entirely. The bundle file's intent and ledger entries are your planning context.
 
-After presenting the summary, display this note:
+3. **Investigate the codebase** and any relevant context files. Isolate deep exploration in sub-agents where available; instruct them to return distilled summaries only, to avoid context snowballing.
 
----
+4. **Write the spec.** Read `./spec-template.md` fully, fill it from the intent and investigation, and write `{spec_file}`. If `{preserved_intent}` is non-empty, substitute it for the template's `<frozen-after-approval>` block before writing.
 
-Before approving, you can open the spec file in an editor or ask me questions and tell me what to change. You can also use `bmad-advanced-elicitation`, `bmad-party-mode`, or `bmad-auto-review` skills, ideally in another session to avoid context bloat.
+5. **Self-review** the spec against the READY FOR DEVELOPMENT standard (actionable, logical, testable, complete) and fix anything it surfaces.
 
----
+6. **Intent gap.** If the intent is still unclear after investigation, do not fantasize requirements — escalate `CRITICAL` (`type: intent-gap`) and end the run.
 
-HALT and ask human: `[A] Approve` | `[E] Edit`
+7. **Scope split.** If the scope is genuinely multi-goal (see SCOPE STANDARD) or the spec exceeds 4,000 tokens:
+   - Keep the first/primary goal in `{spec_file}`.
+   - Append each deferred secondary goal to `{deferred_work_file}` following `./deferred-work-format.md`.
+   - Regenerate `{spec_file}` for the narrowed scope (do not surgically carve sections out).
+   - **Bundle mode never splits** — implement every `{dw_ids}` item as one cohesive goal. If an item cannot be specced safely, escalate `CRITICAL` (`type: bundle-item-blocked`).
 
-- **A**: Re-read `{spec_file}` from disk.
-  - **If the file is missing:** HALT. Tell the user the spec file is gone and STOP — do not write anything to `{spec_file}`, do not set status, do not proceed to Step 3. Nothing below this point runs.
-  - **If the file exists:** Compare the content to what you wrote. If it has changed since you wrote it, acknowledge the external edits — show a brief summary of what changed — and proceed with the updated version. Then set status `ready-for-dev` in `{spec_file}`. Everything inside `<frozen-after-approval>` is now locked — only the human can change it. → Step 3.
-- **E**: Apply changes, then return to CHECKPOINT 1.
+8. **Re-read `{spec_file}` from disk.** If it is missing or empty, escalate `CRITICAL` (`type: spec-write-failure`) and end the run.
+
+9. **Approve.** Set the frontmatter `status:` to `ready-for-dev`. Everything inside `<frozen-after-approval>` is now locked.
 
 ## NEXT
 
-Read fully and follow `./step-03-implement.md`
+Read fully and follow `./step-03-implement.md`.

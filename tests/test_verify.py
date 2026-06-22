@@ -12,7 +12,7 @@ def make_task(paths, story_key="1-1-a"):
 
 
 def dev_result(sp):
-    return {"workflow": "quick-dev", "spec_file": str(sp)}
+    return {"workflow": "auto-dev", "spec_file": str(sp)}
 
 
 def test_verify_dev_happy(project):
@@ -45,6 +45,19 @@ def test_verify_dev_wrong_status(project):
     write_spec(sp, "draft", task.baseline_commit)
     out = verify.verify_dev(task, project, dev_result(sp))
     assert not out.ok and "expected 'in-review'" in out.reason
+
+
+def test_verify_dev_wrong_workflow(project):
+    # A result.json that exists and points at a real spec but reports the wrong
+    # workflow means the wrong skill produced it — reject as retryable.
+    write_sprint(project, {"1-1-a": "review"})
+    task = make_task(project)
+    sp = spec_path(project, "1-1-a")
+    write_spec(sp, "in-review", task.baseline_commit)
+    (project.project / "src.txt").write_text("changed\n")
+    rj = {"workflow": "quick-dev", "spec_file": str(sp)}
+    out = verify.verify_dev(task, project, rj)
+    assert not out.ok and out.retryable and "auto-dev" in out.reason
 
 
 def test_verify_dev_review_disabled_expects_done(project):
@@ -164,7 +177,7 @@ def test_verify_dev_bundle_happy_skips_sprint(project):
     sp = project.implementation_artifacts / "spec-dw-test-bundle.md"
     write_spec(sp, "in-review", task.baseline_commit)
     (project.project / "src.txt").write_text("changed\n")
-    rj = {"workflow": "quick-dev", "spec_file": str(sp), "dw_ids": ["DW-2", "DW-1"]}
+    rj = {"workflow": "auto-dev", "spec_file": str(sp), "dw_ids": ["DW-2", "DW-1"]}
     out = verify.verify_dev_bundle(task, project, rj)
     assert out.ok
     assert task.spec_file == str(sp)
@@ -175,7 +188,7 @@ def test_verify_dev_bundle_dw_ids_mismatch(project):
     sp = project.implementation_artifacts / "spec-dw-test-bundle.md"
     write_spec(sp, "in-review", task.baseline_commit)
     (project.project / "src.txt").write_text("changed\n")
-    rj = {"workflow": "quick-dev", "spec_file": str(sp), "dw_ids": ["DW-1"]}
+    rj = {"workflow": "auto-dev", "spec_file": str(sp), "dw_ids": ["DW-1"]}
     out = verify.verify_dev_bundle(task, project, rj)
     assert not out.ok and "dw_ids" in out.reason
 
