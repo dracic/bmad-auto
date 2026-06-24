@@ -1,10 +1,32 @@
 # Finalizing a CLI adapter profile with `probe-adapter`
 
 bmad-auto drives any coding CLI that fits the **tmux-injection + hook-signal**
-transport through one generic adapter (`adapters/generic_tmux.py`); everything
+transport through one generic adapter (`adapters/generic.py`); everything
 CLI-specific lives in a declarative **TOML profile** (`adapters/profile.py`). The
 [README adapter section](../README.md#other-coding-clis) covers the profile fields
 and how to drop one in without touching Python.
+
+## Two axes: CLI vs transport
+
+These are independent and abstracted separately:
+
+- **CLI axis** — `CodingCLIAdapter` (`adapters/base.py`): _which_ binary to launch,
+  how the prompt is rendered, the hook dialect, where the transcript lives. The
+  generic adapter + a TOML profile cover this; the rest of this guide is about it.
+- **Transport axis** — `TerminalMultiplexer` (`adapters/multiplexer.py`): how
+  sessions, windows, and panes are created, observed, and torn down. The generic
+  adapter never shells out itself — it goes through `self.mux`, obtained from
+  `get_multiplexer()`. The one backend today is tmux
+  (`adapters/tmux_backend.py`), which is the **only** file allowed to invoke
+  `tmux` (and the only place POSIX-shell trailers live). A future non-POSIX
+  backend (e.g. a native-Windows "psmux") implements the `TerminalMultiplexer`
+  contract and slots in behind `get_multiplexer()` with no change to the adapters.
+  A backend author reads `multiplexer.py` for the contract and `tmux_backend.py`
+  for the reference implementation.
+
+> The transport seam is being migrated in phases; the remaining call sites
+> (`runs.py`, `tui/launch.py`, `probe.py`, `tui/data.py`) still hold their own
+> tmux invocations until Phase 2 routes them through the backend.
 
 The hard part of a new profile isn't the TOML — it's the **facts that live in no
 doc**: the CLI's exact hook payload shape (field names and casing, whether

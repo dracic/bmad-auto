@@ -59,13 +59,16 @@ ROLES = ("dev", "review", "triage")
 
 
 def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIAdapter]:
-    from .adapters.generic_tmux import GenericDevAdapter, GenericTmuxAdapter
+    from .adapters.generic import GenericAdapter, GenericDevAdapter
+    from .adapters.multiplexer import get_multiplexer
     from .adapters.profile import ProfileError, get_profile
 
     # The dev skill (bmad-dev-auto) writes no result.json: its adapter
     # synthesizes the result from the spec, and so needs the
     # implementation-artifacts dir to find that spec.
     impl_artifacts = bmadconfig.load_paths(project).implementation_artifacts
+    # One shared terminal-multiplexer backend for every role's adapter.
+    mux = get_multiplexer()
 
     adapters: dict[str, CodingCLIAdapter] = {}
     by_cfg: dict = {}
@@ -87,11 +90,12 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
                 extra_args=cfg.extra_args,
                 usage_grace_s=cfg.usage_grace_s,
                 stop_without_result_nudges=cfg.stop_without_result_nudges,
+                mux=mux,
             )
             by_cfg[key] = (
                 GenericDevAdapter(**common, impl_artifacts=impl_artifacts)
                 if is_dev
-                else GenericTmuxAdapter(**common)
+                else GenericAdapter(**common)
             )
         adapters[role] = by_cfg[key]
     return adapters

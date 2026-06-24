@@ -250,7 +250,7 @@ class JournalTail:
         return entries
 
 
-# Pane geometry mirrors adapters.generic_tmux PANE_COLUMNS/PANE_LINES (not
+# Pane geometry mirrors adapters.generic PANE_COLUMNS/PANE_LINES (not
 # imported: that module drags in Policy/SignalWatcher, and this layer stays
 # a pure observer).
 _PANE_COLUMNS = 220

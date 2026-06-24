@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import shlex
-import subprocess
 import time
 from pathlib import Path
 
@@ -29,9 +28,9 @@ from ..policy import Policy
 from ..signals import SignalWatcher
 from ..tokens import read_usage as tally_usage
 from .base import CodingCLIAdapter, SessionHandle, SessionResult, SessionSpec
+from .multiplexer import TerminalMultiplexer, get_multiplexer
 from .profile import CLIProfile
 
-TMUX_TIMEOUT_S = 30
 # Pane geometry for agent windows; mirrored in tui.data for log emulation.
 PANE_COLUMNS = 220
 PANE_LINES = 50
@@ -45,11 +44,7 @@ NUDGE_TEXT = (
 )
 
 
-class TmuxError(Exception):
-    pass
-
-
-class GenericTmuxAdapter(CodingCLIAdapter):
+class GenericAdapter(CodingCLIAdapter):
     injection = "tmux-initial-prompt"
     observation = "hook-signal"
     state = "local-jsonl"
@@ -63,10 +58,12 @@ class GenericTmuxAdapter(CodingCLIAdapter):
         extra_args: tuple[str, ...] | None = None,
         usage_grace_s: float | None = None,
         stop_without_result_nudges: int | None = None,
+        mux: TerminalMultiplexer | None = None,
     ):
         self.run_dir = run_dir
         self.policy = policy
         self.profile = profile
+        self.mux = mux or get_multiplexer()
         # None = use the profile's default bypass flags; a tuple replaces them
         self.extra_args = extra_args
         # Effective timing knobs: an explicit [adapter]/[adapter.<stage>] override
@@ -90,47 +87,16 @@ class GenericTmuxAdapter(CodingCLIAdapter):
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------ tmux
-
-    def _tmux(self, *args: str) -> str:
-        proc = subprocess.run(
-            ["tmux", *args], capture_output=True, text=True, timeout=TMUX_TIMEOUT_S
-        )
-        if proc.returncode != 0:
-            raise TmuxError(f"tmux {' '.join(args[:2])} failed: {proc.stderr.strip()}")
-        return proc.stdout.strip()
+    # --------------------------------------------------------- multiplexer
 
     def _ensure_session(self, cwd: Path) -> None:
-        probe = subprocess.run(
-            ["tmux", "has-session", "-t", f"={self.session_name}"],
-            capture_output=True,
-            timeout=TMUX_TIMEOUT_S,
-        )
-        if probe.returncode != 0:
-            # Window 0 is a plain shell so the session survives task windows closing.
-            self._tmux(
-                "new-session",
-                "-d",
-                "-s",
-                self.session_name,
-                "-c",
-                str(cwd),
-                "-x",
-                str(PANE_COLUMNS),
-                "-y",
-                str(PANE_LINES),
-            )
+        if not self.mux.has_session(self.session_name):
+            self.mux.new_session(self.session_name, cwd, PANE_COLUMNS, PANE_LINES)
             # Tag the session with its project so a cleanup in another project
             # never prunes this run (run_dir = <project>/.automator/runs/<id>).
-            # set-option has no '=' exact-match form; the full session name is
-            # unique so plain-name targeting resolves it unambiguously.
             project = self.run_dir.parents[2]
-            self._tmux(
-                "set-option",
-                "-t",
-                self.session_name,
-                runs.PROJECT_OPTION,
-                runs.project_tag(project),
+            self.mux.set_session_option(
+                self.session_name, runs.PROJECT_OPTION, runs.project_tag(project)
             )
 
     def interactive_argv(self, spec: SessionSpec) -> list[str]:
@@ -164,42 +130,22 @@ class GenericTmuxAdapter(CodingCLIAdapter):
         (task_dir / "result.json").unlink(missing_ok=True)
 
         self._ensure_session(spec.cwd)
-        env_args: list[str] = []
-        for key, value in {**self.profile.env, **spec.env}.items():
-            env_args += ["-e", f"{key}={value}"]
         # Stamped before launch: hook events carry wall-clock ns, and
         # wait_for_completion ignores anything older than this floor so a reused
         # task_id's earlier Stop event cannot replay.
         launched_ns = time.time_ns()
-        window_id = self._tmux(
-            "new-window",
-            "-t",
-            f"={self.session_name}:",
-            "-n",
+        window_id = self.mux.new_window(
+            self.session_name,
             spec.task_id[-40:],
-            "-c",
-            str(spec.cwd),
-            "-P",
-            "-F",
-            "#{window_id}",
-            *env_args,
+            spec.cwd,
+            {**self.profile.env, **spec.env},
             self.build_command(spec),
         )
         log_file = self.logs_dir / f"{spec.task_id}.log"
-        # A CLI that crashes on launch (bad args, instant auth failure) can take
-        # its window down before pipe-pane attaches, which races as "can't find
-        # window". That is not a setup failure -- the dead window is reported as
-        # a crash in wait_for_completion -- so tolerate it instead of raising.
-        try:
-            self._tmux(
-                "pipe-pane",
-                "-t",
-                window_id,
-                "-o",
-                f"cat >> {shlex.quote(str(log_file))}",
-            )
-        except TmuxError:
-            pass
+        # pipe_pane tolerates the window having already died (a CLI that crashes on
+        # launch can take it down before the tee attaches); the dead window is then
+        # reported as a crash in wait_for_completion.
+        self.mux.pipe_pane(window_id, log_file)
         return SessionHandle(task_id=spec.task_id, native_id=window_id, launched_ns=launched_ns)
 
     def wait_for_completion(self, handle: SessionHandle, spec: SessionSpec) -> SessionResult:
@@ -298,36 +244,13 @@ class GenericTmuxAdapter(CodingCLIAdapter):
             time.sleep(RESULT_POLL_S)
 
     def _window_alive(self, handle: SessionHandle) -> bool:
-        # display-message -t <dead-window> exits 0 with empty output, so list
-        # the session's window ids and check membership instead.
-        probe = subprocess.run(
-            [
-                "tmux",
-                "list-windows",
-                "-t",
-                f"={self.session_name}",
-                "-F",
-                "#{window_id}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=TMUX_TIMEOUT_S,
-        )
-        if probe.returncode != 0:
-            return False
-        return handle.native_id in probe.stdout.split()
+        return handle.native_id in self.mux.list_window_ids(self.session_name)
 
     def send_text(self, handle: SessionHandle, text: str) -> None:
-        self._tmux("send-keys", "-t", handle.native_id, "-l", text)
-        time.sleep(0.3)  # let the TUI ingest the paste before submitting
-        self._tmux("send-keys", "-t", handle.native_id, "Enter")
+        self.mux.send_text(handle.native_id, text)
 
     def kill(self, handle: SessionHandle) -> None:
-        subprocess.run(
-            ["tmux", "kill-window", "-t", handle.native_id],
-            capture_output=True,
-            timeout=TMUX_TIMEOUT_S,
-        )
+        self.mux.kill_window(handle.native_id)
 
     def read_usage(self, result: SessionResult) -> TokenUsage | None:
         if not result.transcript_path:
@@ -345,7 +268,7 @@ class GenericTmuxAdapter(CodingCLIAdapter):
             time.sleep(RESULT_POLL_S)
 
 
-class GenericDevAdapter(GenericTmuxAdapter):
+class GenericDevAdapter(GenericAdapter):
     """Dev adapter for Alex Verhovsky's generic ``bmad-dev-auto`` skill.
 
     That skill writes NO ``result.json`` — its outcome lives in the spec it
@@ -373,3 +296,8 @@ class GenericDevAdapter(GenericTmuxAdapter):
             return None
         story_key = spec.env.get("BMAD_AUTO_STORY_KEY") or None
         return devcontract.synthesize_result(spec_path, story_key=story_key).result_json
+
+
+# Back-compat alias: the adapter was ``GenericTmuxAdapter`` before tmux moved
+# behind the multiplexer seam. Keeps existing imports stable.
+GenericTmuxAdapter = GenericAdapter

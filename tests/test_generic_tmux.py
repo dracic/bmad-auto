@@ -13,9 +13,9 @@ import time
 
 import pytest
 
-from automator.adapters import generic_tmux
+from automator.adapters import generic, tmux_backend
 from automator.adapters.base import SessionHandle, SessionResult, SessionSpec
-from automator.adapters.generic_tmux import GenericDevAdapter, GenericTmuxAdapter
+from automator.adapters.generic import GenericDevAdapter, GenericTmuxAdapter
 from automator.adapters.profile import get_profile
 from automator.model import TokenUsage
 from automator.policy import LimitsPolicy, Policy
@@ -55,9 +55,9 @@ def make_adapter(
 
 def test_ensure_session_tags_project(tmp_path, monkeypatch):
     """A freshly created agent session is stamped with its project so a cleanup
-    in another project never prunes this run."""
+    in another project never prunes this run. The set-option now flows through
+    the tmux backend, so patch its subprocess seam."""
     from automator import runs
-    from automator.adapters import generic_tmux
 
     project = tmp_path
     run_dir = project / ".automator" / "runs" / "RID"  # parents[2] == project
@@ -72,7 +72,7 @@ def test_ensure_session_tags_project(tmp_path, monkeypatch):
         rc = 1 if argv[1] == "has-session" else 0  # session missing -> create it
         return subprocess.CompletedProcess(argv, rc, stdout="", stderr="")
 
-    monkeypatch.setattr(generic_tmux.subprocess, "run", fake_run)
+    monkeypatch.setattr(tmux_backend.subprocess, "run", fake_run)
     adapter._ensure_session(project)
 
     assert [c for c in calls if c[1] == "set-option"] == [
@@ -287,8 +287,8 @@ def test_read_usage_polls_for_late_metrics(tmp_path, monkeypatch):
         calls.append(parser)
         return None if len(calls) < 3 else usage
 
-    monkeypatch.setattr(generic_tmux, "tally_usage", fake_tally)
-    monkeypatch.setattr(generic_tmux.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(generic, "tally_usage", fake_tally)
+    monkeypatch.setattr(generic.time, "sleep", lambda *_: None)
     result = SessionResult(status="completed", transcript_path=str(tmp_path / "events.jsonl"))
     assert adapter.read_usage(result) is usage
     assert len(calls) == 3  # polled past the early None reads
@@ -306,8 +306,8 @@ def test_read_usage_single_read_when_no_grace(tmp_path, monkeypatch):
     def no_sleep(*_):
         raise AssertionError("read_usage must not sleep when the grace is 0")
 
-    monkeypatch.setattr(generic_tmux, "tally_usage", fake_tally)
-    monkeypatch.setattr(generic_tmux.time, "sleep", no_sleep)
+    monkeypatch.setattr(generic, "tally_usage", fake_tally)
+    monkeypatch.setattr(generic.time, "sleep", no_sleep)
     result = SessionResult(status="completed", transcript_path=str(tmp_path / "x.jsonl"))
     assert adapter.read_usage(result) is None
     assert len(calls) == 1
