@@ -18,6 +18,14 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **Skill-recommended review (`review.trigger`).** `bmad-dev-auto` now self-reviews inline and sets
+  `followup_review_recommended` on a `done` spec when its changes warrant an independent pass
+  (BMAD-METHOD#2505). The orchestrator consumes it: `review.trigger = "recommended"` (new default)
+  runs the separate `bmad-auto-review` pass only when flagged; `"always"` keeps the old run-every-story
+  behavior. Adjustable in the TUI and `policy.toml`. The follow-up loop stays bounded by
+  `limits.max_review_cycles` (default 3) — the oscillation guard — so a skill-recommended review can
+  never loop indefinitely.
+
 - **Non-bundled-skill preflight.** `bmad-auto validate` and run/sweep/resume start verify that
   `bmad-dev-auto` (and the `bmad-review-adversarial-general` / `bmad-review-edge-case-hunter` review
   hunters when review is enabled) are installed in each active CLI skill tree — failing loudly with

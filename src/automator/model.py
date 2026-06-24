@@ -122,6 +122,10 @@ class StoryTask:
     phase: Phase = Phase.PENDING
     attempt: int = 0
     review_cycle: int = 0
+    # set from the bmad-dev-auto session's `followup_review_recommended`
+    # frontmatter (PR #2505): when True and review.trigger = "recommended", the
+    # orchestrator runs the separate bmad-auto-review pass; otherwise it skips it.
+    followup_review_recommended: bool = False
     baseline_commit: str | None = None
     # untracked, non-ignored paths present at baseline capture (repo-relative
     # posix). On rollback only paths NOT in this set are removed, so files the
@@ -159,6 +163,7 @@ class StoryTask:
             "phase": str(self.phase),
             "attempt": self.attempt,
             "review_cycle": self.review_cycle,
+            "followup_review_recommended": self.followup_review_recommended,
             "baseline_commit": self.baseline_commit,
             "baseline_untracked": self.baseline_untracked,
             "spec_file": self._serialized_spec_file(),
@@ -192,6 +197,7 @@ class StoryTask:
             phase=Phase(d["phase"]),
             attempt=int(d.get("attempt", 0)),
             review_cycle=int(d.get("review_cycle", 0)),
+            followup_review_recommended=bool(d.get("followup_review_recommended", False)),
             baseline_commit=d.get("baseline_commit"),
             baseline_untracked=(
                 [str(p) for p in d["baseline_untracked"]]

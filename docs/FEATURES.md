@@ -49,8 +49,9 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 
 - Drives `bmad-auto-review` (fork of `bmad-code-review`) in a separate, fresh-context session — no anchoring bias from the implementer.
 - Static prefilter → 3 parallel layers (Blind Hunter / Edge Case Hunter / Acceptance Auditor) → verify findings against code → triage → auto-apply patches → log → defer ambiguity.
-- Bounded review loop (default 3 cycles); done when clean.
+- Bounded review loop (`limits.max_review_cycles`, default 3 cycles); done when clean. This bound is also the oscillation guard for skill-recommended follow-up review.
 - Optional (`[review].enabled`, default `true`): set `false` to skip the separate review session. The dev pass then runs `bmad-quick-dev`'s own internal triple-review (same three layers, in-context) and finalizes the story to `done` — one session per story instead of two. Verify commands still gate the commit. Applies to story runs and deferred-work sweeps alike.
+- Trigger (`[review].trigger`, default `recommended`): when review is enabled, decides _when_ the separate pass runs. `recommended` runs it only when `bmad-dev-auto` sets `followup_review_recommended` on a `done` spec (it self-reviews inline and flags an independent pass only when its review-driven changes were significant — BMAD-METHOD#2505). `always` runs it on every story (pre-0.6.5 behavior).
 
 ### Failure handling & resilience
 

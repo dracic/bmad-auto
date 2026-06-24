@@ -43,10 +43,12 @@ def commit_sprint(project, statuses: dict[str, str]) -> None:
     git(project.project, "commit", "-q", "-m", "sprint")
 
 
-def wt_dev_effect(project, story_key, *, final_status="done"):
+def wt_dev_effect(project, story_key, *, final_status="done", followup_review=True):
     """Dev session running inside the unit worktree (spec.cwd). Mirrors the
     bmad-dev-auto skill: self-finalizes the spec to done, never writes the sprint
-    board (the orchestrator advances it via the B2 seam, inside the worktree)."""
+    board (the orchestrator advances it via the B2 seam, inside the worktree).
+    ``followup_review`` mirrors the skill's `followup_review_recommended` signal;
+    defaults True so the review runs under the default trigger = "recommended"."""
 
     def effect(spec):
         cwd = spec.cwd
@@ -68,6 +70,7 @@ def wt_dev_effect(project, story_key, *, final_status="done"):
                 "tasks_done": 1,
                 "verification": [],
                 "escalations": [],
+                "followup_review_recommended": followup_review,
             },
         )
 

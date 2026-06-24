@@ -96,12 +96,21 @@ def spec_path(paths: ProjectPaths, story_key: str) -> Path:
     return paths.implementation_artifacts / f"spec-{story_key}.md"
 
 
-def dev_effect(paths: ProjectPaths, story_key: str, *, final_status: str = "done"):
+def dev_effect(
+    paths: ProjectPaths,
+    story_key: str,
+    *,
+    final_status: str = "done",
+    followup_review: bool = True,
+):
     """Simulate a successful bmad-dev-auto session: it self-finalizes the spec
     (no in-review handoff — always straight to ``done``) but never touches the
     automator's sprint board (the orchestrator is the single sprint-status
     writer). ``final_status`` lets a test leave the spec short of the success
-    status to exercise the dev-verify gating."""
+    status to exercise the dev-verify gating. ``followup_review`` mirrors the
+    skill's `followup_review_recommended` signal (PR #2505) — defaults True so
+    the review-flow tests still run the review under the default
+    ``review.trigger = "recommended"``; set False to exercise the skip path."""
 
     def effect(spec: SessionSpec) -> SessionResult:
         baseline = rev_parse_head(paths.project)
@@ -121,6 +130,7 @@ def dev_effect(paths: ProjectPaths, story_key: str, *, final_status: str = "done
                 "tasks_done": 3,
                 "verification": [],
                 "escalations": [],
+                "followup_review_recommended": followup_review,
             },
         )
 
@@ -227,11 +237,19 @@ def triage_effect(result_json: dict):
     return effect
 
 
-def bundle_dev_effect(paths: ProjectPaths, name: str, dw_ids, mark_ledger: bool = False):
+def bundle_dev_effect(
+    paths: ProjectPaths,
+    name: str,
+    dw_ids,
+    mark_ledger: bool = False,
+    followup_review: bool = True,
+):
     """Simulate a bmad-dev-auto bundle dev session: edits code and self-finalizes
     the bundle spec to ``done`` (no in-review handoff). On the decoupled path the
     orchestrator owns the ledger, so by default the session does NOT touch it;
-    ``mark_ledger=True`` is kept only for the legacy-marking path in older tests."""
+    ``mark_ledger=True`` is kept only for the legacy-marking path in older tests.
+    ``followup_review`` mirrors `followup_review_recommended` — defaults True so
+    the bundle review runs under the default trigger = "recommended"."""
 
     def effect(spec: SessionSpec) -> SessionResult:
         baseline = rev_parse_head(paths.project)
@@ -254,6 +272,7 @@ def bundle_dev_effect(paths: ProjectPaths, name: str, dw_ids, mark_ledger: bool 
                 "verification": [],
                 "escalations": [],
                 "dw_ids": list(dw_ids),
+                "followup_review_recommended": followup_review,
             },
         )
 

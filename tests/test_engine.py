@@ -213,6 +213,74 @@ def test_review_disabled_skips_review_session(project):
     assert "implemented via bmad-auto" in msg and "reviewed" not in msg
 
 
+def test_review_not_recommended_skips_review_session(project):
+    """Default review.trigger = "recommended": when the dev session does NOT set
+    followup_review_recommended, the orchestrator skips the separate review
+    session, validates the deterministic gates, and commits."""
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    # review.enabled stays True (default); only the trigger gate skips it. No
+    # review_effect scripted — the dev session must not provoke a review.
+    engine, adapter = make_engine(project, [dev_effect(project, "1-1-a", followup_review=False)])
+    summary = engine.run()
+
+    assert summary.done == 1 and summary.deferred == 0 and not summary.paused
+    task = engine.state.tasks["1-1-a"]
+    assert task.phase == Phase.DONE and task.commit_sha
+    assert task.followup_review_recommended is False
+    assert task.review_cycle == 0
+    assert [s.role for s in adapter.sessions] == ["dev"]
+    kinds = {e["kind"] for e in Journal(engine.run_dir).entries()}
+    assert "review-not-recommended" in kinds and "review-skipped" in kinds
+
+
+def test_review_recommended_runs_review_session(project):
+    """followup_review_recommended True under the default trigger runs the
+    separate bmad-auto-review pass."""
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    engine, adapter = make_engine(
+        project,
+        [
+            dev_effect(project, "1-1-a", followup_review=True),
+            review_effect(project, "1-1-a", clean=True),
+        ],
+    )
+    summary = engine.run()
+
+    assert summary.done == 1 and not summary.paused
+    assert engine.state.tasks["1-1-a"].followup_review_recommended is True
+    assert [s.role for s in adapter.sessions] == ["dev", "review"]
+    kinds = {e["kind"] for e in Journal(engine.run_dir).entries()}
+    assert "review-not-recommended" not in kinds
+
+
+def test_review_trigger_always_runs_without_recommendation(project):
+    """review.trigger = "always" runs the review even when the dev session did
+    not recommend a follow-up (pre-#2505 behavior)."""
+    from automator.policy import ReviewPolicy
+
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    pol = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),
+        review=ReviewPolicy(enabled=True, trigger="always"),
+    )
+    engine, adapter = make_engine(
+        project,
+        [
+            dev_effect(project, "1-1-a", followup_review=False),
+            review_effect(project, "1-1-a", clean=True),
+        ],
+        policy=pol,
+    )
+    summary = engine.run()
+
+    assert summary.done == 1 and not summary.paused
+    assert [s.role for s in adapter.sessions] == ["dev", "review"]
+    kinds = {e["kind"] for e in Journal(engine.run_dir).entries()}
+    assert "review-not-recommended" not in kinds
+
+
 def test_generic_dev_path_orchestrator_advances_sprint(project):
     """On the generic bmad-dev-auto path the skill self-finalizes the spec but
     never writes the automator's sprint board; the orchestrator (B2 seam) is the

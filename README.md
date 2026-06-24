@@ -299,6 +299,9 @@ file = true                # append the same alerts to the run's ATTENTION file
 [review]
 enabled = true             # false = skip the separate review session; the dev pass
                            # runs quick-dev's own internal triple-review and finalizes to done
+trigger = "recommended"    # when enabled: "recommended" runs the separate review only when
+                           # bmad-dev-auto flags followup_review_recommended; "always" = every story
+                           # (the loop is bounded by limits.max_review_cycles either way)
 
 [adapter]
 name = "claude"            # CLI profile: claude | codex | gemini | custom
@@ -355,7 +358,7 @@ low_frame_rate = false     # true = cap to 15fps + disable animations (= bmad-au
 
 **Gate modes:** `none` runs everything unattended; `per-epic` (default) pauses at epic boundaries; `per-story-spec-approval` pauses after each spec is written so you approve it before implementation is reviewed.
 
-**Review:** `[review].enabled = false` drops the separate fresh-context review session; the dev pass instead runs `bmad-quick-dev`'s own internal triple-review (Blind Hunter / Edge Case Hunter / Acceptance Auditor) and finalizes the story straight to `done` — one session per story instead of two, verify commands still gating the commit. Governs deferred-work sweeps too.
+**Review:** `[review].enabled = false` drops the separate fresh-context review session; the dev pass instead runs `bmad-quick-dev`'s own internal triple-review (Blind Hunter / Edge Case Hunter / Acceptance Auditor) and finalizes the story straight to `done` — one session per story instead of two, verify commands still gating the commit. Governs deferred-work sweeps too. When review is enabled, `[review].trigger` decides _when_ that separate pass runs: `recommended` (default) only when the `bmad-dev-auto` session flags `followup_review_recommended` — it already triple-reviews inline and recommends an independent pass only when its changes were significant; `always` runs it every story. The follow-up loop is bounded by `limits.max_review_cycles` (default 3), which caps oscillation.
 
 `bmad-auto init` (without `--cli`) registers hooks for every CLI profile the policy references, so a dual-client setup needs no extra flags.
 

@@ -149,6 +149,12 @@ def synthesize_result(
     }
     if dw_ids:
         result["dw_ids"] = list(dw_ids)
+    # bmad-dev-auto (BMAD-METHOD PR #2505) self-reviews inline and, on a `done`
+    # exit, sets `followup_review_recommended: true` when its review-driven
+    # changes warrant an independent second-opinion pass. The skill never sets it
+    # on a blocked exit, so only carry it through on `done`.
+    if status == DONE:
+        result["followup_review_recommended"] = bool(fm.get("followup_review_recommended", False))
     return SynthResult(result_json=result, status_consistent=consistent)
 
 

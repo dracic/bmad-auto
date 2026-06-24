@@ -995,6 +995,11 @@ class Engine:
                 # skill never touches (sprint-status for stories, the deferred-work
                 # ledger for sweep bundles), before verify reads that state.
                 self._post_dev_state_sync(task, result.result_json)
+                # carry the skill's follow-up-review recommendation (PR #2505)
+                # onto the task so _review_and_commit can gate the review loop.
+                task.followup_review_recommended = bool(
+                    (result.result_json or {}).get("followup_review_recommended", False)
+                )
                 outcome = self._verify_dev_artifacts(task, result.result_json)
                 if outcome.ok:
                     # deterministic gates run here too: a broken build must not
@@ -1046,8 +1051,21 @@ class Engine:
         # second-opinion session over the dev spec. The dev session self-finalizes
         # the spec to done (no in-review handoff) and the orchestrator advances
         # sprint-status at dev time (_post_dev_state_sync), so this review runs as
-        # an adversarial pass on a done spec before commit. (A future bmad-dev-auto
-        # "review recommended" signal can gate this loop per-story.)
+        # an adversarial pass on a done spec before commit.
+        #
+        # review.trigger = "recommended" (default) gates that loop per-story on the
+        # bmad-dev-auto session's `followup_review_recommended` signal (PR #2505):
+        # the skill already self-reviews inline every story and only recommends an
+        # independent pass when its review-driven changes were significant. When it
+        # didn't, skip the separate session and let the deterministic gates +
+        # commit run (_skip_review_and_commit still validates them). "always"
+        # keeps the pre-#2505 behavior of reviewing every story. Either way the
+        # loop below is bounded by limits.max_review_cycles — the oscillation guard
+        # for orchestrator-applied follow-up review.
+        if self.policy.review.trigger == "recommended" and not task.followup_review_recommended:
+            self.journal.append("review-not-recommended", story_key=task.story_key)
+            self._skip_review_and_commit(task)
+            return
         if self._vetoed(self._emit("pre_review_phase", task), task):
             return
         clean = False

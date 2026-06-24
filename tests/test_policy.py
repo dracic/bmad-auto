@@ -27,6 +27,16 @@ def test_review_enabled_default_and_parse():
     assert policy.loads("[review]\nenabled = false\n").review.enabled is False
 
 
+def test_review_trigger_default_and_parse():
+    assert policy.loads("").review.trigger == "recommended"
+    assert policy.loads('[review]\ntrigger = "always"\n').review.trigger == "always"
+
+
+def test_review_trigger_invalid():
+    with pytest.raises(policy.PolicyError, match="review.trigger"):
+        policy.loads('[review]\ntrigger = "sometimes"\n')
+
+
 def test_cleanup_session_on_finish_default_and_override(tmp_path):
     assert policy.load(None).adapter.cleanup_session_on_finish is True
     p = tmp_path / "policy.toml"

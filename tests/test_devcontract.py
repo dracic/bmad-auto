@@ -13,10 +13,13 @@ def _spec(
     baseline: str = "abc123def456abc123def456abc123def456abcd",
     auto_run: str | None = "done",
     body_extra: str = "",
+    followup: bool | None = None,
 ) -> Path:
     fm = f"---\ntitle: 'x'\ntype: 'feature'\nstatus: '{status}'\n"
     if baseline:
         fm += f"{baseline_field}: '{baseline}'\n"
+    if followup is not None:
+        fm += f"followup_review_recommended: {str(followup).lower()}\n"
     fm += "---\n\n## Intent\n\nwhatever\n"
     text = fm + body_extra
     if auto_run is not None:
@@ -114,6 +117,26 @@ def test_synth_baseline_commit_field_also_accepted(tmp_path):
     sp = _spec(tmp_path / "s.md", baseline_field="baseline_commit", auto_run="done")
     out = devcontract.synthesize_result(sp, story_key="1-1-a")
     assert out.result_json["baseline_commit"].startswith("abc123")
+
+
+def test_synth_followup_review_recommended_true(tmp_path):
+    sp = _spec(tmp_path / "s.md", status="done", auto_run="done", followup=True)
+    out = devcontract.synthesize_result(sp, story_key="1-1-a")
+    assert out.result_json["followup_review_recommended"] is True
+
+
+def test_synth_followup_review_recommended_defaults_false_on_done(tmp_path):
+    # field absent on a done spec -> carried through as False, not omitted
+    sp = _spec(tmp_path / "s.md", status="done", auto_run="done")
+    out = devcontract.synthesize_result(sp, story_key="1-1-a")
+    assert out.result_json["followup_review_recommended"] is False
+
+
+def test_synth_followup_review_recommended_omitted_on_blocked(tmp_path):
+    # the skill never recommends follow-up on a blocked exit; don't carry it
+    sp = _spec(tmp_path / "s.md", status="blocked", auto_run="blocked", followup=True)
+    out = devcontract.synthesize_result(sp, story_key="1-1-a")
+    assert "followup_review_recommended" not in out.result_json
 
 
 # ------------------------------------------------------------ find_result_artifact
