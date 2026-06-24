@@ -1,12 +1,12 @@
 """Sweep engine scenario tests against the mock adapter — no tmux, no LLM."""
 
 import json
+import re
 
 from conftest import (
     bundle_dev_effect,
     bundle_review_effect,
     git,
-    mark_ledger_done,
     migrate_effect,
     triage_effect,
     write_ledger,
@@ -333,9 +333,9 @@ def test_sweep_worktree_bundle_merges_to_target(project):
         src = cwd / "src.txt"
         src.write_text(src.read_text() + "change for dw-fix\n")
         sp = wt.implementation_artifacts / "spec-dw-fix.md"
-        final = "done" if spec.env.get("BMAD_AUTO_SKIP_REVIEW") == "1" else "in-review"
-        write_spec(sp, final, baseline)
-        deferredwork.mark_done(wt.deferred_work, "DW-1", "2026-06-11", "built in worktree")
+        # mirror bmad-dev-auto: self-finalize the bundle spec to done, leave the
+        # ledger to the orchestrator (single writer, marks inside the worktree)
+        write_spec(sp, "done", baseline)
         return SessionResult(
             status="completed",
             result_json={
@@ -420,8 +420,8 @@ def test_sweep_happy_path(project):
 
     # dev session was invoked in bundle mode with the rendered intent file
     dev_spec = adapter.sessions[1]
-    assert "--dw-bundle" in dev_spec.prompt
-    intent_path = dev_spec.prompt.split("--dw-bundle ", 1)[1].split()[0]
+    assert "Implement the deferred-work bundle" in dev_spec.prompt
+    intent_path = re.findall(r"`([^`]*)`", dev_spec.prompt)[0]
     intent = open(intent_path).read()
     assert "fix both" in intent and "DW-2" in intent and "### DW-3" in intent
 
@@ -821,43 +821,6 @@ def test_preanswered_keep_open_suppresses_prompt_and_persists(project):
     assert decisions.load_pre_answers(project.project)["DW-1"]["effect"] == "keep-open"
 
 
-def test_review_ledger_gate_routes_fix_session(project):
-    """Clean review but ledger ids unmarked -> fixable verify failure -> fix
-    session marks them -> re-review -> commit."""
-    write_ledger(project, {"DW-1": "open"})
-    plan = triage_result(
-        ["DW-1"], bundles=[{"name": "one-fix", "dw_ids": ["DW-1"], "intent": "fix"}]
-    )
-
-    def fix(spec):
-        mark_ledger_done(project, ["DW-1"])
-        return SessionResult(
-            status="completed",
-            result_json={"workflow": "auto-dev", "escalations": []},
-        )
-
-    engine, adapter = make_sweep(
-        project,
-        [
-            triage_effect(plan),
-            bundle_dev_effect(project, "one-fix", ["DW-1"], mark_ledger=False),
-            bundle_review_effect(project, "one-fix"),
-            fix,
-            bundle_review_effect(project, "one-fix"),
-        ],
-    )
-    summary = engine.run()
-    assert not summary.paused
-    task = engine.state.tasks["dw-one-fix"]
-    assert task.phase == Phase.DONE
-    assert task.attempt == 2  # dev + fix
-    assert task.review_cycle == 2
-    fix_prompt = adapter.sessions[3].prompt
-    assert "--feedback" in fix_prompt and "--dw-bundle" in fix_prompt
-    feedback = open(fix_prompt.split("--feedback ", 1)[1]).read()
-    assert "DW-1" in feedback and "not marked done" in feedback
-
-
 def test_max_bundles_truncation(project):
     write_ledger(project, {"DW-1": "open", "DW-2": "open", "DW-3": "open"})
     plan = triage_result(
@@ -1015,7 +978,7 @@ def test_repeat_two_cycles_then_no_open(project):
     assert entries["DW-2"].status.startswith("done")
     assert worktree_clean(project.project)
     # cycle-2 dev got the cycle-scoped intent file
-    intent_path = adapter.sessions[4].prompt.split("--dw-bundle ", 1)[1].split()[0]
+    intent_path = re.findall(r"`([^`]*)`", adapter.sessions[4].prompt)[0]
     assert "c2-follow-up" in intent_path
 
 

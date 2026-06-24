@@ -16,7 +16,7 @@ SWEEP_AUTO_MODES = {"never", "per-epic", "run-end"}
 ISOLATION_MODES = {"none", "worktree"}
 BRANCH_PER_MODES = {"story", "run"}
 MERGE_STRATEGIES = {"ff", "merge", "squash"}
-DEV_SKILLS = {"bmad-auto-dev", "bmad-dev-auto"}
+DEV_SKILLS = {"bmad-dev-auto"}
 
 # Deprecated [engine] keys, folded into [plugins.unity] at load time. The
 # game-engine layer is now a plugin; [engine] is a one-release compatibility
@@ -60,18 +60,19 @@ class NotifyPolicy:
 @dataclass(frozen=True)
 class ReviewPolicy:
     # When False, the orchestrator skips the separate bmad-auto-review session;
-    # the bmad-auto-dev session runs its own inline triple-review instead and
+    # the bmad-dev-auto session runs its own inline review instead and
     # finalizes the story straight to done.
     enabled: bool = True
 
 
 @dataclass(frozen=True)
 class DevPolicy:
-    # Which inner dev skill the orchestrator drives. "bmad-auto-dev" (default) is
-    # the automator's own machine-first skill that writes result.json. "bmad-dev-auto"
-    # is Alex Verhovsky's generic upstream primitive (BMAD-METHOD PR #2500): it
-    # writes no result.json — the GenericDevAdapter synthesizes one from the spec.
-    skill: str = "bmad-auto-dev"
+    # Which inner dev skill the orchestrator drives. The sole supported value is
+    # "bmad-dev-auto", the generic upstream dev primitive (BMAD-METHOD PR #2500):
+    # it writes no result.json — the GenericDevAdapter synthesizes one from the
+    # spec the session leaves on disk. The field is retained (rather than inlined)
+    # as the seam for a future alternative dev skill; see DEV_SKILLS.
+    skill: str = "bmad-dev-auto"
 
 
 @dataclass(frozen=True)
@@ -627,8 +628,8 @@ file = true                  # ATTENTION file in the run dir
 
 [review]
 # enabled = true  -> run the separate bmad-auto-review session after each dev pass.
-# enabled = false -> skip that session; the bmad-auto-dev pass runs its own inline
-#                    triple-review instead and finalizes the story straight to done.
+# enabled = false -> skip that session; the bmad-dev-auto pass runs its own inline
+#                    review instead and finalizes the story straight to done.
 enabled = true
 
 [adapter]

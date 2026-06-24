@@ -58,6 +58,21 @@ def install_bmad_config(paths: ProjectPaths) -> None:
     )
 
 
+def install_base_skills(paths: ProjectPaths, trees=(".claude/skills", ".agents/skills")) -> None:
+    """Lay down stubs of the non-bundled upstream skills the orchestrator drives
+    (bmad-dev-auto + the review hunters) so the run-start preflight
+    (`install.missing_base_skills`) passes."""
+    from automator.install import BASE_SKILLS
+
+    for tree in trees:
+        for skill, markers in BASE_SKILLS.items():
+            d = paths.project / tree / skill
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "SKILL.md").write_text(f"# {skill}\n", encoding="utf-8")
+            for marker in markers:
+                (d / marker).write_text("x\n", encoding="utf-8")
+
+
 def write_sprint(paths: ProjectPaths, statuses: dict[str, str]) -> None:
     doc = dict(SPRINT_TEMPLATE)
     doc["development_status"] = dict(statuses)
@@ -81,41 +96,12 @@ def spec_path(paths: ProjectPaths, story_key: str) -> Path:
     return paths.implementation_artifacts / f"spec-{story_key}.md"
 
 
-def dev_effect(paths: ProjectPaths, story_key: str):
-    """Simulate a successful bmad-auto-dev automation session."""
-
-    def effect(spec: SessionSpec) -> SessionResult:
-        baseline = rev_parse_head(paths.project)
-        source = paths.project / "src.txt"
-        source.write_text(source.read_text() + f"change for {story_key}\n")
-        sp = spec_path(paths, story_key)
-        # mirror the skill: with review disabled the dev finalizes straight to done
-        skip_review = spec.env.get("BMAD_AUTO_SKIP_REVIEW") == "1"
-        final = "done" if skip_review else "in-review"
-        write_spec(sp, final, baseline)
-        set_sprint(paths, story_key, final if skip_review else "review")
-        return SessionResult(
-            status="completed",
-            result_json={
-                "workflow": "auto-dev",
-                "story_key": story_key,
-                "spec_file": str(sp),
-                "baseline_commit": baseline,
-                "tasks_total": 3,
-                "tasks_done": 3,
-                "verification": [],
-                "escalations": [],
-            },
-        )
-
-    return effect
-
-
-def generic_dev_effect(paths: ProjectPaths, story_key: str, *, final_status: str = "done"):
-    """Simulate Alex's decoupled bmad-dev-auto session: it self-finalizes the
-    spec but never touches the automator's sprint board (the orchestrator is the
-    single sprint-status writer for this path). ``final_status`` lets a test
-    leave the spec short of the success status to exercise the gating."""
+def dev_effect(paths: ProjectPaths, story_key: str, *, final_status: str = "done"):
+    """Simulate a successful bmad-dev-auto session: it self-finalizes the spec
+    (no in-review handoff — always straight to ``done``) but never touches the
+    automator's sprint board (the orchestrator is the single sprint-status
+    writer). ``final_status`` lets a test leave the spec short of the success
+    status to exercise the dev-verify gating."""
 
     def effect(spec: SessionSpec) -> SessionResult:
         baseline = rev_parse_head(paths.project)
@@ -123,7 +109,7 @@ def generic_dev_effect(paths: ProjectPaths, story_key: str, *, final_status: str
         source.write_text(source.read_text() + f"change for {story_key}\n")
         sp = spec_path(paths, story_key)
         write_spec(sp, final_status, baseline)
-        # deliberately NO set_sprint: the generic skill does not write sprint-status
+        # deliberately NO set_sprint: the dev skill does not write sprint-status
         return SessionResult(
             status="completed",
             result_json={
@@ -139,6 +125,11 @@ def generic_dev_effect(paths: ProjectPaths, story_key: str, *, final_status: str
         )
 
     return effect
+
+
+# bmad-dev-auto is the sole dev skill, so the generic effect IS the dev effect.
+# Alias kept so existing call sites that spell out the decoupled path still read.
+generic_dev_effect = dev_effect
 
 
 def review_effect(paths: ProjectPaths, story_key: str, clean: bool, patched: int = 0):
@@ -236,19 +227,19 @@ def triage_effect(result_json: dict):
     return effect
 
 
-def bundle_dev_effect(paths: ProjectPaths, name: str, dw_ids, mark_ledger: bool = True):
-    """Simulate a bmad-auto-dev bundle session (--dw-bundle): edits code, writes
-    the bundle spec, and (like step-05-finalize bundle mode) marks the
-    bundle's ledger entries done."""
+def bundle_dev_effect(paths: ProjectPaths, name: str, dw_ids, mark_ledger: bool = False):
+    """Simulate a bmad-dev-auto bundle dev session: edits code and self-finalizes
+    the bundle spec to ``done`` (no in-review handoff). On the decoupled path the
+    orchestrator owns the ledger, so by default the session does NOT touch it;
+    ``mark_ledger=True`` is kept only for the legacy-marking path in older tests."""
 
     def effect(spec: SessionSpec) -> SessionResult:
         baseline = rev_parse_head(paths.project)
         source = paths.project / "src.txt"
         source.write_text(source.read_text() + f"change for dw-{name}\n")
         sp = bundle_spec_path(paths, name)
-        # mirror the skill: review disabled -> finalize the bundle to done
-        final = "done" if spec.env.get("BMAD_AUTO_SKIP_REVIEW") == "1" else "in-review"
-        write_spec(sp, final, baseline)
+        # mirror the skill: always self-finalize the bundle spec straight to done
+        write_spec(sp, "done", baseline)
         if mark_ledger:
             mark_ledger_done(paths, dw_ids)
         return SessionResult(

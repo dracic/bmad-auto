@@ -3,11 +3,23 @@ import json
 from automator import verify
 from automator.adapters.profile import get_profile
 from automator.install import (
+    BASE_SKILLS,
     MODULE_SKILLS,
     install_into,
     merge_hooks,
+    missing_base_skills,
     provision_worktree,
 )
+
+
+def _install_base_skills(root, tree=".claude/skills"):
+    """Lay down stubs of the non-bundled upstream skills the orchestrator drives."""
+    for skill, markers in BASE_SKILLS.items():
+        d = root / tree / skill
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(f"# {skill}\n", encoding="utf-8")
+        for marker in markers:
+            (d / marker).write_text("x\n", encoding="utf-8")
 
 
 def _registrations(profile, command="python3 /x/.automator/bmad_auto_hook.py {event}"):
@@ -85,8 +97,8 @@ def test_merge_hooks_copilot_idempotent():
 def test_copilot_profile_render_prompt():
     # {skill} must expand plainly (no codex-style $ prefix) into the SKILL.md path
     profile = get_profile("copilot")
-    rendered = profile.render_prompt("/bmad-auto-dev 1-2-a")
-    assert ".agents/skills/bmad-auto-dev/SKILL.md" in rendered
+    rendered = profile.render_prompt("/bmad-dev-auto 1-2-a")
+    assert ".agents/skills/bmad-dev-auto/SKILL.md" in rendered
     assert "1-2-a" in rendered
 
 
@@ -162,7 +174,7 @@ def test_install_skills_dedupes_agents_tree(tmp_path):
 
 
 def test_install_skills_skip_existing(tmp_path):
-    skill_md = tmp_path / ".claude" / "skills" / "bmad-auto-dev" / "SKILL.md"
+    skill_md = tmp_path / ".claude" / "skills" / "bmad-auto-sweep" / "SKILL.md"
     skill_md.parent.mkdir(parents=True)
     skill_md.write_text("CUSTOM", encoding="utf-8")
     # default run must not clobber an existing skill dir
@@ -173,7 +185,7 @@ def test_install_skills_skip_existing(tmp_path):
 
 
 def test_install_skills_force(tmp_path):
-    skill_md = tmp_path / ".claude" / "skills" / "bmad-auto-dev" / "SKILL.md"
+    skill_md = tmp_path / ".claude" / "skills" / "bmad-auto-review" / "SKILL.md"
     skill_md.parent.mkdir(parents=True)
     skill_md.write_text("CUSTOM", encoding="utf-8")
     assert install_into(tmp_path, force_skills=True) == 0
@@ -199,8 +211,8 @@ def test_install_resolves_legacy_alias(tmp_path):
 
 def test_provision_worktree_lays_down_skills_and_hook(tmp_path):
     """A worktree must receive the bmad-auto-* skills + signal hook even though
-    those dirs are gitignored (absent from a fresh checkout), or the session
-    can't find /bmad-auto-dev and the Stop hook never fires."""
+    those dirs are gitignored (absent from a fresh checkout), or the bundled
+    skills are missing and the Stop hook never fires."""
     wt, repo = tmp_path / "wt", tmp_path / "repo"
     claude = get_profile("claude")
     provision_worktree(wt, [claude], repo)
@@ -224,8 +236,8 @@ def test_provision_worktree_covers_multiple_profiles(tmp_path):
     claude, codex = get_profile("claude"), get_profile("codex")
     provision_worktree(wt, [claude, codex], repo)
 
-    assert (wt / claude.skill_tree / "bmad-auto-dev" / "SKILL.md").is_file()
-    assert (wt / codex.skill_tree / "bmad-auto-dev" / "SKILL.md").is_file()
+    assert (wt / claude.skill_tree / "bmad-auto-review" / "SKILL.md").is_file()
+    assert (wt / codex.skill_tree / "bmad-auto-review" / "SKILL.md").is_file()
     assert (wt / claude.hooks.config_path).is_file()
     assert (wt / codex.hooks.config_path).is_file()
 
@@ -235,7 +247,7 @@ def test_provision_worktree_does_not_clobber_existing_skill(tmp_path):
     is left untouched, so no diff is merged back."""
     wt, repo = tmp_path / "wt", tmp_path / "repo"
     claude = get_profile("claude")
-    existing = wt / claude.skill_tree / "bmad-auto-dev" / "SKILL.md"
+    existing = wt / claude.skill_tree / "bmad-auto-review" / "SKILL.md"
     existing.parent.mkdir(parents=True)
     existing.write_text("COMMITTED", encoding="utf-8")
 
@@ -248,6 +260,45 @@ def test_provision_worktree_does_not_clobber_existing_skill(tmp_path):
 def test_provision_worktree_empty_profiles_is_noop(tmp_path):
     provision_worktree(tmp_path / "wt", [], tmp_path / "repo")
     assert not (tmp_path / "wt").exists()
+
+
+def test_provision_worktree_copies_base_skills_from_repo(tmp_path):
+    """The upstream skills the orchestrator drives aren't bundled in the wheel, so
+    the worktree must get them copied from the MAIN repo's installed tree."""
+    wt, repo = tmp_path / "wt", tmp_path / "repo"
+    claude = get_profile("claude")
+    _install_base_skills(repo, claude.skill_tree)
+
+    provision_worktree(wt, [claude], repo)
+
+    for skill in BASE_SKILLS:
+        assert (wt / claude.skill_tree / skill / "SKILL.md").is_file()
+    # the dev primitive's marker file came along too
+    assert (wt / claude.skill_tree / "bmad-dev-auto" / "step-04-review.md").is_file()
+
+
+def test_missing_base_skills_reports_absent_incomplete_and_review_gate(tmp_path):
+    claude = get_profile("claude")
+    # nothing installed → dev primitive + both review hunters reported missing
+    problems = missing_base_skills(tmp_path, [claude.skill_tree])
+    assert len(problems) == 3
+    assert all("install the BMad Method" in p for p in problems)
+
+    # review disabled → only the dev primitive is required
+    problems = missing_base_skills(tmp_path, [claude.skill_tree], review_enabled=False)
+    assert len(problems) == 1
+    assert "bmad-dev-auto" in problems[0]
+
+    # install everything → no problems
+    _install_base_skills(tmp_path, claude.skill_tree)
+    assert missing_base_skills(tmp_path, [claude.skill_tree]) == []
+
+    # remove the dev primitive's marker → reported as incomplete
+    (tmp_path / claude.skill_tree / "bmad-dev-auto" / "step-04-review.md").unlink()
+    problems = missing_base_skills(tmp_path, [claude.skill_tree])
+    assert len(problems) == 1
+    assert "incomplete" in problems[0]
+    assert "step-04-review.md" in problems[0]
 
 
 def test_provision_worktree_seeds_gitignored_config(tmp_path):

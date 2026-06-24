@@ -11,15 +11,15 @@
     {
       "name": "bauto",
       "source": "./src/automator/data/skills",
-      "description": "Automation-mode skills driven by the bmad-auto orchestrator: unattended dev (bmad-auto-dev), adversarial review (bmad-auto-review), and deferred-work sweep triage (bmad-auto-sweep)",
-      "version": "0.6.4",
+      "description": "Automation-mode skills driven by the bmad-auto orchestrator: adversarial review (bmad-auto-review), interactive escalation resolution (bmad-auto-resolve), and deferred-work sweep triage (bmad-auto-sweep) — the inner dev primitive is the upstream bmad-dev-auto skill",
+      "version": "0.6.5",
       "author": {
         "name": "pinkyd"
       },
       "skills": [
         "./src/automator/data/skills/bmad-auto-setup",
-        "./src/automator/data/skills/bmad-auto-dev",
         "./src/automator/data/skills/bmad-auto-review",
+        "./src/automator/data/skills/bmad-auto-resolve",
         "./src/automator/data/skills/bmad-auto-sweep"
       ]
     }

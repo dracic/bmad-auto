@@ -1,8 +1,10 @@
 # Deferred Work Format
 
 Canonical entry format for `{implementation_artifacts}/deferred-work.md`.
-Used by bmad-auto-dev (multi-goal splits, token splits, review defers) and
-bmad-auto-review (defer findings). The file is append-only — never rewrite or
+Written by bmad-auto-review (defer findings) and, on the inner dev path, by the
+bmad-dev-auto session (multi-goal splits, token splits) — though the
+orchestrator owns the ledger and normalizes the dev session's flat entries on
+sweep. The file is append-only — never rewrite or
 delete existing entries. (One exception: freeform pre-DW-format content from
 older projects is rewritten wholesale into canonical entries by a
 `bmad-auto sweep` migration session — see `bmad-auto-sweep/migration-mode.md`;
@@ -27,7 +29,7 @@ highest existing number. One entry per deferred item:
 ```markdown
 ### DW-<seq>: <one-line title>
 
-origin: <workflow + artifact + date, e.g. "bmad-auto-dev split of spec-3-2-digest.md, 2026-06-12">
+origin: <workflow + artifact + date, e.g. "code review of spec-3-2-digest.md, 2026-06-12">
 location: <file:line or component, or "n/a" for deferred goals>
 severity: <critical | high | medium | low — how much it matters if never done>
 reason: <why this was deferred rather than done now, one or two sentences>

@@ -1,14 +1,10 @@
 """Model of sprint-status.yaml — the single source of workflow truth.
 
-For the legacy `bmad-auto-dev` skill the orchestrator NEVER writes this file:
-the skill mutates it (via sync-sprint-status) and the orchestrator only
-re-reads it to pick the next story and verify what a session claims.
-
-For the generic `bmad-dev-auto` skill (which deliberately does not touch
-sprint-status — "the orchestrator's business"), the orchestrator becomes the
-single writer via :func:`advance`, which mirrors the skill's sync rules
-(idempotent, never-regress, epic-lift). One writer per path either way, so the
-no-races invariant holds.
+The dev primitive `bmad-dev-auto` deliberately does not touch sprint-status
+("the orchestrator's business"), so the orchestrator is the single writer via
+:func:`advance` — idempotent, never-regress, epic-lift. The orchestrator
+otherwise only re-reads this file to pick the next story and verify what a
+session claims, so the no-races invariant holds.
 """
 
 from __future__ import annotations

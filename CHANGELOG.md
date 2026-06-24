@@ -5,36 +5,37 @@ All notable changes to `bmad-auto` are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
-## [Unreleased]
+## [0.6.5] — 2026-06-24
 
 ### Changed
 
-- **`bmad-auto-dev` rebuilt as a standalone machine-first skill.** It was a fork of `bmad-quick-dev`
-  carrying an interactive workflow plus an `automation-mode.md` decision table whose only job was to
-  override that interactivity. It is now four lean steps (resolve → plan → implement → finalize) with
-  the orchestrator contract (invocation, escalation, result schema) stated up front — no greeting,
-  menus, or HALTs to override. Epic-context compilation, previous-story continuity, and the inline
-  three-layer adversarial review are all preserved: with `review.enabled = false` the dev session
-  runs that inline triple-review itself before finalizing to `done` (a judge who did the planning is
-  better-informed); with `review.enabled = true` the orchestrator runs a separate fresh-context
-  review session instead. Mirrors the upstream draft bmad-code-org/BMAD-METHOD#2498 (renamed
-  `bmad-dev-auto` → `bmad-auto-dev` to match the orchestrator's `/bmad-auto-dev` invocation). No
-  engine change was required.
+- **Retired the `bmad-auto-dev` fork; the orchestrator now drives the upstream `bmad-dev-auto`
+  skill directly** (bmad-code-org/BMAD-METHOD#2500, merged upstream) as the sole, unmodified dev
+  primitive. The skill is the inner autonomous coding session; everything automator-specific —
+  escalation, sprint/ledger bookkeeping, repair-resume — stays in the orchestrator, which
+  synthesizes `result.json` from the spec the skill leaves on disk. There is no fork to keep in sync
+  with upstream. `bmad-auto-review` stays bundled and runs by default (gated on `review.enabled`).
 
 ### Added
 
-- **`bmad-auto-dev` spec Boundaries gain a `Block If` tier** (from upstream
-  bmad-code-org/BMAD-METHOD#2500). Frozen, spec-local list of decisions that cannot be made
-  unattended; triggering one in implementation or review escalates `CRITICAL` (`type: block-if`).
-  Also: `sync-sprint-status` now writes a machine-readable `sprint-sync-skipped` frontmatter
-  warning when a story key is absent (was log-only), and `compile-epic-context` uses a deterministic
-  fallback sentence when planning artifacts are missing.
+- **Non-bundled-skill preflight.** `bmad-auto validate` and run/sweep/resume start verify that
+  `bmad-dev-auto` (and the `bmad-review-adversarial-general` / `bmad-review-edge-case-hunter` review
+  hunters when review is enabled) are installed in each active CLI skill tree — failing loudly with
+  remediation instead of stalling mid-run on an `Unknown command`. Worktree provisioning copies these
+  upstream skills from the main repo, since they are not bundled in the wheel.
 
 - **`result.json` `workflow` is now an enforced contract on the dev path.** `verify_dev` /
-  `verify_dev_bundle` reject a mismatch against `verify.DEV_WORKFLOW` (`"auto-dev"`); the skill emits
-  `"auto-dev"` instead of the misleading legacy `"quick-dev"`. Review's `"code-review"` stays
-  informational by design — `verify_review` is purely disk-derived and is never handed the
-  result.json (documented in `src/automator/data/skills/README.md`).
+  `verify_dev_bundle` reject a mismatch against `verify.DEV_WORKFLOW` (`"auto-dev"`); the synthesized
+  result carries `"auto-dev"`. Review's `"code-review"` stays informational by design — `verify_review`
+  is purely disk-derived and is never handed the result.json (documented in
+  `src/automator/data/skills/README.md`).
+
+### Removed
+
+- The bundled `bmad-auto-dev` skill directory and its `MODULE_SKILLS` entry. `bmad-auto init` now
+  installs `bmad-auto-review`, `bmad-auto-resolve`, `bmad-auto-sweep`, and `bmad-auto-setup`; the
+  upstream `bmad-dev-auto` skill (from a recent bmm module) is a hard prerequisite. `deferred-work-format.md`
+  moved into `bmad-auto-review/` — it is a sibling dependency of the review and sweep skills, not dev.
 
 ## [0.6.4] — 2026-06-21
 

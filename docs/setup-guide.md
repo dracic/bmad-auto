@@ -1,10 +1,11 @@
 # Setup guide
 
-This module is two things: the five `bmad-auto-*` skills and the `bmad-auto`
+This module is two things: the bundled `bmad-auto-*` skills and the `bmad-auto`
 orchestrator tool (the Python program that actually drives the loop). The skills do
 nothing on their own — the orchestrator is what spawns the fresh coding-CLI sessions
-that invoke `bmad-auto-dev`, `bmad-auto-review`, `bmad-auto-sweep`, and
-`bmad-auto-resolve`, watches their hook signals, and verifies their artifacts. Installing the tool is part of setup, not
+that invoke the upstream `bmad-dev-auto` skill plus `bmad-auto-review`,
+`bmad-auto-sweep`, and `bmad-auto-resolve`, watches their hook signals, and verifies
+their artifacts. Installing the tool is part of setup, not
 an optional extra.
 
 There are two ways the skills land in a project. The orchestrator's wheel **bundles**
@@ -62,11 +63,13 @@ uv run bmad-auto init --project /path/to/project --cli claude   # installs skill
 claude "/bmad-auto-setup accept all defaults"                   # register _bmad/ config + help
 ```
 
-Add `--cli codex --cli gemini` to also populate `.agents/skills/`. The skills must be
-installed together: `bmad-auto-review` writes deferred-work entries per
-`bmad-auto-dev/deferred-work-format.md` (a sibling skill directory) — `init` always
-installs them all (`bmad-auto-dev`, `bmad-auto-review`, `bmad-auto-resolve`,
-`bmad-auto-sweep`, `bmad-auto-setup`).
+Add `--cli codex --cli gemini` to also populate `.agents/skills/`. The bundled skills
+must be installed together: `bmad-auto-review` and `bmad-auto-sweep` both reference
+`bmad-auto-review/deferred-work-format.md` (a sibling skill directory) — `init` always
+installs them all (`bmad-auto-review`, `bmad-auto-resolve`, `bmad-auto-sweep`,
+`bmad-auto-setup`). The dev primitive `bmad-dev-auto` is **not** bundled: it is the
+upstream skill the orchestrator drives, installed by the BMad Method (bmm) module.
+`bmad-auto validate` checks it is present before a run starts.
 
 ## Choosing which CLIs to drive
 

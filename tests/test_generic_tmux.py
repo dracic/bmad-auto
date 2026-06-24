@@ -91,7 +91,7 @@ def make_spec(tmp_path, task_id="1-1-a-dev-1", timeout_s=30.0, model="sonnet") -
     return SessionSpec(
         task_id=task_id,
         role="dev",
-        prompt="/bmad-auto-dev 1-1-a",
+        prompt="/bmad-dev-auto 1-1-a",
         cwd=tmp_path,
         env={"BMAD_AUTO_MODE": "1", "BMAD_AUTO_TASK_ID": task_id},
         model=model,
@@ -102,7 +102,7 @@ def make_spec(tmp_path, task_id="1-1-a-dev-1", timeout_s=30.0, model="sonnet") -
 def test_build_command_claude(tmp_path):
     adapter = make_adapter(tmp_path)
     cmd = adapter.build_command(make_spec(tmp_path))
-    assert cmd.startswith("claude '/bmad-auto-dev 1-1-a' --permission-mode bypassPermissions")
+    assert cmd.startswith("claude '/bmad-dev-auto 1-1-a' --permission-mode bypassPermissions")
     assert cmd.endswith("--model sonnet")
 
 
@@ -110,7 +110,7 @@ def test_build_command_codex_renders_skill_mention(tmp_path):
     adapter = make_adapter(tmp_path, profile_name="codex")
     cmd = adapter.build_command(make_spec(tmp_path))
     assert cmd.startswith(
-        "codex 'Use the $bmad-auto-dev skill now, and use subagents as needed: 1-1-a'"
+        "codex 'Use the $bmad-dev-auto skill now, and use subagents as needed: 1-1-a'"
     )
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
     assert cmd.endswith("--model sonnet")
@@ -119,7 +119,7 @@ def test_build_command_codex_renders_skill_mention(tmp_path):
 def test_build_command_gemini_uses_interactive_flag(tmp_path):
     adapter = make_adapter(tmp_path, profile_name="gemini")
     cmd = adapter.build_command(make_spec(tmp_path))
-    assert cmd.startswith("gemini -i '/bmad-auto-dev 1-1-a' --approval-mode=yolo")
+    assert cmd.startswith("gemini -i '/bmad-dev-auto 1-1-a' --approval-mode=yolo")
     assert cmd.endswith("--model sonnet")
 
 
@@ -342,7 +342,7 @@ def test_tmux_end_to_end_with_fake_cli(tmp_path, profile_name):
     spec = SessionSpec(
         task_id="t-int-1",
         role="dev",
-        prompt="/bmad-auto-dev 1-1-a",
+        prompt="/bmad-dev-auto 1-1-a",
         cwd=tmp_path,
         env=spec_env,
         timeout_s=30.0,
@@ -382,7 +382,7 @@ def test_tmux_reused_task_id_ignores_stale_artifacts(tmp_path):
     spec = SessionSpec(
         task_id=task_id,
         role="dev",
-        prompt="/bmad-auto-dev 1-1-a",
+        prompt="/bmad-dev-auto 1-1-a",
         cwd=tmp_path,
         env={"BMAD_AUTO_RUN_DIR": str(adapter.run_dir), "BMAD_AUTO_TASK_ID": task_id},
         timeout_s=30.0,

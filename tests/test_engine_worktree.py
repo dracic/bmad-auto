@@ -43,8 +43,10 @@ def commit_sprint(project, statuses: dict[str, str]) -> None:
     git(project.project, "commit", "-q", "-m", "sprint")
 
 
-def wt_dev_effect(project, story_key):
-    """Dev session running inside the unit worktree (spec.cwd)."""
+def wt_dev_effect(project, story_key, *, final_status="done"):
+    """Dev session running inside the unit worktree (spec.cwd). Mirrors the
+    bmad-dev-auto skill: self-finalizes the spec to done, never writes the sprint
+    board (the orchestrator advances it via the B2 seam, inside the worktree)."""
 
     def effect(spec):
         cwd = spec.cwd
@@ -53,10 +55,8 @@ def wt_dev_effect(project, story_key):
         src = cwd / "src.txt"
         src.write_text(src.read_text() + f"change for {story_key}\n")
         sp = wt.implementation_artifacts / f"spec-{story_key}.md"
-        skip_review = spec.env.get("BMAD_AUTO_SKIP_REVIEW") == "1"
-        final = "done" if skip_review else "in-review"
-        write_spec(sp, final, baseline)
-        set_sprint(wt, story_key, final if skip_review else "review")
+        write_spec(sp, final_status, baseline)
+        # NO set_sprint: the orchestrator is the single sprint-status writer
         return SessionResult(
             status="completed",
             result_json={

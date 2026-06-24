@@ -37,7 +37,7 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 
 ### Spec + implementation (dev stage)
 
-- Drives `bmad-auto-dev` (fork of `bmad-quick-dev`) in a fresh tmux session: plans a 1.5–4k-token spec, auto-approves it, implements, syncs `sprint-status` to `in-review`, writes `result.json`.
+- Drives the upstream `bmad-dev-auto` skill (unmodified) in a fresh tmux session: it plans a 1.5–4k-token spec, auto-approves it, implements, and self-finalizes the spec; the orchestrator syncs `sprint-status` and synthesizes `result.json` from the spec the skill leaves on disk.
 - Spec-only contract between stages — review consumes the frozen spec, not the dev session's context.
 
 ### Verification (trust-nothing gate)

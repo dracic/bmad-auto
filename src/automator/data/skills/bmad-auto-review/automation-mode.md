@@ -67,10 +67,10 @@ this workflow.
 7. **Act** (step-04): write findings to the spec file as usual; apply EVERY
    `patch` finding without asking; append `defer` findings to the
    deferred-work file following the format in
-   `bmad-auto-dev/deferred-work-format.md` (same directory conventions);
+   `./deferred-work-format.md` (same directory conventions);
    skip the "Next steps" menu entirely.
 8. **Status updates** (step-04 section 6) run exactly as written: spec
-   status (frontmatter `status:` for bmad-auto-dev specs) and sprint-status sync.
+   status (frontmatter `status:`) and sprint-status sync.
    `clean: true` in result.json must mean you set the spec to `done` —
    never claim clean without the status updates on disk.
    When `{story_key}` is null (sweep bundle): skip the sprint-status sync

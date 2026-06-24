@@ -39,7 +39,7 @@ Inspired by the original [bmad-automator](https://github.com/bmad-code-org/bmad-
 ## Requirements
 
 - **Python 3.11+**, **tmux**, and a supported coding CLI — `claude` by default; `codex` and `gemini` via [profiles](#other-coding-clis).
-- A **BMAD v6 project** (`_bmad/bmm/config.yaml`, a `sprint-status.yaml` from `bmad-sprint-planning`) with the automator skill module from this repo installed (`bmad-auto-dev`, `bmad-auto-review`, `bmad-auto-sweep` — see [Installing the skill module](#installing-the-skill-module)). Standard BMAD skills stay untouched.
+- A **BMAD v6 project** (`_bmad/bmm/config.yaml`, a `sprint-status.yaml` from `bmad-sprint-planning`) with the upstream `bmad-dev-auto` skill and the automator skill module from this repo installed (`bmad-auto-review`, `bmad-auto-sweep` — see [Installing the skill module](#installing-the-skill-module)). Standard BMAD skills stay untouched.
 
 ## Quick start
 
@@ -157,8 +157,8 @@ Press **`g`** to edit `.automator/policy.toml` in a form grouped by section — 
 ```text
 sprint-status.yaml: 1-2-account-mgmt: ready-for-dev
   │
-  ├─ DEV     tmux window: claude "/bmad-auto-dev 1-2-account-mgmt"
-  │          bmad-auto-dev: plans a 1.5–4k-token spec,
+  ├─ DEV     tmux window: claude "/bmad-dev-auto 1-2-account-mgmt"
+  │          bmad-dev-auto: plans a 1.5–4k-token spec,
   │          auto-approves it, implements, syncs sprint → review,
   │          writes result.json … Stop hook signals the orchestrator
   ├─ VERIFY  spec exists · status in-review · baseline matches · diff non-empty
@@ -197,8 +197,8 @@ bmad-auto sweep [--no-prompt] [--decisions-only] [--max-bundles N] [--repeat] [-
   │           terminal (build / close / keep-open per option, with a
   │           recommendation); answers land in the ledger as `decision:`
   │           lines. Unattended runs skip this and leave decisions open.
-  └─ BUNDLES  each bundle runs the normal pipeline: bmad-auto-dev (--dw-bundle)
-              → bmad-auto-review → verify commands → commit. The review gate also
+  └─ BUNDLES  each bundle runs the normal pipeline: bmad-dev-auto (on the bundle
+              spec) → bmad-auto-review → verify commands → commit. The review gate also
               checks every bundle entry is `status: done` in the ledger.
 ```
 
@@ -210,11 +210,11 @@ Bundle dev sessions can themselves append new deferred entries (split-off goals,
 
 ## Installing the skill module
 
-The orchestrator drives its own forks of the BMAD dev/review skills — your standard BMAD install is never modified. The five skills are bundled in the `bmad-auto` wheel (canonical source: `src/automator/data/skills/`, BMAD module code `bauto`) so `bmad-auto init` lays them down for you:
+The orchestrator drives the upstream `bmad-dev-auto` skill as its inner dev primitive — unmodified, so there is no fork to keep in sync — plus its own bundled `bmad-auto-*` skills for review, escalation, sweep, and setup. Your standard BMAD install is never modified. The four bundled skills ship in the `bmad-auto` wheel (canonical source: `src/automator/data/skills/`, BMAD module code `bauto`) so `bmad-auto init` lays them down for you; `bmad-dev-auto` is a prerequisite installed by the BMad Method (bmm) module:
 
 | Skill               | Role                                                                      |
 | ------------------- | ------------------------------------------------------------------------- |
-| `bmad-auto-dev`     | unattended implementation (fork of `bmad-quick-dev`)                      |
+| `bmad-dev-auto`     | unattended implementation (**upstream** — bmm prerequisite, not bundled)  |
 | `bmad-auto-review`  | unattended adversarial review (fork of `bmad-code-review`)                |
 | `bmad-auto-resolve` | interactive CRITICAL-escalation resolution (`/bmad-auto-resolve <story>`) |
 | `bmad-auto-sweep`   | deferred-work ledger triage (automation-only)                             |
@@ -260,7 +260,7 @@ Your `.automator/policy.toml` is left untouched on upgrade — new keys are opti
 
 To remove bmad-auto from a project, see [Uninstalling](docs/setup-guide.md#uninstalling) — it reverses what `init` laid down (state, skills, hooks, gitignore) and uninstalls the tool.
 
-**Via the BMAD-method installer.** The installer also copies the five `bmad-auto-*` skills into your project (but not the orchestrator tool). Finish setup with `/bmad-auto-setup`, which installs the tool from Git, asks which coding CLIs to drive, registers their hooks (`init` skips the already-present skills), and runs the preflight:
+**Via the BMAD-method installer.** The installer copies the bundled `bmad-auto-*` skills into your project (but not the orchestrator tool), alongside the upstream `bmad-dev-auto` skill the orchestrator drives. Finish setup with `/bmad-auto-setup`, which installs the tool from Git, asks which coding CLIs to drive, registers their hooks (`init` skips the already-present skills), and runs the preflight:
 
 ```bash
 claude "/bmad-auto-setup accept all defaults"
@@ -268,9 +268,9 @@ claude "/bmad-auto-setup accept all defaults"
 
 See **[docs/setup-guide.md](docs/setup-guide.md)** for the full walkthrough — choosing CLIs, installing the tool and TUI together or separately, and initializing codex/gemini.
 
-The skills must be installed together: `bmad-auto-review` writes deferred-work entries per `bmad-auto-dev/deferred-work-format.md` (sibling skill directory). If you carry `_bmad/custom/bmad-quick-dev.toml` or `bmad-code-review.toml` customization overrides, duplicate them as `bmad-auto-dev.toml` / `bmad-auto-review.toml` — overrides are keyed by skill directory name.
+The bundled skills must be installed together: `bmad-auto-review` and `bmad-auto-sweep` both reference `bmad-auto-review/deferred-work-format.md` (sibling skill directory). If you carry a `_bmad/custom/bmad-code-review.toml` customization override, duplicate it as `bmad-auto-review.toml` — overrides are keyed by skill directory name. The upstream `bmad-dev-auto` skill is driven unmodified, so its own `customize.toml` applies as-is.
 
-To pull in upstream BMAD improvements, diff the upstream skill against the fork (`diff -r <bmad-install>/bmad-quick-dev src/automator/data/skills/bmad-auto-dev`) and merge manually; the forks keep the upstream file structure to make this easy.
+To pull in upstream BMAD improvements to the review fork, diff the upstream skill against it (`diff -r <bmad-install>/bmad-code-review src/automator/data/skills/bmad-auto-review`) and merge manually; the fork keeps the upstream file structure to make this easy. `bmad-dev-auto` needs no merge — it is consumed directly from the bmm module.
 
 ## Policy (`.automator/policy.toml`)
 

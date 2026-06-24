@@ -972,15 +972,10 @@ class SweepEngine(Engine):
     # ------------------------------------------------------ override seams
 
     def _dev_prompt(self, task: StoryTask, feedback: Path | None) -> str:
-        if self._generic_dev():
-            return self._generic_bundle_prompt(task, feedback)
-        prompt = f"/bmad-auto-dev --dw-bundle {task.bundle_file}"
-        if feedback is not None:
-            prompt += f" --feedback {feedback}"
-        return prompt
+        return self._generic_bundle_prompt(task, feedback)
 
     def _generic_bundle_prompt(self, task: StoryTask, feedback: Path | None) -> str:
-        """Bundle invocation for Alex's generic bmad-dev-auto: the self-contained
+        """Bundle invocation for the generic bmad-dev-auto dev skill: the self-contained
         intent.md (intent + verbatim ledger entries) is handed over as freeform
         intent. The orchestrator owns the deferred-work ledger — the skill is told
         not to edit it — and records resolution itself in `_post_dev_state_sync`.
@@ -1005,8 +1000,8 @@ class SweepEngine(Engine):
         )
 
     def _post_dev_state_sync(self, task: StoryTask, result_json: dict | None) -> None:
-        """Generic-path ledger single-writer for bundles. The legacy --dw-bundle
-        skill flips the ledger itself; the decoupled bmad-dev-auto does not, so the
+        """Generic-path ledger single-writer for bundles. The decoupled
+        bmad-dev-auto skill does not touch the ledger, so the
         orchestrator marks each dw id the bundle owns ``done`` once the bundle's
         spec reached its success status — before verify_review_bundle checks the
         ledger. Mirrors the story sprint sync; no-op on the legacy path."""

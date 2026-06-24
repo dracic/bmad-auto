@@ -23,9 +23,11 @@ from .sprintstatus import story_status
 GIT_TIMEOUT_S = 120
 COMMAND_TIMEOUT_S = 30 * 60
 
-# result.json `workflow` value the bmad-auto-dev skill must report. A machine
-# contract: a mismatch means the wrong skill produced the artifacts, so we
-# reject rather than trust them. (Sweep's triage/migrate workflows have their
+# result.json `workflow` value for the dev pass. A machine contract: the
+# orchestrator forges this value in `devcontract` when synthesizing the dev
+# result from the spec the bmad-dev-auto session leaves on disk; a mismatch
+# means the wrong artifacts, so we reject rather than trust them. (Sweep's
+# triage/migrate workflows have their
 # own constants in sweep.py; the review skill is verified by on-disk artifacts
 # only and is not handed its result.json.)
 DEV_WORKFLOW = "auto-dev"

@@ -490,7 +490,7 @@ def rearm_escalation(run_dir: Path, story_key: str | None = None) -> str:
     task.defer_reason = None
 
     if task.spec_file:
-        # route /bmad-auto-dev to re-implement (decision table: ready-for-dev
+        # route /bmad-dev-auto to re-implement (decision table: ready-for-dev
         # -> step-03); independent of the resolve agent having set it.
         verify.set_frontmatter_status(Path(task.spec_file), "ready-for-dev")
 

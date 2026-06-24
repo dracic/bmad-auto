@@ -361,8 +361,8 @@ class Engine:
         task.branch = unit.branch
         # A worktree checks out tracked files only, but the bmad-auto-* skill
         # trees + signal-hook config are typically gitignored, so they are absent
-        # from the fresh checkout. Re-lay them into the worktree so the session
-        # finds /bmad-auto-dev and the Stop-signal hook fires. Also seed the loaded
+        # from the fresh checkout. Re-lay them into the worktree so the bundled
+        # bmad-auto-* skills are present and the Stop-signal hook fires. Also seed the loaded
         # adapters' gitignored MCP/CLI configs so isolated sessions can reach their
         # MCP server (seed_adapter_defaults) plus any extra project-listed paths.
         profiles = self._worktree_profiles()
@@ -1038,15 +1038,16 @@ class Engine:
 
     def _review_and_commit(self, task: StoryTask) -> None:
         if not self.policy.review.enabled:
+            # review.enabled = false: the bmad-dev-auto session's own inline
+            # review is the only review; verify the deterministic gates + commit.
             self._skip_review_and_commit(task)
             return
-        if self._generic_dev():
-            # The generic bmad-dev-auto skill runs its own inline review and
-            # self-finalizes to done; the orchestrator runs no separate
-            # second-opinion review on this path. (A future skill signal will let
-            # it request one; until then, verify the deterministic gates + commit.)
-            self._skip_review_and_commit(task)
-            return
+        # review.enabled = true (default): run the separate bmad-auto-review
+        # second-opinion session over the dev spec. The dev session self-finalizes
+        # the spec to done (no in-review handoff) and the orchestrator advances
+        # sprint-status at dev time (_post_dev_state_sync), so this review runs as
+        # an adversarial pass on a done spec before commit. (A future bmad-dev-auto
+        # "review recommended" signal can gate this loop per-story.)
         if self._vetoed(self._emit("pre_review_phase", task), task):
             return
         clean = False
@@ -1124,7 +1125,7 @@ class Engine:
 
     def _skip_review_and_commit(self, task: StoryTask) -> None:
         """review.enabled = false: no separate review session runs. The
-        bmad-auto-dev session ran its own inline triple-review and finalized the
+        bmad-dev-auto session ran its own inline review and finalized the
         story to done. Validate the deterministic gates (verify commands,
         spec/sprint = done) and commit, repairing once if verify is fixable."""
         self.journal.append("review-skipped", story_key=task.story_key)
@@ -1173,8 +1174,10 @@ class Engine:
     # overriding these (bundles have no sprint-status entry).
 
     def _generic_dev(self) -> bool:
-        """True when the orchestrator is driving Alex's decoupled bmad-dev-auto
-        skill rather than the automator's own bmad-auto-dev."""
+        """True when the orchestrator is driving the decoupled `bmad-dev-auto`
+        dev skill — currently the only supported dev skill, so always True. Kept
+        as the predicate the decoupled-path seams (B2/B4/B6/B7) read through, so
+        a future alternative dev skill can re-introduce the legacy branch."""
         return self.policy.dev.skill == "bmad-dev-auto"
 
     def _dev_review_enabled(self) -> bool:
@@ -1190,9 +1193,9 @@ class Engine:
     def _post_dev_state_sync(self, task: StoryTask, result_json: dict | None) -> None:
         """Single-writer for the on-disk bookkeeping the generic skill never touches.
 
-        For a story that is sprint-status: the legacy ``bmad-auto-dev`` skill
-        advances it itself; Alex's decoupled ``bmad-dev-auto`` knows nothing of the
-        automator's sprint board, so the orchestrator writes it — and must do so
+        For a story that is sprint-status: the decoupled ``bmad-dev-auto`` skill
+        knows nothing of the automator's sprint board, so the orchestrator writes
+        it — and must do so
         before ``verify_dev`` checks the sprint stage. Mirrors ``verify_dev``:
         advance the story to the sprint stage matching the spec status the skill
         actually reached, so a failed or blocked session (spec not at the success
@@ -1332,15 +1335,10 @@ class Engine:
         return result
 
     def _dev_prompt(self, task: StoryTask, feedback: Path | None) -> str:
-        if self.policy.dev.skill == "bmad-dev-auto":
-            return self._generic_dev_prompt(task, feedback)
-        prompt = f"/bmad-auto-dev {task.story_key}"
-        if feedback is not None:
-            prompt += f" --feedback {feedback}"
-        return prompt
+        return self._generic_dev_prompt(task, feedback)
 
     def _generic_dev_prompt(self, task: StoryTask, feedback: Path | None) -> str:
-        """Invocation for Alex's generic `bmad-dev-auto`, which has no
+        """Invocation for the generic `bmad-dev-auto` dev skill, which has no
         `--feedback` flag: feedback is inlined as freeform intent pointing at the
         existing spec. On a repair re-invocation the spec is first re-opened
         (status → `in-progress`) so the skill's step-01 re-enters implement/review

@@ -16,6 +16,7 @@ from . import (
     bmadconfig,
     decisions,
     deferredwork,
+    install,
 )
 from . import policy as policy_mod
 from . import (
@@ -61,22 +62,19 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
     from .adapters.generic_tmux import GenericDevAdapter, GenericTmuxAdapter
     from .adapters.profile import ProfileError, get_profile
 
-    # The generic dev adapter needs the implementation-artifacts dir to find the
-    # spec it synthesizes its result from; resolve it only when that skill is
-    # actually selected (keeps the default path free of an extra config read).
-    impl_artifacts: Path | None = None
-    if policy.dev.skill == "bmad-dev-auto":
-        impl_artifacts = bmadconfig.load_paths(project).implementation_artifacts
+    # The dev skill (bmad-dev-auto) writes no result.json: its adapter
+    # synthesizes the result from the spec, and so needs the
+    # implementation-artifacts dir to find that spec.
+    impl_artifacts = bmadconfig.load_paths(project).implementation_artifacts
 
     adapters: dict[str, CodingCLIAdapter] = {}
     by_cfg: dict = {}
     for role in ROLES:
         cfg = policy.adapter.resolved(role)
-        # The generic dev skill writes no result.json: its dev adapter must
-        # synthesize the result from the spec, so it cannot be shared with the
-        # other roles even when their adapter config is identical.
-        generic_dev = role == "dev" and policy.dev.skill == "bmad-dev-auto"
-        key = (cfg, generic_dev)
+        # The dev adapter synthesizes the result from the spec, so it cannot be
+        # shared with the other roles even when their adapter config is identical.
+        is_dev = role == "dev"
+        key = (cfg, is_dev)
         if key not in by_cfg:
             try:
                 profile = get_profile(cfg.name, project)
@@ -92,7 +90,7 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
             )
             by_cfg[key] = (
                 GenericDevAdapter(**common, impl_artifacts=impl_artifacts)
-                if generic_dev
+                if is_dev
                 else GenericTmuxAdapter(**common)
             )
         adapters[role] = by_cfg[key]
@@ -181,11 +179,44 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 f"run `bmad-auto init --cli {profile.name}`"
             )
 
+    review_enabled = pol.review.enabled if pol else True
+    base_problems = install.missing_base_skills(
+        project, [p.skill_tree for p in profiles], review_enabled=review_enabled
+    )
+    if profiles and not base_problems:
+        notes.append("upstream skills present (bmad-dev-auto + review hunters)")
+    problems.extend(base_problems)
+
     for note in notes:
         print(f"  ok: {note}")
     for problem in problems:
         print(f"FAIL: {problem}", file=sys.stderr)
     return 1 if problems else 0
+
+
+def _require_base_skills(project: Path, pol) -> bool:
+    """Preflight the upstream skills the orchestrator drives (bmad-dev-auto + the
+    review hunters when review is enabled).
+
+    Returns True when everything is in place; otherwise prints the problems and
+    returns False so the caller can abort before spawning any session (a missing
+    skill would otherwise stall as an `Unknown command` until the run times out).
+    """
+    from .adapters.profile import ProfileError, get_profile
+
+    skill_trees = []
+    for name in dict.fromkeys(pol.adapter.resolved(role).name for role in ROLES):
+        try:
+            skill_trees.append(get_profile(name, project).skill_tree)
+        except ProfileError:
+            continue
+    problems = install.missing_base_skills(project, skill_trees, review_enabled=pol.review.enabled)
+    if problems:
+        for problem in problems:
+            print(f"FAIL: {problem}", file=sys.stderr)
+        print("run `bmad-auto validate` for details", file=sys.stderr)
+        return False
+    return True
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -206,6 +237,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     if not verify.worktree_clean(paths.repo_root):
         print("git worktree is not clean — commit or stash first", file=sys.stderr)
+        return 1
+
+    if not _require_base_skills(project, pol):
         return 1
 
     _reconcile_stale(project, paths, pol)
@@ -283,7 +317,7 @@ def _dry_run(paths: bmadconfig.ProjectPaths, pol, args: argparse.Namespace) -> i
     print(f"would process {len(queue)} stories (gates={pol.gates.mode}):")
     for story in queue:
         print(f"\n  {story.key} (epic {story.epic}, status {story.status})")
-        print(f"    dev:    {render('dev', f'/bmad-auto-dev {story.key}')}")
+        print(f"    dev:    {render('dev', f'/bmad-dev-auto {story.key}')}")
         print(f"    review: {render('review', '/bmad-auto-review <spec from dev>')}")
         print(f"    env:    BMAD_AUTO_MODE=1 BMAD_AUTO_STORY_KEY={story.key}")
     return 0
@@ -377,6 +411,9 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         print("git worktree is not clean — commit or stash first", file=sys.stderr)
         return 1
 
+    if not _require_base_skills(project, pol):
+        return 1
+
     _reconcile_stale(project, paths, pol)
 
     return _start_sweep(
@@ -429,6 +466,8 @@ def _resume_paused_run(project: Path, run_dir: Path) -> int:
         print(f"run {run_dir.name} already finished", file=sys.stderr)
         return 1
     pol = policy_mod.load(_policy_path(project))
+    if not _require_base_skills(project, pol):
+        return 1
     journal = Journal(run_dir)
     journal.append("run-resume", was_paused=state.paused_reason)
     state.clear_pause()

@@ -40,8 +40,8 @@ the same way deferred-work sweeps already run.
 
 **Approach (designed, not built):** a separate `bmad-auto retro` run type that mirrors the
 `SweepEngine` (`src/automator/sweep.py`) end-to-end — `RetroEngine`, a `retro` CLI command + resume
-branch, a `--retro-item <intent>` mode on `bmad-auto-dev`, and `verify` helpers paralleling the
-bundle verifiers. Story runs stay untouched.
+branch, a retro-item intent fed to the `bmad-dev-auto` primitive, and `verify` helpers paralleling
+the bundle verifiers. Story runs stay untouched.
 
 **Why blocked:** retro-item _detail_ is scattered — some lives in the epic retro-doc Action-Items
 table (`epic-N-retro-YYYY-MM-DD.md`), some in `deferred-work.md` (DW-N) entries, some in ad-hoc
