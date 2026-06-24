@@ -94,6 +94,9 @@ class StubMux(TerminalMultiplexer):
     def set_window_option(self, target, option, value):
         raise AssertionError("adapter must not call set_window_option")
 
+    def unset_window_option(self, target, option):
+        raise AssertionError("adapter must not call unset_window_option")
+
     def show_window_option(self, target, option):
         raise AssertionError("adapter must not call show_window_option")
 

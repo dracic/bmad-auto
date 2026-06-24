@@ -24,9 +24,46 @@ These are independent and abstracted separately:
   A backend author reads `multiplexer.py` for the contract and `tmux_backend.py`
   for the reference implementation.
 
-> The transport seam is being migrated in phases; the remaining call sites
-> (`runs.py`, `tui/launch.py`, `probe.py`, `tui/data.py`) still hold their own
-> tmux invocations until Phase 2 routes them through the backend.
+### The transport contract (for a backend author)
+
+Every part of the codebase that touches sessions, windows, or clients now goes
+through `get_multiplexer()` — not just the generic adapter but also `runs.py`
+(session listing/tagging, kill, attach argv), `tui/launch.py` (the control
+session and its parked orchestrator windows), `probe.py` (the throwaway probe
+session), and `tui/data.py` (legacy-run liveness). A grep for `"tmux"` outside
+`adapters/tmux_backend.py` should turn up only `shutil.which("tmux")` presence
+checks, never an invocation.
+
+To add a backend, implement `TerminalMultiplexer` (`adapters/multiplexer.py`) and
+return it from `get_multiplexer()`. The contract groups into:
+
+- **Sessions** — `has_session`, `new_session` (geometry is optional: agent
+  sessions pin a fixed pane size because they are observed while detached; the
+  control session omits it), `kill_session`, `list_sessions`, `session_options`
+  (read a user option across all sessions), `set_session_option`.
+- **Windows** — `new_window` (run a command in a fresh window), `new_parked_window`
+  (run a command, then _park_ on a keypress so the exit status stays inspectable,
+  then return any attached client to its origin — this is where the POSIX `sh -c`
+  trailer is quarantined; a non-POSIX backend reimplements the same behavior in
+  its own terms), `list_window_ids`, `list_windows` (selected fields per window),
+  `window_alive`, `kill_window`, `select_window`, `set_window_option`,
+  `unset_window_option`, `show_window_option`, `pipe_pane` (tee a pane to a log),
+  `send_text`.
+- **Client / attach** — `attach_target_argv` (argv that reaches a target, nesting-
+  aware), `current_pane_id` / `current_window_id` / `current_session`,
+  `detach_client`, `switch_client` (with an optional last-client fallback),
+  `available` (is this backend usable on the current host).
+
+Operations that can race a window dying (`pipe_pane`) or a session already being
+gone (`kill_session`) must tolerate it rather than raise; everything else raises a
+`MultiplexerError` subclass on failure, which call sites catch at the seam (e.g.
+`tui/launch.start_detached` turns it into a `LaunchError`) without importing the
+backend. `aliveness` uses `list-windows` membership, not `display-message`, because
+`display-message -t <dead-window>` exits 0 on tmux.
+
+`tmux_backend.py` is the reference implementation; reading it alongside the ABC is
+the fastest way to see exactly what a `new_parked_window` or `session_options` must
+produce.
 
 The hard part of a new profile isn't the TOML — it's the **facts that live in no
 doc**: the CLI's exact hook payload shape (field names and casing, whether

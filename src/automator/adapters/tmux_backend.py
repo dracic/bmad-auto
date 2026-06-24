@@ -5,20 +5,21 @@ every POSIX-shell trailer and tmux invocation is quarantined here so a future
 non-POSIX backend (an eventual native-Windows "psmux") can replace it wholesale.
 See :mod:`.multiplexer` for the contract.
 
-Phase 1 implements the subset the generic adapter drives plus the parked-window
-trailer; the remaining operations are stubbed and filled as the other call sites
-(``runs.py``, ``tui/launch.py``, ``probe.py``, ``tui/data.py``) migrate in Phase 2.
+Phase 1 implemented the subset the generic adapter drives plus the parked-window
+trailer; Phase 2 fills in the rest as the other call sites (``runs.py``,
+``tui/launch.py``, ``probe.py``, ``tui/data.py``) migrate onto the seam.
 """
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
 import time
 from pathlib import Path
 
-from .multiplexer import TerminalMultiplexer
+from .multiplexer import MultiplexerError, TerminalMultiplexer
 
 TMUX_TIMEOUT_S = 30
 # Per-window option value (vs a pane id) telling the parked trailer to detach the
@@ -26,7 +27,7 @@ TMUX_TIMEOUT_S = 30
 PARKED_RETURN_DETACH = "detach"
 
 
-class TmuxError(Exception):
+class TmuxError(MultiplexerError):
     pass
 
 
@@ -49,20 +50,14 @@ class TmuxMultiplexer(TerminalMultiplexer):
         )
         return probe.returncode == 0
 
-    def new_session(self, name: str, cwd: Path, cols: int, lines: int) -> None:
+    def new_session(
+        self, name: str, cwd: Path, cols: int | None = None, lines: int | None = None
+    ) -> None:
         # Window 0 is a plain shell so the session survives task windows closing.
-        self._tmux(
-            "new-session",
-            "-d",
-            "-s",
-            name,
-            "-c",
-            str(cwd),
-            "-x",
-            str(cols),
-            "-y",
-            str(lines),
-        )
+        # Geometry is pinned only when both dimensions are given (detached agent
+        # sessions); the control session omits it and takes tmux's default size.
+        geometry = ["-x", str(cols), "-y", str(lines)] if cols and lines else []
+        self._tmux("new-session", "-d", "-s", name, "-c", str(cwd), *geometry)
 
     def set_session_option(self, name: str, option: str, value: str) -> None:
         # set-option has no '=' exact-match form; callers pass a unique full
@@ -70,13 +65,60 @@ class TmuxMultiplexer(TerminalMultiplexer):
         self._tmux("set-option", "-t", name, option, value)
 
     def kill_session(self, name: str) -> None:
-        raise NotImplementedError("kill_session: Phase 2")  # Phase 2: runs.py
+        # Tolerant of tmux being absent / the session already gone: a best-effort
+        # teardown backstop, never a hard failure.
+        if not shutil.which("tmux"):
+            return
+        try:
+            subprocess.run(
+                ["tmux", "kill-session", "-t", f"={name}"],
+                capture_output=True,
+                timeout=TMUX_TIMEOUT_S,
+            )
+        except (subprocess.SubprocessError, OSError):
+            pass
 
     def list_sessions(self) -> list[str]:
-        raise NotImplementedError("list_sessions: Phase 2")  # Phase 2: runs.py
+        # [] when tmux is missing, no server is running, or the query fails — the
+        # absence of sessions and the absence of tmux are indistinguishable here
+        # and callers treat both as "nothing live".
+        if not shutil.which("tmux"):
+            return []
+        try:
+            proc = subprocess.run(
+                ["tmux", "list-sessions", "-F", "#{session_name}"],
+                capture_output=True,
+                text=True,
+                timeout=TMUX_TIMEOUT_S,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return []
+        if proc.returncode != 0:  # no server / no sessions
+            return []
+        return [line for line in proc.stdout.splitlines() if line]
 
     def session_options(self, option: str) -> dict[str, str]:
-        raise NotImplementedError("session_options: Phase 2")  # Phase 2: runs.py
+        # Map session name -> value of ``option`` ("" when unset). Same missing
+        # tmux / no-server tolerance as list_sessions().
+        if not shutil.which("tmux"):
+            return {}
+        try:
+            proc = subprocess.run(
+                ["tmux", "list-sessions", "-F", f"#{{session_name}}\t#{{{option}}}"],
+                capture_output=True,
+                text=True,
+                timeout=TMUX_TIMEOUT_S,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return {}
+        if proc.returncode != 0:  # no server / no sessions
+            return {}
+        options: dict[str, str] = {}
+        for line in proc.stdout.splitlines():
+            name, _, value = line.partition("\t")
+            if name:
+                options[name] = value
+        return options
 
     # ------------------------------------------------------------ windows
 
@@ -177,39 +219,106 @@ class TmuxMultiplexer(TerminalMultiplexer):
         )
 
     def list_windows(self, session: str, fields: list[str]) -> list[tuple[str, ...]]:
-        raise NotImplementedError("list_windows: Phase 2")  # Phase 2: tui/launch.py
+        fmt = "\t".join(f"#{{{field}}}" for field in fields)
+        probe = subprocess.run(
+            ["tmux", "list-windows", "-t", f"={session}", "-F", fmt],
+            capture_output=True,
+            text=True,
+            timeout=TMUX_TIMEOUT_S,
+        )
+        if probe.returncode != 0:
+            return []
+        rows: list[tuple[str, ...]] = []
+        for line in probe.stdout.splitlines():
+            parts = line.split("\t")
+            parts += [""] * (len(fields) - len(parts))  # tolerate unset trailing fields
+            rows.append(tuple(parts[: len(fields)]))
+        return rows
 
     def window_alive(self, session: str, window_id: str) -> bool:
-        raise NotImplementedError("window_alive: Phase 2")  # Phase 2: probe.py, tui/data.py
+        return window_id in self.list_window_ids(session)
 
     def select_window(self, target: str) -> None:
-        raise NotImplementedError("select_window: Phase 2")  # Phase 2: tui/launch.py
+        subprocess.run(
+            ["tmux", "select-window", "-t", target],
+            capture_output=True,
+            timeout=TMUX_TIMEOUT_S,
+        )
 
     def set_window_option(self, target: str, option: str, value: str) -> None:
-        raise NotImplementedError("set_window_option: Phase 2")  # Phase 2: tui/launch.py
+        subprocess.run(
+            ["tmux", "set-option", "-w", "-t", target, option, value],
+            capture_output=True,
+            timeout=TMUX_TIMEOUT_S,
+        )
+
+    def unset_window_option(self, target: str, option: str) -> None:
+        subprocess.run(
+            ["tmux", "set-option", "-wu", "-t", target, option],
+            capture_output=True,
+            timeout=TMUX_TIMEOUT_S,
+        )
 
     def show_window_option(self, target: str, option: str) -> str:
-        raise NotImplementedError("show_window_option: Phase 2")  # Phase 2: tui/launch.py
+        proc = subprocess.run(
+            ["tmux", "show-options", "-wqv", "-t", target, option],
+            capture_output=True,
+            text=True,
+            timeout=TMUX_TIMEOUT_S,
+        )
+        return proc.stdout.strip() if proc.returncode == 0 else ""
 
     # ----------------------------------------------------- client / attach
 
     def attach_target_argv(self, target: str) -> list[str]:
-        raise NotImplementedError("attach_target_argv: Phase 2")  # Phase 2: runs.py
+        # Inside tmux, nesting an attach is refused, so switch this client
+        # instead (a `switch-client -l` brings it back).
+        if os.environ.get("TMUX"):
+            return ["tmux", "switch-client", "-t", target]
+        return ["tmux", "attach", "-t", target]
 
     def current_pane_id(self) -> str | None:
-        raise NotImplementedError("current_pane_id: Phase 2")  # Phase 2: tui/launch.py
+        return self._display_message("#{pane_id}")
 
     def current_window_id(self) -> str | None:
-        raise NotImplementedError("current_window_id: Phase 2")  # Phase 2: tui/launch.py
+        return self._display_message("#{window_id}")
 
     def current_session(self) -> str | None:
-        raise NotImplementedError("current_session: Phase 2")  # Phase 2: tui/launch.py
+        return self._display_message("#{session_name}")
+
+    def _display_message(self, fmt: str) -> str | None:
+        """Resolve a tmux format string against this process's client, or None
+        when not inside tmux / tmux is unavailable."""
+        try:
+            proc = subprocess.run(
+                ["tmux", "display-message", "-p", fmt],
+                capture_output=True,
+                text=True,
+                timeout=TMUX_TIMEOUT_S,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return None
+        return proc.stdout.strip() if proc.returncode == 0 else None
 
     def detach_client(self) -> None:
-        raise NotImplementedError("detach_client: Phase 2")  # Phase 2: tui/launch.py
+        subprocess.run(["tmux", "detach-client"], capture_output=True, timeout=TMUX_TIMEOUT_S)
 
     def switch_client(self, target: str, last_fallback: bool = False) -> bool:
-        raise NotImplementedError("switch_client: Phase 2")  # Phase 2: tui/launch.py
+        proc = subprocess.run(
+            ["tmux", "switch-client", "-t", target],
+            capture_output=True,
+            timeout=TMUX_TIMEOUT_S,
+        )
+        if proc.returncode == 0:
+            return True
+        if last_fallback:
+            fb = subprocess.run(
+                ["tmux", "switch-client", "-l"],
+                capture_output=True,
+                timeout=TMUX_TIMEOUT_S,
+            )
+            return fb.returncode == 0
+        return False
 
     def available(self) -> bool:
         return shutil.which("tmux") is not None

@@ -19,14 +19,20 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 
+class MultiplexerError(Exception):
+    """A transport-backend operation failed. Backends raise a subclass (e.g.
+    :class:`~.tmux_backend.TmuxError`) so call sites can catch the seam-level type
+    without importing a backend."""
+
+
 class TerminalMultiplexer(ABC):
     """Transport backend for agent sessions: sessions, windows, and clients.
 
     A backend must shell out to (or otherwise drive) exactly one multiplexer and
     nothing else — it is the single place POSIX-shell / tmux knowledge is allowed
-    to live. The full surface below is the contract; Phase 1 wires only the subset
-    the generic adapter needs, and the remaining operations are implemented as the
-    other call sites migrate in Phase 2.
+    to live. The full surface below is the contract; Phase 1 wired only the subset
+    the generic adapter needs, and Phase 2 fills in the rest as ``runs.py``,
+    ``tui/launch.py``, ``probe.py``, and ``tui/data.py`` migrate onto it.
     """
 
     # ----------------------------------------------------------- sessions
@@ -36,9 +42,14 @@ class TerminalMultiplexer(ABC):
         """True iff a session named exactly ``name`` exists."""
 
     @abstractmethod
-    def new_session(self, name: str, cwd: Path, cols: int, lines: int) -> None:
-        """Create a detached session with a single shell window of the given
-        geometry, rooted at ``cwd``."""
+    def new_session(
+        self, name: str, cwd: Path, cols: int | None = None, lines: int | None = None
+    ) -> None:
+        """Create a detached session with a single shell window rooted at ``cwd``.
+        When ``cols``/``lines`` are given the session is pinned to that geometry
+        (agent sessions are observed detached, so their pane size must be fixed);
+        omit both for a session whose size is irrelevant (e.g. the control session,
+        which is only ever attached, and an attaching client resizes it anyway)."""
 
     @abstractmethod
     def kill_session(self, name: str) -> None:
@@ -98,6 +109,11 @@ class TerminalMultiplexer(ABC):
     @abstractmethod
     def set_window_option(self, target: str, option: str, value: str) -> None:
         """Set a user option on the targeted window."""
+
+    @abstractmethod
+    def unset_window_option(self, target: str, option: str) -> None:
+        """Remove a user option from the targeted window (so a later read sees it
+        as unset, not as an empty value)."""
 
     @abstractmethod
     def show_window_option(self, target: str, option: str) -> str:

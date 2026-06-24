@@ -16,8 +16,6 @@ from __future__ import annotations
 import bisect
 import json
 import os
-import shutil
-import subprocess
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +26,7 @@ from rich.style import Style
 from rich.text import Text
 
 from .. import bmadconfig, deferredwork, sprintstatus
+from ..adapters.multiplexer import get_multiplexer
 from ..gates import ATTENTION_FILE
 from ..journal import JOURNAL_FILE, LOGS_DIR, STATE_FILE, load_state
 from ..model import RunState
@@ -59,7 +58,7 @@ def liveness(run_dir: Path) -> str:
     """'alive' | 'dead' | 'unknown' for the engine that owns run_dir.
 
     engine.pid is authoritative (written at run/sweep/resume start, never
-    deleted). Legacy runs without one fall back to the per-run tmux session —
+    deleted). Legacy runs without one fall back to the per-run agent session —
     but that session only exists while an agent session runs, so its absence
     proves nothing: 'unknown', never falsely dead. Pid checks are local-only;
     runs on other hosts always come back 'unknown'.
@@ -67,7 +66,7 @@ def liveness(run_dir: Path) -> str:
     try:
         pid = int((run_dir / PID_FILE).read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
-        return _tmux_liveness(run_dir.name)
+        return _session_liveness(run_dir.name)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -79,18 +78,16 @@ def liveness(run_dir: Path) -> str:
     return "alive"
 
 
-def _tmux_liveness(run_id: str) -> str:
-    if not shutil.which("tmux"):
+def _session_liveness(run_id: str) -> str:
+    # An absent multiplexer / dead query proves nothing about a legacy run, so the
+    # only positive signal is a live session; everything else is 'unknown'.
+    mux = get_multiplexer()
+    if not mux.available():
         return "unknown"
     try:
-        proc = subprocess.run(
-            ["tmux", "has-session", "-t", f"={session_name(run_id)}"],
-            capture_output=True,
-            timeout=5,
-        )
-    except (subprocess.SubprocessError, OSError):
+        return "alive" if mux.has_session(session_name(run_id)) else "unknown"
+    except OSError:
         return "unknown"
-    return "alive" if proc.returncode == 0 else "unknown"
 
 
 def _classify(finished: bool, paused: bool, stopped: bool, run_dir: Path) -> str:
