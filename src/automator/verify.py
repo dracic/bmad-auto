@@ -130,6 +130,21 @@ def has_changes_since(repo: Path, baseline: str) -> bool:
     return rc == 0 and out != ""
 
 
+def attempt_dirty(repo: Path, baseline: str, baseline_untracked: list[str] | None) -> bool:
+    """True if a `safe_rollback` to `baseline` would change anything: tracked
+    changes since baseline, or untracked files created since the baseline
+    snapshot. `baseline_untracked=None` (a pre-snapshot run) means untracked
+    files are never this attempt's to remove, so only tracked diff counts. This
+    mirrors `safe_rollback`'s notion of what *this attempt* touched, so callers
+    can skip a no-op reset/pause when the tree is already at baseline."""
+    rc, _ = _git(repo, "diff", "--quiet", baseline, "--")
+    if rc != 0:
+        return True
+    if baseline_untracked is None:
+        return False
+    return bool(untracked_files(repo) - set(baseline_untracked))
+
+
 def untracked_files(repo: Path) -> set[str]:
     """Untracked, non-ignored paths (repo-relative posix), mirroring what a
     plain `git clean -fd` (no -x) treats as removable. Ignored files are

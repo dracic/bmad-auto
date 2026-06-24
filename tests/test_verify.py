@@ -15,6 +15,45 @@ def dev_result(sp):
     return {"workflow": "auto-dev", "spec_file": str(sp)}
 
 
+def test_attempt_dirty_clean_tree(project):
+    """At baseline with no changes — nothing for a rollback to undo."""
+    baseline = verify.rev_parse_head(project.project)
+    assert verify.attempt_dirty(project.project, baseline, []) is False
+
+
+def test_attempt_dirty_tracked_change(project):
+    """A modified tracked file is a tracked diff vs baseline."""
+    baseline = verify.rev_parse_head(project.project)
+    (project.project / "src.txt").write_text("changed\n")
+    assert verify.attempt_dirty(project.project, baseline, []) is True
+
+
+def test_attempt_dirty_run_created_untracked(project):
+    """An untracked file absent from the baseline snapshot was created by this
+    attempt → dirty."""
+    baseline = verify.rev_parse_head(project.project)
+    (project.project / "new.txt").write_text("fresh\n")
+    assert verify.attempt_dirty(project.project, baseline, []) is True
+
+
+def test_attempt_dirty_preexisting_untracked_ignored(project):
+    """An untracked file already in the baseline snapshot is the user's, not this
+    attempt's — clean."""
+    baseline = verify.rev_parse_head(project.project)
+    (project.project / "keep.txt").write_text("mine\n")
+    assert verify.attempt_dirty(project.project, baseline, ["keep.txt"]) is False
+
+
+def test_attempt_dirty_none_snapshot_ignores_untracked(project):
+    """No snapshot (pre-upgrade run): untracked files never count, only tracked
+    diff does."""
+    baseline = verify.rev_parse_head(project.project)
+    (project.project / "new.txt").write_text("fresh\n")
+    assert verify.attempt_dirty(project.project, baseline, None) is False
+    (project.project / "src.txt").write_text("changed\n")
+    assert verify.attempt_dirty(project.project, baseline, None) is True
+
+
 def test_verify_dev_happy(project):
     write_sprint(project, {"1-1-a": "review"})
     task = make_task(project)

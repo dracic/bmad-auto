@@ -17,13 +17,15 @@ from conftest import (
 
 from automator.adapters.base import SessionResult
 from automator.adapters.mock import MockAdapter
-from automator.engine import Engine, RunStopped
+from automator.engine import Engine, RunPaused, RunStopped
 from automator.journal import Journal, load_state
 from automator.model import (
     PAUSE_EPIC_BOUNDARY,
+    PAUSE_ESCALATION,
     PAUSE_SPEC_APPROVAL,
     Phase,
     RunState,
+    StoryTask,
     TokenUsage,
 )
 from automator.policy import (
@@ -37,6 +39,7 @@ from automator.policy import (
     SweepPolicy,
     VerifyPolicy,
 )
+from automator.runs import rearm_escalation
 from automator.verify import rev_parse_head, worktree_clean
 
 QUIET = NotifyPolicy(desktop=False, file=True)
@@ -539,7 +542,6 @@ def test_defer_preserves_deferred_work_additions(project):
 def test_rollback_off_pauses_with_manual_notice(project):
     """Production default (rollback_on_failure=False): a would-be defer reset
     never touches the tree — it pauses with bold manual-recovery instructions."""
-    from automator.model import PAUSE_ESCALATION
 
     write_sprint(project, {"1-1-a": "ready-for-dev"})
     policy = Policy(
@@ -562,6 +564,7 @@ def test_rollback_off_pauses_with_manual_notice(project):
     assert state.paused_stage == PAUSE_ESCALATION
     reason = state.paused_reason.lower()
     assert "manual rollback" in reason and "back up" in reason
+    assert "failed" not in reason  # a stopped attempt is not described as "failed"
     # the orchestrator left the tree exactly as-is — no reset, nothing deleted
     assert not worktree_clean(project.project)
     assert precious.read_text() == "precious\n"
@@ -592,6 +595,90 @@ def test_rollback_on_preserves_preexisting_untracked(project):
     task = engine.state.tasks["1-1-a"]
     assert rev_parse_head(project.project) == task.baseline_commit  # tracked reverted
     assert precious.read_text() == "keep me\n"  # pre-existing untracked survives
+
+
+def test_rollback_or_pause_skips_clean_tree(project):
+    """When the attempt left nothing in the tree (HEAD == baseline, no run-created
+    untracked files), there is nothing to roll back: even with auto-rollback OFF
+    the orchestrator neither pauses nor touches the tree — it just journals and
+    returns, so resume can proceed."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=False),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    task = StoryTask(story_key="1-1-a", epic=1)
+    task.baseline_commit = rev_parse_head(project.project)  # clean tree at baseline
+    task.baseline_untracked = []
+
+    engine._rollback_or_pause(task)  # must NOT raise RunPaused
+
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "rollback-skipped-clean" in kinds
+    assert "rollback-manual-required" not in kinds
+
+
+def test_manual_recovery_wording_resolved_vs_stopped(project):
+    """The manual-recovery notice never claims the story 'failed', and reflects
+    the real cause: a resolved escalation re-driving vs. a stopped attempt."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=False),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    task = StoryTask(story_key="1-1-a", epic=1)
+    baseline = rev_parse_head(project.project)
+
+    with pytest.raises(RunPaused) as resolved:
+        engine._pause_for_manual_recovery(task, baseline, cause="resolved")
+    with pytest.raises(RunPaused) as stopped:
+        engine._pause_for_manual_recovery(task, baseline, cause="stopped")
+
+    for exc in (resolved, stopped):
+        assert "failed" not in exc.value.reason
+        assert "manual rollback" in exc.value.reason.lower()
+    assert "escalation was resolved" in resolved.value.reason
+    assert "attempt was stopped" in stopped.value.reason
+
+
+def test_resolved_escalation_resume_skips_clean_rollback(project):
+    """End-to-end regression for the resume loop: a CRITICAL escalation that left
+    a clean tree, once resolved (re-armed) and resumed, must NOT demand a manual
+    rollback — it skips the no-op rollback and re-drives the corrected story."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    escalating = SessionResult(
+        status="completed",
+        result_json={
+            "workflow": "auto-dev",
+            "escalations": [{"type": "missing-config", "severity": "CRITICAL", "detail": "boom"}],
+        },
+    )
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=False),  # production default
+    )
+    engine, _ = make_engine(project, [escalating], policy=policy)
+    summary = engine.run()
+    assert summary.paused and summary.escalated == 1
+    assert load_state(engine.run_dir).tasks["1-1-a"].phase == Phase.ESCALATED
+
+    rearm_escalation(engine.run_dir)  # the resolve workflow's re-arm step
+
+    resumed, _ = resume_engine(
+        project,
+        engine,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+        policy=policy,
+    )
+    summary2 = resumed.run()
+
+    assert summary2.done == 1 and not summary2.paused  # re-drove, no manual-rollback loop
+    kinds = [e["kind"] for e in resumed.journal.entries()]
+    assert "rollback-skipped-clean" in kinds
+    assert "rollback-manual-required" not in kinds
 
 
 def test_dev_stall_retries_then_succeeds(project):

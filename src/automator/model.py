@@ -135,6 +135,11 @@ class StoryTask:
     spec_file: str | None = None
     commit_sha: str | None = None
     defer_reason: str | None = None
+    # set by runs.rearm_escalation: this task was re-armed out of ESCALATED for a
+    # clean rebuild against the corrected spec (not a failed attempt). Lets the
+    # resume-time manual-recovery notice describe the real cause; cleared once the
+    # rebuild proceeds. Survives the resume serialization round-trip.
+    rearmed: bool = False
     # sweep bundles only: the deferred-work ids this task closes and the
     # rendered intent file handed to dev sessions
     dw_ids: list[str] = field(default_factory=list)
@@ -169,6 +174,7 @@ class StoryTask:
             "spec_file": self._serialized_spec_file(),
             "commit_sha": self.commit_sha,
             "defer_reason": self.defer_reason,
+            "rearmed": self.rearmed,
             "dw_ids": self.dw_ids,
             "bundle_file": self.bundle_file,
             "worktree_path": self.worktree_path,
@@ -207,6 +213,7 @@ class StoryTask:
             spec_file=d.get("spec_file"),
             commit_sha=d.get("commit_sha"),
             defer_reason=d.get("defer_reason"),
+            rearmed=bool(d.get("rearmed", False)),
             dw_ids=[str(i) for i in d.get("dw_ids", [])],
             bundle_file=d.get("bundle_file"),
             worktree_path=str(d.get("worktree_path", "")),

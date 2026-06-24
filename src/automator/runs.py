@@ -488,6 +488,8 @@ def rearm_escalation(run_dir: Path, story_key: str | None = None) -> str:
     task.attempt = 0
     task.review_cycle = 0
     task.defer_reason = None
+    task.rearmed = True  # resume-time recovery notice describes a clean rebuild,
+    # not a failed attempt (engine._finish_inflight clears it once the rebuild runs)
 
     if task.spec_file:
         # route /bmad-dev-auto to re-implement (decision table: ready-for-dev

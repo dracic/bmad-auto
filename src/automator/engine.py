@@ -637,19 +637,30 @@ class Engine:
                 continue
             return story
 
-    def _rollback_or_pause(self, task: StoryTask) -> None:
-        """Recover from a failed in-place attempt.
+    def _rollback_or_pause(self, task: StoryTask, *, cause: str = "stopped") -> None:
+        """Recover from an in-place attempt that won't proceed.
 
-        With ``scm.rollback_on_failure`` OFF (default) the orchestrator never
-        touches the working tree: it emits a bold manual-recovery notice and
+        No-op when the tree is already at the attempt's baseline (nothing this
+        attempt touched): neither a reset nor a pause is needed. This is also
+        what lets the manual-recovery instructions terminate — after the operator
+        resets and resumes, the now-clean tree skips straight through instead of
+        re-pausing on the still-set ``baseline_commit``.
+
+        Otherwise, with ``scm.rollback_on_failure`` OFF (default) the orchestrator
+        never touches the working tree: it emits a bold manual-recovery notice and
         pauses the run (stop-and-wait), so nothing proceeds on a half-finished
         tree. With it ON, it does the safest possible automatic rollback —
         revert the attempt's tracked changes to baseline and delete only the
         untracked files this run created (the whole BMAD output folder and every
         pre-existing untracked file are preserved; there is no blanket
-        ``git clean``)."""
+        ``git clean``). ``cause`` tunes the manual notice's wording."""
+        if task.baseline_commit and not verify.attempt_dirty(
+            self.workspace.root, task.baseline_commit, task.baseline_untracked
+        ):
+            self.journal.append("rollback-skipped-clean", story_key=task.story_key)
+            return
         if not self.policy.scm.rollback_on_failure:
-            self._pause_for_manual_recovery(task, task.baseline_commit or "")
+            self._pause_for_manual_recovery(task, task.baseline_commit or "", cause=cause)
             return  # unreachable: _pause_for_manual_recovery always raises
         self.journal.append(
             "rollback-auto",
@@ -682,14 +693,29 @@ class Engine:
             keep=tuple(keep),
         )
 
-    def _pause_for_manual_recovery(self, task: StoryTask, baseline: str) -> None:
+    def _pause_for_manual_recovery(
+        self, task: StoryTask, baseline: str, *, cause: str = "stopped"
+    ) -> None:
         """OFF path: leave the tree untouched, surface bold manual-recovery
-        instructions, and pause the run. Always raises RunPaused."""
+        instructions, and pause the run. Always raises RunPaused. ``cause``
+        selects the wording: ``"resolved"`` for an escalation re-armed into a
+        clean rebuild, anything else for a stopped/abandoned attempt."""
         short = baseline[:12] or "the run's baseline commit"
+        if cause == "resolved":
+            why = (
+                f"Story **{task.story_key}**'s escalation was resolved; re-driving "
+                "it needs a clean baseline, but auto-rollback is OFF, so the "
+                "working tree was left exactly as-is for you to inspect.\n"
+            )
+        else:
+            why = (
+                f"Story **{task.story_key}**'s attempt was stopped and auto-rollback "
+                "is OFF, so the working tree was left exactly as-is for you to "
+                "inspect.\n"
+            )
         notice = (
             "**ACTION REQUIRED — manual rollback needed**\n"
-            f"Story **{task.story_key}** failed and auto-rollback is OFF, so the "
-            "working tree was left exactly as-is for you to inspect.\n"
+            f"{why}"
             "To discard this attempt yourself:\n"
             "  1. **BACK UP any untracked files you want to keep** — the reset "
             "below deletes uncommitted work.\n"
@@ -741,7 +767,8 @@ class Engine:
                     task.worktree_path = ""
                     task.branch = ""
                 elif task.baseline_commit:
-                    self._rollback_or_pause(task)
+                    self._rollback_or_pause(task, cause="resolved" if task.rearmed else "stopped")
+                task.rearmed = False  # past rollback (only reached when not paused)
                 task.phase = Phase.PENDING  # deliberate reset, not a normal transition
                 self._save()
                 self._run_story(task)

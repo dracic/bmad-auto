@@ -45,6 +45,19 @@ breaking changes may land in a minor release.
   upstream `bmad-dev-auto` skill (from a recent bmm module) is a hard prerequisite. `deferred-work-format.md`
   moved into `bmad-auto-review/` — it is a sibling dependency of the review and sweep skills, not dev.
 
+### Fixed
+
+- **Resolving a CRITICAL escalation no longer loops on a manual-rollback prompt.** Re-arming an
+  escalation requests a clean rebuild, which in non-worktree (in-place) runs means resetting to the
+  story baseline. With the default `scm.rollback_on_failure = false` the orchestrator paused for a
+  manual reset — but never cleared `baseline_commit`, so following the instructions (`git reset --hard`,
+  then `resume`) re-paused on the next resume, an endless loop. `_rollback_or_pause` now no-ops when the
+  tree is already at baseline (nothing this attempt touched), so a clean tree — including one the
+  operator just reset — proceeds straight to the re-drive. The same guard suppresses the spurious prompt
+  when an escalation left no changes at all.
+- **Manual-recovery notice wording.** The prompt no longer claims the story "failed" — it now reflects
+  the real cause ("escalation was resolved; re-driving needs a clean baseline" vs. "attempt was stopped").
+
 ## [0.6.4] — 2026-06-21
 
 ### Fixed
