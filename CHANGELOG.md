@@ -9,6 +9,12 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **The Log tab no longer renders whole CLI sessions underlined.** Modern CLIs emit an XTMODKEYS
+  sequence (`CSI > 4 ; 2 m`, "modifyOtherKeys") at startup that the pane emulator (pyte) misread as
+  SGR 4 / underline-on — with no matching off present in a live capture — so every line came out
+  underlined and hard to read. The log view now strips private-marker CSI sequences before emulation;
+  genuine color, bold, and properly-closed underline styling is preserved.
+
 - **Resolving a CRITICAL escalation no longer loops on a manual-rollback prompt when the resolve
   edited the spec.** 0.7.0 fixed the loop only for an already-clean tree, but the resolve workflow's
   whole job is to correct the frozen spec under the BMAD artifact folder (`_bmad-output/...`, which is
