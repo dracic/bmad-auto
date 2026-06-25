@@ -671,6 +671,37 @@ def test_rollback_or_pause_resolved_auto_recovers(project):
     assert "rollback-manual-required" not in kinds
 
 
+def test_resolved_redrive_preserves_spec_on_later_rollback(project):
+    """Regression: once a resolved re-drive latches `resolved_redrive`, a *later*
+    mid-re-drive rollback (default cause="stopped", rollback_on_failure ON) must
+    still preserve the corrected spec under the artifact folder — not just the
+    first resume-time reset. Without the latch this reset ran with preserve=()
+    and silently reverted the human correction, looping the re-drive."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),  # ON: a stopped attempt resets
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    repo = project.project
+    task = StoryTask(story_key="1-1-a", epic=1)
+    task.baseline_commit = rev_parse_head(repo)
+    task.baseline_untracked = []
+    task.resolved_redrive = True  # latched by _finish_inflight on the re-drive
+
+    (repo / "src.txt").write_text("re-drive dev work\n")  # this attempt's source
+    spec = project.implementation_artifacts / "spec-1-1-a.md"
+    spec.write_text("frozen: corrected by resolve\n")  # the human correction
+
+    engine._rollback_or_pause(task)  # default cause="stopped"; must NOT pause
+
+    assert (repo / "src.txt").read_text() == "original\n"  # source reverted
+    assert spec.read_text() == "frozen: corrected by resolve\n"  # correction kept
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "rollback-auto" in kinds
+    assert "rollback-manual-required" not in kinds
+
+
 def test_resolved_escalation_resume_skips_clean_rollback(project):
     """End-to-end regression for the resume loop: a CRITICAL escalation that left
     a clean tree, once resolved (re-armed) and resumed, must NOT demand a manual

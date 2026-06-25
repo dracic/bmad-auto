@@ -395,6 +395,56 @@ def test_safe_rollback_preserves_tracked_artifact(project):
     assert spec.read_text() == "frozen: corrected\n"  # spec correction preserved
 
 
+def test_safe_rollback_raises_on_genuine_restore_failure(project, monkeypatch):
+    """A non-benign `git checkout` failure while restoring a `preserve` path must
+    raise — not silently drop the correction (which would loop the re-drive). The
+    benign 'pathspec did not match' case is tolerated; anything else is loud."""
+    repo = project.project
+    spec = project.implementation_artifacts / "spec-1-1-a.md"
+    spec.write_text("frozen: original\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "spec")
+    baseline = verify.rev_parse_head(repo)
+    snap = sorted(verify.untracked_files(repo))
+    artifact_rel = project.implementation_artifacts.relative_to(repo).as_posix()
+    spec.write_text("frozen: corrected\n")
+
+    real_git = verify._git
+
+    def fake_git(r, *args):
+        if args[:1] == ("checkout",):  # the restore step only
+            return 1, "fatal: unable to read tree (something broke)"
+        return real_git(r, *args)
+
+    monkeypatch.setattr(verify, "_git", fake_git)
+    with pytest.raises(verify.GitError, match="git checkout"):
+        verify.safe_rollback(
+            repo,
+            baseline,
+            baseline_untracked=snap,
+            keep=(".automator", artifact_rel),
+            preserve=(artifact_rel,),
+        )
+
+
+def test_safe_rollback_tolerates_empty_preserve_dir(project):
+    """A `preserve` dir with no tracked content in the snapshot makes checkout exit
+    non-zero ('did not match') — benign, must NOT raise."""
+    repo = project.project
+    baseline = verify.rev_parse_head(repo)
+    snap = sorted(verify.untracked_files(repo))
+    (repo / "src.txt").write_text("dev attempt\n")
+
+    verify.safe_rollback(
+        repo,
+        baseline,
+        baseline_untracked=snap,
+        keep=(".automator", "_bmad-output"),
+        preserve=("_bmad-output",),  # no tracked files here at snapshot time
+    )
+    assert (repo / "src.txt").read_text() == "original\n"  # source still reverted
+
+
 def test_worktree_clean_ignores_policy_file(project):
     # A tracked-but-modified .automator/policy.toml (rewritten by the TUI
     # settings editor) must not count as a dirty tree, or every settings edit

@@ -218,10 +218,14 @@ def safe_rollback(
         raise GitError(f"git reset --hard {baseline} failed: {out}")
     if preserve and snapshot:
         # Restore each artifact path's pre-reset content from the snapshot tree.
-        # Best-effort per-path: a dir with no tracked files in the snapshot makes
-        # `git checkout` exit non-zero ("pathspec did not match") — not an error.
+        # A dir with no tracked files in the snapshot makes `git checkout` exit
+        # non-zero ("pathspec did not match") — that's benign. Any other failure
+        # means the corrected artifact wasn't restored: raise instead of silently
+        # losing it (which would regress the resolved re-drive into a recovery loop).
         for d in preserve:
-            _git(repo, "checkout", snapshot, "--", d)
+            rc, out = _git(repo, "checkout", snapshot, "--", d)
+            if rc != 0 and "did not match" not in out:
+                raise GitError(f"git checkout {snapshot[:12]} -- {d} failed: {out}")
     if baseline_untracked is None:
         return  # no snapshot to diff against: never delete untracked files
     created = untracked_files(repo) - set(baseline_untracked)

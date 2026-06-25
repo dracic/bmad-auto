@@ -23,11 +23,18 @@ breaking changes may land in a minor release.
   the frozen `baseline_commit`, even committing the spec re-paused on the next resume, an endless loop.
   A resolved re-drive is human-initiated, so it now always auto-recovers regardless of the flag: the
   BMAD artifact folders are treated as orchestrator-owned — excluded from the dirty check and preserved
-  through the reset — so the spec correction survives while the failed attempt's source changes revert
-  to baseline. This also fixes a latent sibling bug: with `rollback_on_failure = true` the reset
-  previously reverted the just-corrected spec silently. `scm.rollback_on_failure` still defaults OFF and
-  now governs only unattended/stopped attempts; the manual-recovery notice (reached by stopped attempts
-  only now) drops its resolved-cause wording.
+  through every reset of the re-drive (not just the resume-time cleanup) — so the spec correction
+  survives while the failed attempt's source changes revert to baseline. This closes a latent sibling
+  bug: with `rollback_on_failure = true` a _later_ mid-re-drive retry/defer reset previously ran with no
+  preserve set and reverted the just-corrected spec silently, looping the re-drive.
+  `scm.rollback_on_failure` still defaults OFF and now governs only unattended/stopped attempts; the
+  manual-recovery notice (reached by stopped attempts only now) drops its resolved-cause wording.
+
+- **A failed artifact restore during rollback now surfaces instead of silently dropping the
+  correction.** When `safe_rollback` restores the preserved BMAD folders from its pre-reset snapshot, a
+  genuine `git checkout` failure (corrupt snapshot, lock, IO) was swallowed alongside the benign
+  empty-dir "pathspec did not match" case — so a corrected spec could vanish with no error and loop the
+  re-drive. Real failures now raise; the empty-dir case stays tolerated.
 
 ## [0.7.0] — 2026-06-24
 

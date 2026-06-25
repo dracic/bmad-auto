@@ -667,10 +667,12 @@ class Engine:
 
         A ``cause="resolved"`` re-drive is human-initiated (the operator ran the
         resolve workflow and re-armed the story), so it always auto-recovers and
-        never pauses, regardless of ``scm.rollback_on_failure``. Only then are the
-        BMAD artifact folders treated as orchestrator-owned: excluded from the
-        dirty check (the corrected spec must not read as a failed attempt) and
-        preserved through the reset (so the correction survives the rebuild).
+        never pauses, regardless of ``scm.rollback_on_failure``. For the entire
+        re-drive (``task.resolved_redrive``, latched at resume and cleared once the
+        correction is committed) the BMAD artifact folders are treated as
+        orchestrator-owned: excluded from the dirty check (the corrected spec must
+        not read as a failed attempt) and preserved through every reset — so a
+        later mid-re-drive retry/defer reset can't silently revert the correction.
 
         Otherwise (a stopped/abandoned attempt) the flag governs: OFF (default)
         leaves the working tree untouched and emits a bold manual-recovery notice
@@ -678,7 +680,10 @@ class Engine:
         Either way pre-existing untracked files are preserved; there is no blanket
         ``git clean``."""
         resolved = cause == "resolved"
-        protected = self._protected_relpaths() if resolved else ()
+        # preserve the corrected spec for the whole re-drive, not just the first
+        # reset; the auto-recover (pause-vs-reset) decision below is unaffected.
+        redrive = resolved or task.resolved_redrive
+        protected = self._protected_relpaths() if redrive else ()
         if task.baseline_commit and not verify.attempt_dirty(
             self.workspace.root, task.baseline_commit, task.baseline_untracked, exclude=protected
         ):
@@ -779,6 +784,9 @@ class Engine:
                     task.worktree_path = ""
                     task.branch = ""
                 elif task.baseline_commit:
+                    # latch resolved_redrive so the corrected spec stays protected
+                    # through every reset of this re-drive, not just this first one
+                    task.resolved_redrive = task.resolved_redrive or task.rearmed
                     self._rollback_or_pause(task, cause="resolved" if task.rearmed else "stopped")
                 task.rearmed = False  # past rollback (only reached when not paused)
                 task.phase = Phase.PENDING  # deliberate reset, not a normal transition
@@ -1248,6 +1256,9 @@ class Engine:
             # was nothing to finalize (NO_VCS, or the tree already at baseline).
             sha = verify.finalize_commit(self.workspace.root, task.baseline_commit, message)
             task.commit_sha = sha or task.baseline_commit
+            # the corrected spec is now durable in HEAD; later attempts need no
+            # special preservation, so drop the re-drive latch.
+            task.resolved_redrive = False
         except verify.GitError as e:
             self._escalate(task, f"commit failed: {e}")
         advance(task, Phase.DONE)

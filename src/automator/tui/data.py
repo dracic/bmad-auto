@@ -485,6 +485,12 @@ class LogView:
             line = top.dropped + len(top) + self._screen.cursor.y
             self._checkpoints.append((self._offset, line))
         self._offset = base + consumed
+        # When a chunk is entirely an unterminated trailing CSI, consumed == 0 and
+        # _offset holds short of EOF until more bytes complete the sequence — a few
+        # held bytes re-read per poll. We deliberately don't advance past them: a
+        # log that's still streaming self-heals on the next write, and one that
+        # permanently ends mid-escape has nothing renderable there anyway (we'd
+        # only risk eating a legitimately split sequence by forcing it through).
         # drop checkpoints whose lines evicted past the history horizon;
         # their offsets would clamp to line 0 anyway
         while len(self._checkpoints) > 1 and self._checkpoints[1][1] <= top.dropped:
