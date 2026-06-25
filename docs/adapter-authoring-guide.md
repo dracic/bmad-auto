@@ -254,30 +254,30 @@ resolves to `claude`.
 
 ### `CLIProfile`
 
-| Field | Required | Default | Meaning |
-| --- | --- | --- | --- |
-| `name` | ✅ | — | Profile id, also the `--cli` value and override key. |
-| `binary` | ✅ | — | Executable to launch (resolved on `PATH`). |
-| `[hooks]` | ✅ | — | The `HookSpec` table (see below). |
-| `skill_tree` | | `.claude/skills` | Project-relative tree this CLI reads skills from (`.agents/skills` for codex/gemini); `bmad-auto init` installs the `bmad-auto-*` skills here. Must be relative. |
-| `prompt_template` | | `{prompt}` | How the canonical `/skill args` prompt is rendered. Placeholders: `{prompt}` (whole string), `{skill}` (leading slash-command name, no `/`), `{args}` (the remainder). |
-| `launch_args` | | `()` | Extra argv passed at launch, e.g. `["-i"]` to stay interactive (gemini/copilot). |
-| `bypass_args` | | `()` | Flags that bypass permission/approval prompts for unattended runs (e.g. `--allow-all-tools`). |
-| `model_flag` | | `--model` | Flag used to pass the model name when one is configured. |
-| `env` | | `{}` | Extra environment variables for the session. |
-| `usage_parser` | | `none` | Which transcript token parser to use — one of `claude-jsonl`, `codex-rollout`, `gemini-chat`, `copilot-events`, `none`. |
-| `usage_grace_s` | | `0.0` | Seconds to keep polling the transcript for token totals after the session ends. `0` = read once. Raise it for CLIs that flush totals only on shutdown (copilot writes `modelMetrics` ~1s after the turn-end hook). Must be ≥ 0. |
-| `stop_without_result_nudges` | | unset (use global) | Per-adapter floor for Stop-without-result nudges. Leave unset to inherit `limits.stop_without_result_nudges`. Raise it for CLIs that fire a turn-end hook _per response turn_ (copilot's `agentStop`), where the global default of 1 declares them stalled too early. Must be ≥ 0 if set. |
-| `first_run_note` | | `""` | Human note printed by `init` about a manual first-run/auth step this CLI needs. |
-| `seed_files` | | `()` | Project-relative gitignored configs (MCP/CLI settings) a `git worktree add` checkout omits; `provision_worktree` copies them into isolated dev/review worktrees. Must be relative. |
+| Field                        | Required | Default            | Meaning                                                                                                                                                                                                                                                                                   |
+| ---------------------------- | -------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`                       | ✅       | —                  | Profile id, also the `--cli` value and override key.                                                                                                                                                                                                                                      |
+| `binary`                     | ✅       | —                  | Executable to launch (resolved on `PATH`).                                                                                                                                                                                                                                                |
+| `[hooks]`                    | ✅       | —                  | The `HookSpec` table (see below).                                                                                                                                                                                                                                                         |
+| `skill_tree`                 |          | `.claude/skills`   | Project-relative tree this CLI reads skills from (`.agents/skills` for codex/gemini); `bmad-auto init` installs the `bmad-auto-*` skills here. Must be relative.                                                                                                                          |
+| `prompt_template`            |          | `{prompt}`         | How the canonical `/skill args` prompt is rendered. Placeholders: `{prompt}` (whole string), `{skill}` (leading slash-command name, no `/`), `{args}` (the remainder).                                                                                                                    |
+| `launch_args`                |          | `()`               | Extra argv passed at launch, e.g. `["-i"]` to stay interactive (gemini/copilot).                                                                                                                                                                                                          |
+| `bypass_args`                |          | `()`               | Flags that bypass permission/approval prompts for unattended runs (e.g. `--allow-all-tools`).                                                                                                                                                                                             |
+| `model_flag`                 |          | `--model`          | Flag used to pass the model name when one is configured.                                                                                                                                                                                                                                  |
+| `env`                        |          | `{}`               | Extra environment variables for the session.                                                                                                                                                                                                                                              |
+| `usage_parser`               |          | `none`             | Which transcript token parser to use — one of `claude-jsonl`, `codex-rollout`, `gemini-chat`, `copilot-events`, `none`.                                                                                                                                                                   |
+| `usage_grace_s`              |          | `0.0`              | Seconds to keep polling the transcript for token totals after the session ends. `0` = read once. Raise it for CLIs that flush totals only on shutdown (copilot writes `modelMetrics` ~1s after the turn-end hook). Must be ≥ 0.                                                           |
+| `stop_without_result_nudges` |          | unset (use global) | Per-adapter floor for Stop-without-result nudges. Leave unset to inherit `limits.stop_without_result_nudges`. Raise it for CLIs that fire a turn-end hook _per response turn_ (copilot's `agentStop`), where the global default of 1 declares them stalled too early. Must be ≥ 0 if set. |
+| `first_run_note`             |          | `""`               | Human note printed by `init` about a manual first-run/auth step this CLI needs.                                                                                                                                                                                                           |
+| `seed_files`                 |          | `()`               | Project-relative gitignored configs (MCP/CLI settings) a `git worktree add` checkout omits; `provision_worktree` copies them into isolated dev/review worktrees. Must be relative.                                                                                                        |
 
 ### `HookSpec` (the `[hooks]` table)
 
-| Field | Required | Meaning |
-| --- | --- | --- |
-| `dialect` | ✅ | The CLI's hook-config format — one of `claude-settings-json`, `codex-hooks-json`, `gemini-settings-json`, `copilot-settings-json`. |
-| `config_path` | ✅ | Project-relative path the hook config is written to (e.g. `.claude/settings.json`). Absolute paths are rejected. |
-| `events` | ✅ | Map of **native** event name → **canonical** event name. The canonical side must be one of `SessionStart`, `Stop`, `SessionEnd`, `PreCompact`; the native side is whatever the CLI emits (e.g. `agentStop = "Stop"`). At least one entry. |
+| Field         | Required | Meaning                                                                                                                                                                                                                                   |
+| ------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dialect`     | ✅       | The CLI's hook-config format — one of `claude-settings-json`, `codex-hooks-json`, `gemini-settings-json`, `copilot-settings-json`.                                                                                                        |
+| `config_path` | ✅       | Project-relative path the hook config is written to (e.g. `.claude/settings.json`). Absolute paths are rejected.                                                                                                                          |
+| `events`      | ✅       | Map of **native** event name → **canonical** event name. The canonical side must be one of `SessionStart`, `Stop`, `SessionEnd`, `PreCompact`; the native side is whatever the CLI emits (e.g. `agentStop = "Stop"`). At least one entry. |
 
 ### Worked TOML — copilot
 
