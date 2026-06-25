@@ -28,6 +28,10 @@ def terminate_pid(pid: int) -> None:
     existing "already gone / not ours" handling. Windows: degrades to ``taskkill``
     (the closest analogue; not exercised yet — kept guarded for the future
     native-Windows backend)."""
+    if pid <= 0:
+        # 0/negative target a process group (and 0 is the caller's own group), never
+        # a specific process — refuse so a corrupt pid file can't signal the orchestrator.
+        return
     if sys.platform == "win32":
         # portability: no os.kill(SIGTERM) on Windows — taskkill is the analogue.
         subprocess.run([_taskkill(), "/PID", str(pid)], check=False, capture_output=True)
@@ -44,6 +48,10 @@ def pid_alive(pid: int) -> bool:
     so probe with ``psutil.pid_exists`` instead. This is the single sanctioned
     ``os.kill(pid, 0)`` call site in the core — route existence checks here rather
     than calling ``os.kill`` directly."""
+    if pid <= 0:
+        # 0/negative target a process group, not a specific process — a corrupt pid
+        # file must read as "not alive", never as the caller's own group being up.
+        return False
     if sys.platform == "win32":
         return _psutil().pid_exists(pid)
     try:
