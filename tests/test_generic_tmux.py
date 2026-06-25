@@ -10,6 +10,7 @@ propagation / hook-signal waiting / kill end-to-end for any profile.
 import shutil
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +20,7 @@ from automator.adapters.generic import GenericDevAdapter, GenericTmuxAdapter
 from automator.adapters.profile import get_profile
 from automator.model import TokenUsage
 from automator.policy import LimitsPolicy, Policy
+from automator.signals import HookEvent
 
 HAVE_TMUX = shutil.which("tmux") is not None
 
@@ -158,16 +160,44 @@ def test_await_result_grace_expires_fast(tmp_path):
 # Stop event, via devcontract. These exercise that override in isolation.
 
 
-def make_dev_adapter(tmp_path):
+def make_dev_adapter(tmp_path, profile_name="claude"):
     impl = tmp_path / "impl"
     impl.mkdir()
     adapter = GenericDevAdapter(
         run_dir=tmp_path / "run",
         policy=Policy(limits=LimitsPolicy()),
-        profile=get_profile("claude"),
+        profile=get_profile(profile_name),
         impl_artifacts=impl,
     )
     return adapter, impl
+
+
+class _ScriptedWatcher:
+    """SignalWatcher stand-in: yields a scripted HookEvent per wait_for call, then
+    None. on_call(n) fires before the nth return so a test can flush an on-disk
+    artifact between events (mirrors a session writing its spec mid-run)."""
+
+    def __init__(self, events, on_call=None):
+        self._events = list(events)
+        self._on_call = on_call
+        self.calls = 0
+
+    def wait_for(self, task_id, kinds, timeout_s, since_ns=0):
+        self.calls += 1
+        if self._on_call:
+            self._on_call(self.calls)
+        return self._events.pop(0) if self._events else None
+
+
+def _stop_event(task_id, session_id, transcript_path):
+    return HookEvent(
+        ts=1,
+        event="Stop",
+        task_id=task_id,
+        session_id=session_id,
+        transcript_path=transcript_path,
+        path=Path("x"),
+    )
 
 
 def _dev_handle(launched_ns=0) -> SessionHandle:
@@ -270,6 +300,47 @@ def test_generic_dev_result_json_no_wait_reads_once(tmp_path, monkeypatch):
 def test_generic_dev_disables_nudges(tmp_path):
     adapter, _ = make_dev_adapter(tmp_path)
     assert adapter._stop_nudges == 0
+
+
+def test_wait_for_completion_skips_transcriptless_subagent_stop(tmp_path):
+    """Copilot (subagent_stop_without_transcript) fires agentStop for each subagent
+    turn with an empty transcriptPath and a tool-use session id. The dev stage runs
+    0 nudges, so without filtering that first subagent Stop would stall the run
+    outright (the v0.7.0 Copilot regression). It must be ignored, and the main
+    session's later turn-end must drive completion."""
+    adapter, impl = make_dev_adapter(tmp_path, profile_name="copilot")
+    assert adapter._stop_nudges == 0  # dev: a result-less *main* Stop is a real stall
+
+    def flush_terminal_spec(call_n):
+        # the spec lands only after the (ignored) subagent Stop — exactly as the main
+        # session writes it on its own turn-end, not on the subagent's premature one
+        if call_n == 2:
+            (impl / "spec-3-1-foo.md").write_text(
+                "---\nstatus: done\n---\n\n## Auto Run Result\n\nStatus: done\n"
+            )
+
+    adapter.watcher = _ScriptedWatcher(
+        [
+            _stop_event("3-1-dev-1", "toolu_bdrk_subagent", None),  # subagent: ignored
+            _stop_event("3-1-dev-1", "main-sess", "/run/events.jsonl"),  # main turn-end
+        ],
+        on_call=flush_terminal_spec,
+    )
+    result = adapter.wait_for_completion(_dev_handle(), _dev_spec(tmp_path))
+    assert result.status == "completed"
+    assert result.transcript_path == "/run/events.jsonl"  # main's path, not empty
+    assert result.session_id == "main-sess"  # the subagent's toolu_ id is never recorded
+
+
+def test_wait_for_completion_transcriptless_stop_is_terminal_without_flag(tmp_path):
+    """Gating: a profile without subagent_stop_without_transcript (claude) still
+    treats every Stop as the main turn-end, so a result-less one stalls the dev
+    stage (0 nudges) — the filter must not leak to other CLIs."""
+    adapter, _ = make_dev_adapter(tmp_path, profile_name="claude")
+    assert adapter.profile.subagent_stop_without_transcript is False
+    adapter.watcher = _ScriptedWatcher([_stop_event("3-1-dev-1", "sess", None)])
+    result = adapter.wait_for_completion(_dev_handle(), _dev_spec(tmp_path))
+    assert result.status == "stalled"
 
 
 def _usage_adapter(tmp_path, profile_name, **kw) -> GenericTmuxAdapter:

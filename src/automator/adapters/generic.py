@@ -173,6 +173,18 @@ class GenericAdapter(CodingCLIAdapter):
                     # died without a SessionEnd hook (killed, crashed hard)
                     return self._final(handle, spec, "crashed", session_id, transcript_path)
                 continue
+            if (
+                event.event == "Stop"
+                and self.profile.subagent_stop_without_transcript
+                and not event.transcript_path
+            ):
+                # Copilot fires agentStop for each subagent turn with an empty
+                # transcriptPath and a tool-use session id; that is not the main
+                # session's turn-end. Ignore it (before accumulating the junk
+                # session id) so a subagent's premature Stop is not read as a
+                # result-less completion -> false stall, and the main session's
+                # real transcript is preserved for usage tallying.
+                continue
             session_id = event.session_id or session_id
             transcript_path = event.transcript_path or transcript_path
 

@@ -97,6 +97,14 @@ breaking changes may land in a minor release.
   frontmatter — a second loop. The orchestrator now captures the spec the session produced when it
   escalates or defers (the synthesized result names it even on a HALT), so re-arm flips the status and
   the re-drive proceeds, and a deferred story's spec is stashed as intended.
+- **Copilot dev stage no longer stalls on a subagent `agentStop`.** Copilot fires `agentStop` for
+  every subagent turn too — with an empty `transcriptPath` and a tool-use session id, not the main
+  session's turn-end. With dev decoupled to `bmad-dev-auto` (which implements via subagents), that
+  premature Stop reached the dev stage, where 0 nudges made the orchestrator declare an outright stall
+  before the skill wrote its terminal spec (same root cause as the 0.6.4 review stall). A new
+  per-profile `subagent_stop_without_transcript` (true for `copilot`) ignores a `Stop` carrying no
+  transcript, so the main session's real turn-end drives completion — and restores usage tallying,
+  since that Stop carries the transcript.
 
 ## [0.6.4] — 2026-06-21
 
