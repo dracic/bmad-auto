@@ -38,6 +38,20 @@ breaking changes may land in a minor release.
   is purely disk-derived and is never handed the result.json (documented in
   `src/automator/data/skills/README.md`).
 
+- **Pluggable terminal-multiplexer seam (groundwork for native Windows).** All tmux usage now goes
+  through a `TerminalMultiplexer` ABC (`get_multiplexer()`); `TmuxMultiplexer` is the only code that
+  shells out to `tmux` and the only place the POSIX `sh -c` parked-window trailer lives. The generic
+  adapter (`generic_tmux.py` → `generic.py`), `runs.py`, `tui/launch.py`, `probe.py`, and `tui/data.py`
+  all route through it, so a future non-tmux backend slots in with no engine changes. Behavior on
+  Linux/macOS/WSL is byte-identical; **no native-Windows backend ships yet** (see [ROADMAP](docs/ROADMAP.md)).
+
+- **POSIX portability hardening + CI guard.** Scattered POSIX-only primitives are guarded behind a
+  platform seam — `SIGKILL` fallback, detach kwargs, `terminate_pid`, `os.devnull` — and the Unity
+  plugin degrades off Linux (`/proc` → `psutil` via a new optional `windows` extra, `/tmp`, `cp -a`
+  CoW, symlinks, `start_new_session`), keeping every Linux fast path unchanged. A new
+  `tests/test_portability_guard.py` AST/byte scan blocks new POSIX-only patterns from creeping back,
+  with sanctioned exceptions carrying `# portability:` acks.
+
 ### Removed
 
 - The bundled `bmad-auto-dev` skill directory and its `MODULE_SKILLS` entry. `bmad-auto init` now

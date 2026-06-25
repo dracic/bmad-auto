@@ -7,6 +7,35 @@ Status legend: **planned** (agreed, not started) · **exploring** (shape still o
 
 ---
 
+## Native Windows multiplexer backend
+
+**Status:** planned · **Foundation:** multiplexer seam + portability hardening landed (v0.6.5)
+
+The orchestrator no longer fuses tmux into the engine. All session/window/pane operations
+go through a single `TerminalMultiplexer` ABC (`src/automator/adapters/multiplexer.py`),
+obtained from `get_multiplexer()`; `TmuxMultiplexer` (`adapters/tmux_backend.py`) is the
+**only** file allowed to shell out to `tmux`, and it quarantines the POSIX `sh -c`
+parked-window trailer. Alongside it, the scattered POSIX-isms were guarded behind a
+platform-util seam (`terminate_pid`, detach kwargs, `SIGKILL` fallback, `os.devnull`) and
+the Unity plugin's `/proc`/`/tmp`/`cp -a`/symlink primitives now degrade off Linux (with
+`psutil` from the optional `windows` extra), all verified by a CI portability guard
+(`tests/test_portability_guard.py`). **WSL already works today** — it _is_ Linux, so it
+takes every fast path unchanged; this is purely about a future _native_ Windows host.
+
+The remaining work is a real non-tmux backend (a "psmux"-style multiplexer) that implements
+the `TerminalMultiplexer` contract on native Windows and is returned from `get_multiplexer()`
+behind a platform/policy check. The seam is designed so this slots in with **no change to
+the adapters, `runs.py`, `tui/launch.py`, `probe.py`, or `tui/data.py`** — a backend author
+reads `multiplexer.py` for the contract and `tmux_backend.py` for the reference
+implementation (see the [adapter authoring guide](adapter-authoring-guide.md#the-transport-contract-for-a-backend-author)).
+
+**Open questions:** what hosts the windows on native Windows (Windows Terminal panes, a
+ConPTY-based manager, a headless process supervisor?); how attach/detach and the parked
+exit-status window map without a POSIX shell; and the Windows-Unity cache-path correctness
+left as a documented follow-up in Phase 4.
+
+---
+
 ## Parallel unit execution (`[scm] max_parallel`)
 
 **Status:** planned · **Foundation:** landed with worktree isolation (v0.4.0)

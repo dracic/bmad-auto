@@ -16,6 +16,20 @@ picks which coding CLIs to drive, and bootstraps the project. For the one-page s
 see the [Installing the skill module](../README.md#installing-the-skill-module) section
 of the README.
 
+## Platform prerequisites
+
+- **Python 3.11+** and a supported coding CLI (`claude` by default).
+- **tmux** — the orchestrator drives agent sessions through a terminal multiplexer, and
+  tmux is the only backend shipped today. It is required for launching, attaching, and
+  driving runs (pure TUI observation works without it). The multiplexer sits behind a
+  pluggable seam (`TerminalMultiplexer`), so a native-Windows backend can be added later
+  without changing the engine — see the
+  [adapter authoring guide](adapter-authoring-guide.md#the-transport-contract-for-a-backend-author).
+- **OS** — Linux or macOS. **Windows is supported via WSL**, which _is_ Linux: tmux and
+  every POSIX path work unchanged there, so no special setup is needed. **Native Windows
+  is not yet shipped** — it awaits a non-tmux multiplexer backend (tracked in
+  [the roadmap](ROADMAP.md#native-windows-multiplexer-backend)).
+
 ## Installed via the BMAD-method installer? (recommended)
 
 The BMAD-method installer copies the five `bmad-auto-*` skill directories into your

@@ -39,6 +39,7 @@ Inspired by the original [bmad-automator](https://github.com/bmad-code-org/bmad-
 ## Requirements
 
 - **Python 3.11+**, **tmux**, and a supported coding CLI — `claude` by default; `codex` and `gemini` via [profiles](#other-coding-clis).
+- **Linux or macOS** (or **Windows via WSL**, which _is_ Linux — it runs as-is). tmux is the one terminal-multiplexer backend today, but it now sits behind a pluggable seam (`TerminalMultiplexer`), so a native-Windows backend can slot in later without touching the engine — see the [adapter authoring guide](docs/adapter-authoring-guide.md#two-axes-cli-vs-transport). Native Windows is not yet shipped.
 - A **BMAD v6 project** (`_bmad/bmm/config.yaml`, a `sprint-status.yaml` from `bmad-sprint-planning`) with the upstream `bmad-dev-auto` skill and the automator skill module from this repo installed (`bmad-auto-review`, `bmad-auto-sweep` — see [Installing the skill module](#installing-the-skill-module)). Standard BMAD skills stay untouched.
 
 ## Quick start
@@ -440,7 +441,7 @@ Each run drives its agents inside a dedicated tmux session, `bmad-auto-<run-id>`
 
 ## Other coding CLIs
 
-One generic driver (`adapters/generic_tmux.py`) runs any coding CLI that fits the tmux-injection + hook-signal transport; everything CLI-specific lives in a declarative **profile** (`adapters/profile.py`). Built-in profiles ship as TOML in `automator/data/profiles/`:
+One generic driver (`adapters/generic.py`) runs any coding CLI that fits the injection + hook-signal transport; everything CLI-specific lives in a declarative **profile** (`adapters/profile.py`), and the terminal transport itself sits behind a pluggable `TerminalMultiplexer` seam (tmux is the only backend today). Built-in profiles ship as TOML in `automator/data/profiles/`:
 
 | Profile   | Status                  | Notes                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | --------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
