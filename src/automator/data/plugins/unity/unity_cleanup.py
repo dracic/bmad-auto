@@ -69,7 +69,7 @@ def _temp_cache_root() -> Path:
     ``gettempdir()`` does not always resolve to; getting that exactly right is a
     documented follow-up (no Windows backend ships this pass, so it isn't exercised)."""
     if sys.platform.startswith("linux"):
-        return Path("/tmp")  # nosec B108 - Unity's fixed temporaryCachePath base on Linux
+        return Path("/tmp")  # nosec B108 portability: Unity temporaryCachePath base (Linux)
     return Path(tempfile.gettempdir())  # portability: non-Linux temp root (see note above)
 
 

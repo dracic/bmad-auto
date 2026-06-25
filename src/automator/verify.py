@@ -694,7 +694,7 @@ def run_verify_commands(policy: Policy, cwd: Path) -> list[CommandResult]:
             # policy (e.g. "pytest -q && ruff check"); shell=True is intentional here.
             proc = subprocess.run(  # nosec B602
                 command,
-                shell=True,
+                shell=True,  # portability: operator-authored verify command — sanctioned shell-out (see plan out-of-scope)
                 cwd=cwd,
                 capture_output=True,
                 text=True,

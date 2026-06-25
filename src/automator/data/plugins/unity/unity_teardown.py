@@ -138,7 +138,7 @@ def _lingering_pids_proc(worktree: Path) -> list[int]:
     """Linux fast path: scan ``/proc`` for the worktree-bound Editor/server."""
     needle = str(worktree)
     pids: list[int] = []
-    for entry in Path("/proc").iterdir():
+    for entry in Path("/proc").iterdir():  # portability: Linux-only /proc scan, guarded above
         if not entry.name.isdigit():
             continue
         try:

@@ -44,4 +44,4 @@ def detach_kwargs() -> dict[str, object]:
         # portability: start_new_session is POSIX-only; CREATE_NEW_PROCESS_GROUP
         # is the Windows analogue.
         return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
-    return {"start_new_session": True}
+    return {"start_new_session": True}  # portability: POSIX detach kwarg; Windows branch above
