@@ -16,6 +16,15 @@ seed_files = [
   ".claude/settings.local.json",
 ]
 
+# Force Claude Code's classic (inline/scrollback) renderer. The fullscreen TUI
+# (research preview, alt-screen ?1049h like vim/htop) repaints in place, so the
+# tmux pane capture only ever holds the final frame and the Log tab shows a single
+# page. The classic renderer keeps output in native scrollback, so the capture
+# scrolls normally and the Log tab reconstructs the whole session. This env var
+# overrides any `tui` setting (user/project/local/seeded) per Claude Code docs.
+[env]
+CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1"
+
 [hooks]
 dialect = "claude-settings-json"
 config_path = ".claude/settings.json"

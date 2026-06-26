@@ -325,6 +325,29 @@ def _render_row(row: dict) -> Text:
 # Strip them before pyte sees them; a legitimate SGR carries no marker, so this can
 # only remove non-display sequences (never printable text or genuine styling).
 _PRIVATE_MARKER_SGR = re.compile(rb"\x1b\[[<>=?][0-9;:]*m")
+# Alternate-screen switch sequences (DECSET/DECRST 1049/1047/47). A CLI fullscreen
+# TUI (Claude Code's fullscreen renderer) switches here and repaints in place; pyte
+# has no altscreen buffer, so the capture collapses to the final frame. Detecting
+# the switch lets a consumer flag a fullscreen log instead of trusting it whole.
+# Both enter (h) and exit (l) markers are matched: a finished run read from the
+# max_bytes tail can seek past the start-of-session enter but still carries the
+# exit emitted when the CLI quit.
+_ALTSCREEN_MARKERS = (
+    b"\x1b[?1049h",
+    b"\x1b[?1049l",
+    b"\x1b[?1047h",
+    b"\x1b[?1047l",
+    b"\x1b[?47h",
+    b"\x1b[?47l",
+)
+# Cold-open altscreen detection scans the max_bytes-skipped prefix, but caps it so a
+# huge log doesn't trigger a near-whole-file read that would defeat max_bytes. 8 MiB
+# comfortably covers a multi-MB classic preamble before a TUI switches to the
+# alternate screen (observed ~3.9 MB). A marker past the cap is missed only when the
+# log already exceeds max_bytes at first open (that first read tail-seeks past the
+# prefix); a view attached while the log was still small reads the whole stream from
+# offset 0 and catches it regardless.
+_ALTSCREEN_PREFIX_SCAN_CAP = 8 << 20
 # A trailing, not-yet-terminated CSI at the end of a read: ESC, or ESC[ followed by
 # only param/marker bytes with no final letter. Held back so a marker sequence split
 # across two reads is filtered whole next time (the filter must see it complete).
@@ -430,6 +453,11 @@ class LogView:
         self._checkpoint_bytes = checkpoint_bytes
         self._offset: int | None = None  # None until the file first appears
         self._row_cache: dict[int, Text] = {}  # id(history row) -> rendered
+        # True once the stream enters the alternate screen (CLI fullscreen TUI):
+        # pyte has no altscreen buffer, so those frames repaint the one screen in
+        # place and the render collapses to the final frame. A consumer surfaces
+        # this so a fullscreen capture isn't mistaken for the whole session.
+        self.altscreen_seen = False
         self._reset_screen()
 
     def _reset_screen(self) -> None:
@@ -442,6 +470,33 @@ class LogView:
         self._checkpoints: list[tuple[int, int]] = []
         self._render_base = 0
         self._render_len = 0
+        # A truncation restart re-reads from scratch, so re-detect altscreen too.
+        self.altscreen_seen = False
+
+    def _scan_prefix_for_altscreen(self, end: int) -> None:
+        """One-time scan of bytes [0, end) for an altscreen switch marker, in
+        overlapping windows so a marker straddling a window boundary still
+        matches. `end` is the caller-bounded scan ceiling (see
+        _ALTSCREEN_PREFIX_SCAN_CAP), not necessarily the full prefix. Sets
+        altscreen_seen; best-effort, never raises."""
+        overlap = max(len(m) for m in _ALTSCREEN_MARKERS) - 1
+        window = 1 << 20
+        try:
+            with self.path.open("rb") as f:
+                pos = 0
+                while pos < end:
+                    f.seek(pos)
+                    # window + overlap so a marker straddling a window boundary is
+                    # caught; clamped to `end` so the cap stays a strict ceiling.
+                    buf = f.read(min(window + overlap, end - pos))
+                    if any(seq in buf for seq in _ALTSCREEN_MARKERS):
+                        self.altscreen_seen = True
+                        return
+                    if not buf:
+                        return
+                    pos += window
+        except OSError:
+            return
 
     def read_new(self) -> bool:
         """Feed any new bytes into the emulator; True when content changed."""
@@ -457,6 +512,13 @@ class LogView:
             self._offset = max(0, size - self.max_bytes)
             # offsets at or before the tail seek clamp to the first line
             self._checkpoints = [(self._offset, 0)]
+            # The render only emulates the max_bytes tail, but an altscreen switch
+            # is a whole-session property whose markers often sit in the skipped
+            # prefix (enter at session start). Scan that prefix once on open so a
+            # cold-opened fullscreen log is still flagged; the tail is covered by
+            # the per-chunk scan below.
+            if self._offset > 0 and not self.altscreen_seen:
+                self._scan_prefix_for_altscreen(min(self._offset, _ALTSCREEN_PREFIX_SCAN_CAP))
         elif size < self._offset:
             self._offset = 0
             self._reset_screen()
@@ -466,6 +528,8 @@ class LogView:
         with self.path.open("rb") as f:
             f.seek(self._offset)
             chunk = f.read(size - self._offset)
+        if not self.altscreen_seen and any(seq in chunk for seq in _ALTSCREEN_MARKERS):
+            self.altscreen_seen = True
         # Drop private-marker SGR (pyte misreads it as underline); hold back an
         # unterminated trailing CSI so a sequence split across reads is filtered
         # whole next time. `consumed` is the original byte span we commit here —

@@ -60,6 +60,18 @@ _LAUNCH_TIMEOUT = 10.0  # seconds before a pending launch is presumed failed
 _UNAPPLIED: Any = object()  # "no snapshot applied yet" for the identity gates
 
 
+def _transcript_for_task(state: RunState, task_id: str) -> str | None:
+    """The agent JSONL transcript recorded for a log task (the per-session
+    task id matching the `<task>.log` name), newest session wins. Used to point
+    a fullscreen-capture notice at the complete session record."""
+    found: str | None = None
+    for story in state.tasks.values():
+        for rec in story.sessions:
+            if rec.task_id == task_id and rec.transcript_path:
+                found = rec.transcript_path
+    return found
+
+
 class _PollContext:
     """Mutable state for polling one selected run. Constructed on the UI
     thread (constructors do no I/O), then mutated only inside the poll worker.
@@ -100,6 +112,8 @@ class _Snapshot:
     log_lines: Text | None = None  # full re-render; None = unchanged this tick
     log_index: data.LogIndex | None = None  # rebuilt alongside log_lines
     log_pinned: bool = False
+    log_altscreen: bool = False  # the capture entered a fullscreen (alt-screen) TUI
+    log_transcript: str | None = None  # agent JSONL transcript, when an altscreen log has one
     attention_reset: bool = False
     new_attention: str = ""
     toast_attention: bool = False
@@ -355,6 +369,10 @@ class DashboardScreen(Screen[None]):
                 if ctx.log is not None and (ctx.log.read_new() or snap.log_reset):
                     snap.log_lines = ctx.log.render()
                     snap.log_index = ctx.log.index()
+                if ctx.log is not None and ctx.log.altscreen_seen:
+                    snap.log_altscreen = True
+                    if snap.state is not None and task:
+                        snap.log_transcript = _transcript_for_task(snap.state, task)
                 attention = ctx.watcher.attention()
                 if len(attention) < ctx.attention_seen:
                     snap.attention_reset = True
@@ -429,6 +447,14 @@ class DashboardScreen(Screen[None]):
             if snap.log_task:
                 suffix = " (pinned — esc to follow)" if snap.log_pinned else ""
                 log.write(Text(f"— {snap.log_task}.log —{suffix}", style="dim"), scroll_end=False)
+            if snap.log_altscreen:
+                # A fullscreen (alt-screen) TUI repaints in place, so the emulated
+                # pane collapses to the final frame. Flag it so the partial view is
+                # not mistaken for the whole session, and point at the full record.
+                note = "⚠ fullscreen (alt-screen) session — this pane shows only the final frame"
+                if snap.log_transcript:
+                    note += f"; full transcript: {snap.log_transcript}"
+                log.write(Text(note, style="yellow"), scroll_end=False)
             if snap.log_lines is not None and snap.log_lines.plain:
                 log.write(snap.log_lines, scroll_end=at_end)
         if (
