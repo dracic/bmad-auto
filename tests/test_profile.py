@@ -56,6 +56,12 @@ def test_builtin_profiles_load():
         assert profiles[name].usage_grace_s == 0.0
         assert profiles[name].stop_without_result_nudges is None
         assert profiles[name].subagent_stop_without_transcript is False
+    # claude forces its classic (inline/scrollback) renderer so a pane capture is
+    # not collapsed to the final frame by the fullscreen alt-screen TUI; other
+    # profiles add no such env override
+    assert profiles["claude"].env.get("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN") == "1"
+    for name in ("codex", "gemini"):
+        assert "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN" not in profiles[name].env
 
 
 def test_usage_grace_and_nudges_default_when_unset(tmp_path):
