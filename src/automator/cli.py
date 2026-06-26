@@ -64,9 +64,10 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
     from .adapters.profile import ProfileError, get_profile
 
     # The dev skill (bmad-dev-auto) writes no result.json: its adapter
-    # synthesizes the result from the spec, and so needs the
-    # implementation-artifacts dir to find that spec.
-    impl_artifacts = bmadconfig.load_paths(project).implementation_artifacts
+    # synthesizes the result from the spec, and so needs the project paths to
+    # find that spec — rebasing onto the active worktree's implementation-
+    # artifacts dir under isolation, not just the main checkout's.
+    paths = bmadconfig.load_paths(project)
     # One shared terminal-multiplexer backend for every role's adapter.
     mux = get_multiplexer()
 
@@ -77,8 +78,8 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
         # Both the dev and review sessions are now bmad-dev-auto runs (the review
         # session re-invokes the dev skill on the done spec for a follow-up pass),
         # and the skill writes no result.json — its adapter synthesizes the result
-        # from the spec it leaves on disk, so it needs impl_artifacts to find that
-        # spec and cannot be shared with the triage role even on identical config.
+        # from the spec it leaves on disk, so it needs the project paths to find
+        # that spec and cannot be shared with the triage role even on identical config.
         synthesizes = role in ("dev", "review") and policy.dev.skill == "bmad-dev-auto"
         key = (cfg, synthesizes)
         if key not in by_cfg:
@@ -96,7 +97,7 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
                 mux=mux,
             )
             by_cfg[key] = (
-                GenericDevAdapter(**common, impl_artifacts=impl_artifacts)
+                GenericDevAdapter(**common, paths=paths)
                 if synthesizes
                 else GenericAdapter(**common)
             )

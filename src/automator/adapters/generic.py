@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 from .. import devcontract, runs
+from ..bmadconfig import ProjectPaths
 from ..journal import LOGS_DIR
 from ..model import TokenUsage
 from ..policy import Policy
@@ -292,26 +293,39 @@ class GenericDevAdapter(GenericAdapter):
     ``policy.dev.skill == "bmad-dev-auto"`` (see ``cli._make_adapters``).
     """
 
-    def __init__(self, *args, impl_artifacts: Path, **kwargs):
+    def __init__(self, *args, paths: ProjectPaths, **kwargs):
         super().__init__(*args, **kwargs)
-        self.impl_artifacts = impl_artifacts
+        self.paths = paths
         # The generic skill never writes result.json, so the base "write the
         # result JSON file" nudge is meaningless — and actively misleading — for
         # it. A Stop without a terminal spec is a genuine stall.
         self._stop_nudges = 0
+
+    def _artifact_dirs(self, cwd: Path) -> list[Path]:
+        # In worktree isolation the skill runs with cwd set to the worktree and
+        # writes its terminal spec under the worktree's rebased implementation-
+        # artifacts dir, not the main checkout's. Resolve the search dir from the
+        # live session cwd (a no-op in place, where cwd == the project root, and
+        # for artifact dirs configured outside the project tree, which rebased()
+        # leaves put). Keep the configured dir as a defensive fallback.
+        primary = self.paths.rebased(cwd).implementation_artifacts
+        dirs = [primary]
+        if self.paths.implementation_artifacts != primary:
+            dirs.append(self.paths.implementation_artifacts)
+        return dirs
 
     def _result_json(self, handle: SessionHandle, spec: SessionSpec, *, wait: bool) -> dict | None:
         # Mirror the base _await_result poll: the skill's terminal spec may not be
         # flushed to disk the instant the Stop event fires, so briefly await it when
         # wait=True instead of reading once and mis-reporting a stall.
         deadline = time.monotonic() + RESULT_GRACE_S
+        search_dirs = self._artifact_dirs(spec.cwd)
         while True:
-            spec_path = devcontract.find_result_artifact(
-                self.impl_artifacts, since_ns=handle.launched_ns
-            )
-            if spec_path is not None:
-                story_key = spec.env.get("BMAD_AUTO_STORY_KEY") or None
-                return devcontract.synthesize_result(spec_path, story_key=story_key).result_json
+            for artifacts in search_dirs:
+                spec_path = devcontract.find_result_artifact(artifacts, since_ns=handle.launched_ns)
+                if spec_path is not None:
+                    story_key = spec.env.get("BMAD_AUTO_STORY_KEY") or None
+                    return devcontract.synthesize_result(spec_path, story_key=story_key).result_json
             if not wait or time.monotonic() >= deadline:
                 return None
             time.sleep(RESULT_POLL_S)
