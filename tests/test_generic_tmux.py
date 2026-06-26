@@ -18,6 +18,7 @@ from automator.adapters import generic, tmux_backend
 from automator.adapters.base import SessionHandle, SessionResult, SessionSpec
 from automator.adapters.generic import GenericDevAdapter, GenericTmuxAdapter
 from automator.adapters.profile import get_profile
+from automator.bmadconfig import ProjectPaths
 from automator.model import TokenUsage
 from automator.policy import LimitsPolicy, Policy
 from automator.signals import HookEvent
@@ -163,11 +164,18 @@ def test_await_result_grace_expires_fast(tmp_path):
 def make_dev_adapter(tmp_path, profile_name="claude"):
     impl = tmp_path / "impl"
     impl.mkdir()
+    # project root == tmp_path so rebased(spec.cwd=tmp_path) is a no-op: these
+    # unit tests exercise _result_json in place, where cwd == the project root.
+    paths = ProjectPaths(
+        project=tmp_path,
+        implementation_artifacts=impl,
+        planning_artifacts=tmp_path / "plan",
+    )
     adapter = GenericDevAdapter(
         run_dir=tmp_path / "run",
         policy=Policy(limits=LimitsPolicy()),
         profile=get_profile(profile_name),
-        impl_artifacts=impl,
+        paths=paths,
     )
     return adapter, impl
 
@@ -226,6 +234,40 @@ def test_generic_dev_synthesizes_done_spec(tmp_path):
     assert rj["baseline_commit"] == "abc123"  # mapped from baseline_revision
     assert rj["story_key"] == "3-1"
     assert rj["escalations"] == []
+
+
+def test_generic_dev_finds_spec_in_worktree(tmp_path):
+    # Under worktree isolation the skill runs with cwd set to the worktree and
+    # leaves its terminal spec in the worktree's rebased implementation-artifacts
+    # dir, not the main checkout's. The adapter must search the cwd-rebased dir or
+    # it false-stalls a story that actually completed (and rolls it back).
+    impl = tmp_path / "_bmad-output" / "impl"
+    impl.mkdir(parents=True)  # configured main-repo dir, left empty
+    paths = ProjectPaths(
+        project=tmp_path,
+        implementation_artifacts=impl,
+        planning_artifacts=tmp_path / "_bmad-output" / "plan",
+    )
+    adapter = GenericDevAdapter(
+        run_dir=tmp_path / "run",
+        policy=Policy(limits=LimitsPolicy()),
+        profile=get_profile("claude"),
+        paths=paths,
+    )
+
+    wt = tmp_path / "wt"
+    wt_impl = wt / "_bmad-output" / "impl"
+    wt_impl.mkdir(parents=True)
+    (wt_impl / "spec-3-1-foo.md").write_text(
+        "---\nstatus: done\nbaseline_revision: abc123\n---\n\n"
+        "## Auto Run Result\n\nStatus: done\nImplemented the thing.\n"
+    )
+
+    rj = adapter._result_json(_dev_handle(), _dev_spec(wt), wait=False)
+    assert rj is not None and rj["status"] == "done"
+
+    # Genuinely cwd-driven: pointed at the main checkout (empty dir), nothing is found.
+    assert adapter._result_json(_dev_handle(), _dev_spec(tmp_path), wait=False) is None
 
 
 def test_generic_dev_blocked_spec_is_critical(tmp_path):

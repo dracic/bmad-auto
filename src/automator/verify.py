@@ -147,18 +147,20 @@ def attempt_dirty(
     `exclude` is repo-relative posix dir prefixes (e.g. the BMAD artifact
     folders) whose changes are orchestrator-owned and never count as a dev
     attempt's dirtiness — they pair with `safe_rollback`'s `preserve`, so a
-    change confined to those folders reads as clean."""
-    if exclude:
-        rc, _ = _git(repo, "diff", "--quiet", baseline, "--", ".", *_exclude_specs(exclude))
-    else:
-        rc, _ = _git(repo, "diff", "--quiet", baseline, "--")
+    change confined to those folders reads as clean.
+
+    `policy.toml` (the operator's orchestration config) is *always* excluded: it
+    is never a dev attempt's change, `safe_rollback` always restores it, and a
+    lone policy edit must not read as dirtiness — otherwise the manual-recovery
+    loop could never terminate. Mirrors `worktree_clean`'s exclusion."""
+    exclude = (POLICY_FILE_REL, *exclude)
+    rc, _ = _git(repo, "diff", "--quiet", baseline, "--", ".", *_exclude_specs(exclude))
     if rc != 0:
         return True
     if baseline_untracked is None:
         return False
     created = untracked_files(repo) - set(baseline_untracked)
-    if exclude:
-        created = {p for p in created if not _path_under_any(p, exclude)}
+    created = {p for p in created if not _path_under_any(p, exclude)}
     return bool(created)
 
 
@@ -207,25 +209,44 @@ def safe_rollback(
     tree with `git stash create`, reset, then restore those paths from the
     snapshot. Untracked artifacts need no special handling: the reset leaves them
     alone and the cleanup below skips `keep` dirs.
+
+    `policy.toml` (the operator's orchestration config) is *always* restored,
+    regardless of `preserve`. It lives inside the kept `.automator` dir but is
+    *tracked*, so a plain `git reset --hard` would silently revert it — an
+    uncommitted edit (e.g. a freshly enabled `scm.rollback_on_failure`, gone
+    before it ever takes effect) or a change committed after `baseline`. `keep`
+    only guards untracked deletion, not tracked reverts. We can't ride the stash
+    snapshot for it: `git stash create` emits an empty snapshot for a clean tree,
+    so a policy change living in a *commit* (with no other working-tree dirt)
+    would skip the restore and be lost. Instead we read policy.toml's on-disk
+    content before the reset and write it straight back after — independent of
+    the snapshot, covering both the uncommitted and committed cases.
     """
-    snapshot = ""
-    if preserve:
-        rc, out = _git(repo, "stash", "create")
-        if rc == 0:
-            snapshot = out.strip()
+    # policy.toml: capture on-disk content now, restore unconditionally below.
+    policy_path = repo / POLICY_FILE_REL
+    policy_content = policy_path.read_bytes() if policy_path.is_file() else None
+
+    rc, out = _git(repo, "stash", "create")
+    snapshot = out.strip() if rc == 0 else ""
     rc, out = _git(repo, "reset", "--hard", baseline)
     if rc != 0:
         raise GitError(f"git reset --hard {baseline} failed: {out}")
-    if preserve and snapshot:
-        # Restore each artifact path's pre-reset content from the snapshot tree.
-        # A dir with no tracked files in the snapshot makes `git checkout` exit
-        # non-zero ("pathspec did not match") — that's benign. Any other failure
-        # means the corrected artifact wasn't restored: raise instead of silently
-        # losing it (which would regress the resolved re-drive into a recovery loop).
+    if snapshot:
+        # Restore each preserve dir's pre-reset content from the snapshot tree. A
+        # path with no tracked content in the snapshot makes `git checkout` exit
+        # non-zero ("pathspec did not match") — benign (a preserve dir holding
+        # only untracked files). Any other failure means a protected path wasn't
+        # restored: raise instead of silently dropping a resolved re-drive's
+        # corrected spec (which would regress the re-drive into a recovery loop).
         for d in preserve:
             rc, out = _git(repo, "checkout", snapshot, "--", d)
             if rc != 0 and "did not match" not in out:
                 raise GitError(f"git checkout {snapshot[:12]} -- {d} failed: {out}")
+    if policy_content is not None:
+        current = policy_path.read_bytes() if policy_path.is_file() else None
+        if current != policy_content:
+            policy_path.parent.mkdir(parents=True, exist_ok=True)
+            policy_path.write_bytes(policy_content)
     if baseline_untracked is None:
         return  # no snapshot to diff against: never delete untracked files
     created = untracked_files(repo) - set(baseline_untracked)

@@ -445,6 +445,85 @@ def test_safe_rollback_tolerates_empty_preserve_dir(project):
     assert (repo / "src.txt").read_text() == "original\n"  # source still reverted
 
 
+def test_safe_rollback_preserves_uncommitted_policy_edit(project):
+    """A hand-edited, tracked but *uncommitted* .automator/policy.toml (e.g. a
+    freshly enabled scm.rollback_on_failure) must survive the hard reset — it is
+    operator config, not the dev attempt's work. Regression: a `git reset --hard`
+    used to silently revert it, so the very setting that gates auto-rollback was
+    gone before it could fire."""
+    repo = project.project
+    pol = repo / ".automator" / "policy.toml"
+    pol.parent.mkdir(parents=True, exist_ok=True)
+    pol.write_text("[scm]\nrollback_on_failure = false\n")
+    git(repo, "add", "-f", str(pol))
+    git(repo, "commit", "-q", "-m", "track policy")
+    baseline = verify.rev_parse_head(repo)
+    snap = sorted(verify.untracked_files(repo))
+
+    pol.write_text("[scm]\nrollback_on_failure = true\n")  # operator enables it, uncommitted
+    (repo / "src.txt").write_text("dev attempt\n")  # a real dev-attempt change
+
+    verify.safe_rollback(repo, baseline, baseline_untracked=snap, keep=(".automator",))
+    assert (repo / "src.txt").read_text() == "original\n"  # attempt reverted
+    assert pol.read_text() == "[scm]\nrollback_on_failure = true\n"  # edit preserved
+
+
+def test_safe_rollback_restores_policy_deleted_by_reset(project):
+    """policy.toml added/committed *after* the baseline would be deleted by a
+    reset to that older baseline; it is still restored from the pre-reset on-disk
+    capture (the dirty src.txt here keeps the stash snapshot non-empty — the
+    clean-tree, empty-snapshot path is covered by the test below)."""
+    repo = project.project
+    baseline = verify.rev_parse_head(repo)  # baseline predates policy.toml
+    pol = repo / ".automator" / "policy.toml"
+    pol.parent.mkdir(parents=True, exist_ok=True)
+    pol.write_text("[scm]\nrollback_on_failure = true\n")
+    git(repo, "add", "-f", str(pol))
+    git(repo, "commit", "-q", "-m", "add policy after baseline")
+    snap = sorted(verify.untracked_files(repo))
+    (repo / "src.txt").write_text("dev attempt\n")
+
+    verify.safe_rollback(repo, baseline, baseline_untracked=snap, keep=(".automator",))
+    assert (repo / "src.txt").read_text() == "original\n"
+    assert pol.read_text() == "[scm]\nrollback_on_failure = true\n"  # survived the reset
+
+
+def test_safe_rollback_restores_committed_policy_on_clean_tree(project):
+    """policy.toml committed AFTER the baseline, with an otherwise-clean tree:
+    `git stash create` is empty, so the old stash-gated restore skipped it and
+    `git reset --hard` reverted the operator's config. It must still survive."""
+    repo = project.project
+    baseline = verify.rev_parse_head(repo)  # baseline predates policy.toml
+    pol = repo / ".automator" / "policy.toml"
+    pol.parent.mkdir(parents=True, exist_ok=True)
+    pol.write_text("[scm]\nrollback_on_failure = true\n")
+    git(repo, "add", "-f", str(pol))
+    git(repo, "commit", "-q", "-m", "add policy after baseline")
+    snap = sorted(verify.untracked_files(repo))
+    # NOTE: no other working-tree change — tree is clean -> empty stash snapshot
+
+    verify.safe_rollback(repo, baseline, baseline_untracked=snap, keep=(".automator",))
+    assert pol.read_text() == "[scm]\nrollback_on_failure = true\n"  # survived
+
+
+def test_attempt_dirty_ignores_lone_policy_edit(project):
+    """A diff confined to policy.toml is operator config, not the attempt's
+    dirtiness — so a stopped attempt whose only residue is a policy edit reads as
+    clean and the manual-recovery loop can terminate."""
+    repo = project.project
+    pol = repo / ".automator" / "policy.toml"
+    pol.parent.mkdir(parents=True, exist_ok=True)
+    pol.write_text("[scm]\nrollback_on_failure = false\n")
+    git(repo, "add", "-f", str(pol))
+    git(repo, "commit", "-q", "-m", "track policy")
+    baseline = verify.rev_parse_head(repo)
+
+    pol.write_text("[scm]\nrollback_on_failure = true\n")  # lone policy edit
+    assert verify.attempt_dirty(repo, baseline, []) is False
+    (repo / "src.txt").write_text("real change\n")  # plus a real change
+    assert verify.attempt_dirty(repo, baseline, []) is True
+
+
 def test_worktree_clean_ignores_policy_file(project):
     # A tracked-but-modified .automator/policy.toml (rewritten by the TUI
     # settings editor) must not count as a dirty tree, or every settings edit
