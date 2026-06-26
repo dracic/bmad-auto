@@ -859,7 +859,10 @@ async def test_decision_banner_shows_and_clears(project):
         header = str(screen.query_one("#runheader", RunHeader).content)
         assert "decision needed: DW-7" in header
         assert "press a to attach and answer" in header
-        assert any("reopen the cache work?" in m for m in notifications(app))
+        # the toast is posted via self.notify() onto textual's async message pump,
+        # so it lands in app._notifications a tick after _decision is set — wait
+        # for it rather than asserting synchronously (matches the other notify tests)
+        await until(pilot, lambda: any("reopen the cache work?" in m for m in notifications(app)))
 
         journal.append("decision-answered", dw_id="DW-7", key="a", effect="build")
         await until(pilot, lambda: screen.decision_pending is None)
