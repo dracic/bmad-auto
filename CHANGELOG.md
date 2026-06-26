@@ -22,8 +22,10 @@ breaking changes may land in a minor release.
   lives inside the kept `.automator` dir, so a rollback's `git reset --hard` to baseline silently
   reverted operator edits — a freshly enabled `scm.rollback_on_failure` could disappear before it ever
   took effect — and a lone policy edit could register as attempt dirtiness, trapping the
-  manual-recovery loop. Rollback now always snapshots and restores `policy.toml`, and the dirty check
-  always excludes it, regardless of the preserve set.
+  manual-recovery loop. Rollback now restores `policy.toml` from its on-disk content unconditionally —
+  so a config change committed after the baseline on an otherwise-clean tree survives too, not only
+  one that rode a non-empty `git stash` snapshot — and the dirty check always excludes it, regardless
+  of the preserve set.
 
 - **Fixed a decision-toast notification race in the TUI test suite on Python 3.14.** Test-only; no
   runtime change.

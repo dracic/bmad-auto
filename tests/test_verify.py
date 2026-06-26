@@ -486,6 +486,24 @@ def test_safe_rollback_restores_policy_deleted_by_reset(project):
     assert pol.read_text() == "[scm]\nrollback_on_failure = true\n"  # survived the reset
 
 
+def test_safe_rollback_restores_committed_policy_on_clean_tree(project):
+    """policy.toml committed AFTER the baseline, with an otherwise-clean tree:
+    `git stash create` is empty, so the old stash-gated restore skipped it and
+    `git reset --hard` reverted the operator's config. It must still survive."""
+    repo = project.project
+    baseline = verify.rev_parse_head(repo)  # baseline predates policy.toml
+    pol = repo / ".automator" / "policy.toml"
+    pol.parent.mkdir(parents=True, exist_ok=True)
+    pol.write_text("[scm]\nrollback_on_failure = true\n")
+    git(repo, "add", "-f", str(pol))
+    git(repo, "commit", "-q", "-m", "add policy after baseline")
+    snap = sorted(verify.untracked_files(repo))
+    # NOTE: no other working-tree change — tree is clean -> empty stash snapshot
+
+    verify.safe_rollback(repo, baseline, baseline_untracked=snap, keep=(".automator",))
+    assert pol.read_text() == "[scm]\nrollback_on_failure = true\n"  # survived
+
+
 def test_attempt_dirty_ignores_lone_policy_edit(project):
     """A diff confined to policy.toml is operator config, not the attempt's
     dirtiness — so a stopped attempt whose only residue is a policy edit reads as
