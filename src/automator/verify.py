@@ -743,7 +743,7 @@ def verify_dev_bundle(
         except GitError as e:
             return VerifyOutcome.escalate(str(e))
 
-    claimed_ids = {str(i) for i in rj.get("dw_ids", [])}
+    claimed_ids = {str(i) for i in (rj.get("dw_ids") or [])}
     if claimed_ids and claimed_ids != set(task.dw_ids):
         return VerifyOutcome.retry(
             f"result.json dw_ids {sorted(claimed_ids)} do not match the bundle's "
