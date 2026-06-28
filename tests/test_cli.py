@@ -822,3 +822,47 @@ def test_diagnose_legend_written_locally(project, tmp_path):
     legend = json.loads(legend_file.read_text())
     assert STORY_KEY in legend.values()  # legend reverses pseudonyms locally
     assert STORY_KEY not in out_file.read_text()  # but the dump never carries it
+
+
+# ---- validate platform preflight (routes through the multiplexer + host seams) ----
+
+
+class _FakeBackend:
+    def __init__(self, ok, version=None):
+        self._ok, self._version = ok, version
+
+    def available(self):
+        return self._ok
+
+    def version(self):
+        return self._version
+
+
+class _FakeHost:
+    pass
+
+
+def _patch_preflight(monkeypatch, backend):
+    from automator import process_host as ph_mod
+    from automator.adapters import multiplexer as mux_mod
+
+    monkeypatch.setattr(mux_mod, "get_multiplexer", lambda: backend)
+    monkeypatch.setattr(ph_mod, "get_process_host", lambda: _FakeHost())
+
+
+def test_platform_preflight_reports_available_backend(monkeypatch):
+    # An available backend reports through available()/version() — no sys.platform
+    # branch — and the selected process host is named for visibility.
+    _patch_preflight(monkeypatch, _FakeBackend(ok=True, version="tmux 3.4"))
+    notes, problems = cli._platform_preflight()
+    assert not problems
+    assert any("_FakeBackend" in n and "tmux 3.4" in n for n in notes)
+    assert any("process host" in n and "_FakeHost" in n for n in notes)
+
+
+def test_platform_preflight_flags_unavailable_backend(monkeypatch):
+    # A backend whose transport binary is absent surfaces here as a problem, so a
+    # new OS registers a backend rather than inlining a win32 block in validate.
+    _patch_preflight(monkeypatch, _FakeBackend(ok=False))
+    notes, problems = cli._platform_preflight()
+    assert any("unavailable" in p for p in problems)

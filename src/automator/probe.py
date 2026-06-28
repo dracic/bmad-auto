@@ -39,6 +39,7 @@ from . import sanitize
 from .adapters.multiplexer import MultiplexerError, get_multiplexer
 from .adapters.profile import CLIProfile
 from .install import merge_hooks
+from .process_host import get_process_host
 from .signals import SignalWatcher
 from .tokens import _jsonl_entries, read_usage
 
@@ -504,8 +505,9 @@ def probe(
         hook_src = resources.files("automator.data").joinpath(PROBE_HOOK_NAME)
         hook_path = tmpdir / PROBE_HOOK_NAME
         hook_path.write_text(hook_src.read_text(encoding="utf-8"), encoding="utf-8")
+        interp = get_process_host().hook_interpreter()
         registrations = {
-            native: f"python3 {shlex.quote(str(hook_path))} {canonical}"
+            native: f"{interp} {shlex.quote(str(hook_path))} {canonical}"
             for native, canonical in profile.hooks.events.items()
         }
         config, _ = merge_hooks({}, registrations, profile.hooks.dialect)

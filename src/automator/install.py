@@ -26,6 +26,7 @@ from pathlib import Path
 
 from .adapters.profile import ALIASES, CLIProfile, ProfileError, load_profiles
 from .policy import POLICY_TEMPLATE
+from .process_host import get_process_host
 
 HOOK_SCRIPT_REL = ".automator/bmad_auto_hook.py"
 # Dedup marker: matches any bmad-auto-managed hook command — both the signal
@@ -92,11 +93,12 @@ def missing_base_skills(project: Path, trees: Sequence[str]) -> list[str]:
 
 
 def _hook_command(project: Path, profile: CLIProfile, canonical_event: str) -> str:
+    interp = get_process_host().hook_interpreter()
     if profile.hooks.dialect == "claude-settings-json":
-        return f'python3 "$CLAUDE_PROJECT_DIR"/{HOOK_SCRIPT_REL} {canonical_event}'
+        return f'{interp} "$CLAUDE_PROJECT_DIR"/{HOOK_SCRIPT_REL} {canonical_event}'
     # Codex/Gemini expose no $CLAUDE_PROJECT_DIR equivalent to hook commands;
     # bake the absolute path at init time.
-    return f"python3 {shlex.quote(str(project / HOOK_SCRIPT_REL))} {canonical_event}"
+    return f"{interp} {shlex.quote(str(project / HOOK_SCRIPT_REL))} {canonical_event}"
 
 
 def _hook_entry(dialect: str, command: str) -> dict:
@@ -344,8 +346,9 @@ def provision_worktree(
                 config = json.loads(config_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 config = {}
+        interp = get_process_host().hook_interpreter()
         registrations = {
-            native: f"python3 {shlex.quote(str(relay))} {canonical}"
+            native: f"{interp} {shlex.quote(str(relay))} {canonical}"
             for native, canonical in profile.hooks.events.items()
         }
         config, changed = merge_hooks(config, registrations, profile.hooks.dialect)

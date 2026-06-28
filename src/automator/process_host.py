@@ -60,6 +60,14 @@ class ProcessHost(ABC):
         where the platform can't provide one (callers must refuse to force-kill
         rather than risk an unrelated process)."""
 
+    @abstractmethod
+    def hook_interpreter(self) -> str:
+        """The command prefix that runs a bmad-auto python hook script on this
+        host, interpolated into the hook registrations `install`/`probe` write
+        (the script path + canonical event are appended by the caller). POSIX runs
+        the ``python3`` on PATH; a Windows host overrides it (no ``python3`` there)
+        so hook registration never branches on ``sys.platform`` at the call site."""
+
 
 class PosixProcessHost(ProcessHost):
     """Linux/macOS/WSL: ``os.kill`` for signalling and the read-only existence
@@ -102,6 +110,9 @@ class PosixProcessHost(ProcessHost):
         except Exception:
             return None
 
+    def hook_interpreter(self) -> str:
+        return "python3"
+
 
 class WindowsProcessHost(ProcessHost):
     """Native Windows: ``taskkill`` for signalling, psutil for the non-destructive
@@ -135,6 +146,11 @@ class WindowsProcessHost(ProcessHost):
             return _psutil().Process(pid).create_time()
         except Exception:
             return None
+
+    def hook_interpreter(self) -> str:
+        # Windows ships no `python3` launcher; `uv run --no-project python` resolves
+        # an interpreter without activating a project venv (hooks fire detached).
+        return "uv run --no-project python"
 
 
 def _proc_starttime(pid: int) -> float | None:

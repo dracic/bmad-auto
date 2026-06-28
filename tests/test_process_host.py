@@ -86,3 +86,23 @@ def test_env_override_selects_by_name(monkeypatch):
     monkeypatch.setenv("BMAD_AUTO_PROCESS_HOST", "windows")
     get_process_host.cache_clear()
     assert isinstance(get_process_host(), WindowsProcessHost)
+
+
+def test_hook_interpreter_is_python3_on_posix(host):
+    # Hook registrations (install/probe) interpolate this prefix; POSIX keeps the
+    # historical `python3` byte-for-byte so existing configs stay valid.
+    assert PosixProcessHost().hook_interpreter() == "python3"
+
+
+def test_hook_interpreter_windows_resolves_without_project_venv():
+    # Windows has no `python3` launcher — `uv run` resolves an interpreter, and
+    # `--no-project` keeps it from activating a project venv for a detached hook.
+    assert WindowsProcessHost().hook_interpreter() == "uv run --no-project python"
+
+
+def test_hook_interpreter_routed_through_selected_host(monkeypatch):
+    # The env override drives the prefix end-to-end, so a Windows host changes the
+    # registered hook command with no `sys.platform` branch at the call site.
+    monkeypatch.setenv("BMAD_AUTO_PROCESS_HOST", "windows")
+    get_process_host.cache_clear()
+    assert get_process_host().hook_interpreter() == "uv run --no-project python"
