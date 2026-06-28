@@ -5,7 +5,7 @@ All notable changes to `bmad-auto` are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
-## [0.7.5] — 2026-06-27
+## [0.7.5] — 2026-06-28
 
 ### Added
 
@@ -29,6 +29,17 @@ breaking changes may land in a minor release.
 - **The `sanitize` chokepoint now redacts credential-shaped strings.** Identifier-shaped secrets
   (`ghp_`/`sk-`/`AKIA`/`xoxb-`/JWTs and long high-entropy blobs) previously passed the slug gate
   verbatim; they are now `<redacted:secret>`, closing the same hole for `probe-adapter`.
+
+### Fixed
+
+- **A dev session that ends its turn to await a long-running background process is no longer
+  mis-stalled.** A `bmad-dev-auto` session that yields to wait on a slow job (a Unity PlayMode run, a
+  long test) and expects to be re-invoked on completion fired a result-less Stop — and since the
+  generic dev adapter runs zero nudges, that was ruled stalled after only the 15s result grace,
+  driving a retry that (with `scm.rollback_on_failure` off) paused the whole sweep for a manual
+  reset. A new `limits.dev_stall_grace_s` (default 600s) opens an idle-grace window on a result-less
+  dev Stop and re-arms it on each re-invocation, so only a genuinely idle gap with no terminal spec —
+  or the session timeout — counts as a stall. Non-dev adapters keep zero grace and are unchanged.
 
 ## [0.7.4] — 2026-06-26
 
@@ -705,6 +716,7 @@ enforced in CI.
   implementation phase, driven by a Python control loop with hook-based session transport and
   resumable on-disk run state.
 
+[0.7.5]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.5
 [0.7.4]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.4
 [0.7.3]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.3
 [0.7.2]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.2
