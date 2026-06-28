@@ -148,6 +148,7 @@ Press **`g`** to edit `.automator/policy.toml` in a form grouped by section — 
 | `c`       | clean up tmux sessions/windows for finished & stopped runs         |
 | `v`       | run `bmad-auto validate`, output in a modal                        |
 | `g`       | settings editor for `.automator/policy.toml`                       |
+| `y`       | copy the active Log/Attention pane to the clipboard                |
 | `M` / `q` | toggle theme (light/dark mode) / quit                              |
 
 **The TUI is an observer/launcher, never the engine.** Runs started with `r`/`s` are detached `bmad-auto` processes in windows of a dedicated tmux session (`bmad-auto-ctl`), so they survive a TUI exit or crash; the dashboard watches runs purely through the run-dir artifacts the engine writes atomically, so runs started from a plain shell show up identically. Launch and attach need tmux; the dashboard itself does not. Pid-based liveness is local-only — a run whose engine died shows `interrupted` (press `e`); runs on other hosts show `unknown`.

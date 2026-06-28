@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from rich.text import Text
-from textual.widgets import Static, Tree
+from textual.selection import Selection
+from textual.widgets import RichLog, Static, Tree
 from textual.widgets.option_list import Option
 from textual.widgets.tree import TreeNode
 
@@ -332,3 +333,22 @@ class DeferredEntryOption(Option):
     def __init__(self, item: data.DeferredItem, option_id: str | None = None) -> None:
         super().__init__(deferred_line(item), id=option_id)
         self.item = item
+
+
+class SelectableRichLog(RichLog):
+    """RichLog that supports Textual text selection + ctrl+c copy.
+
+    Base RichLog caches rendered Strips rather than a single renderable, so the
+    default Widget.get_selection returns None and ctrl+c copies nothing. Rebuild
+    the plain text from the cached strips (as the builtin Log widget does) so
+    click-drag selection and ctrl+c work. wrap=False (the default, kept by the
+    dashboard) means one strip per logical row, so document line indices line up
+    with selection offsets.
+    """
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        text = "\n".join(strip.text for strip in self.lines)
+        return selection.extract(text), "\n"
+
+    def selection_updated(self, selection: Selection | None) -> None:
+        self.refresh()

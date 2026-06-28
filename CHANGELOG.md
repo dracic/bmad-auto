@@ -9,6 +9,11 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **Select and copy text from the TUI Log and Attention panes.** Click-drag highlights and `ctrl+c`
+  copies (those panes are now selectable `RichLog`s with a working `get_selection`); `y` copies the
+  whole active pane in one keystroke. The other panes are interactive widgets — hold your terminal's
+  bypass modifier (Shift on most Linux terminals, Option on iTerm) to use its native selection. Copy
+  rides OSC 52, so under tmux it needs `set -g set-clipboard on` to reach the system clipboard.
 - **`bmad-auto diagnose` emits a sanitized diagnostic dump of a run/sweep** so a user can hand
   maintainers what's needed to debug a run without shipping any code, spec/story content, prompts,
   transcripts, file paths, or PII. It derives the diagnostic _shape_ — phase/token/session

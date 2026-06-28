@@ -168,6 +168,24 @@ One row per story (or sweep bundle/triage task) in the selected run:
 - **Attention** — the run's `ATTENTION` file (escalations, gate
   notifications). New lines after the first poll also fire a warning toast.
 
+### Selecting and copying text
+
+The **Log** and **Attention** panes are click-drag selectable: highlight with
+the mouse and press `ctrl+c` to copy the selection, or press `y` to copy the
+whole active pane in one keystroke. The other panes (Runs, Sprint, Deferred
+Work, the task table, Journal) are interactive widgets and are not drag-
+selectable in-app.
+
+To select text in _any_ pane — or when the in-app copy can't reach your system
+clipboard — hold your terminal's bypass modifier while dragging to use the
+terminal's own selection instead of the TUI's: **Shift** on most Linux
+terminals and Windows Terminal, **Option/Alt** on iTerm2/macOS.
+
+`ctrl+c` and `y` copy via OSC 52. Inside tmux that only reaches the system
+clipboard when tmux forwards it — set `set -g set-clipboard on` and use an
+OSC 52-capable outer terminal. The Shift/Option-drag native selection above is
+the reliable fallback when OSC 52 isn't available.
+
 ## Status reference
 
 Run status is classified from `state.json` plus a liveness probe:
@@ -212,6 +230,7 @@ Journal kinds are styled by substring, first match wins:
 | `v` | run `bmad-auto validate`, output in a modal                                |
 | `g` | settings editor for `.automator/policy.toml`                               |
 | `M` | toggle theme (light/dark mode)                                             |
+| `y` | copy the active Log/Attention pane to the clipboard                        |
 | `q` | quit (running engines are unaffected)                                      |
 
 In the settings editor: `ctrl+s` saves, `ctrl+e` expands/collapses all

@@ -12,6 +12,9 @@ from pathlib import Path
 
 import pytest
 from conftest import install_bmad_config, write_sprint
+from rich.text import Text
+from textual.geometry import Offset
+from textual.selection import Selection
 from textual.widgets import (
     Checkbox,
     DataTable,
@@ -36,7 +39,7 @@ from automator.tui.screens.modals import (
     StartSweepModal,
     TextOutputModal,
 )
-from automator.tui.widgets import RunHeader, SprintTree
+from automator.tui.widgets import RunHeader, SelectableRichLog, SprintTree
 
 
 def make_run(
@@ -203,6 +206,72 @@ async def test_log_pane_shows_emulated_content(project):
         assert "— story-1.log —" in text
         assert "thinking" not in text  # repaint frames collapsed away
         assert "\x1b" not in text
+
+
+# --------------------------------------------------------- text select & copy
+# Use an empty project so no run is selected: the poll never rewrites #log, so
+# the lines we write directly stay put for the assertions.
+
+
+async def test_selectable_rich_log_get_selection(project):
+    app = BmadAutoApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        screen.query_one("#tabs", TabbedContent).active = "tab-log"  # give it a size
+        await pilot.pause()
+        log = screen.query_one("#log", SelectableRichLog)
+        log.write(Text("first line"))
+        log.write(Text("second line"))
+        await pilot.pause()
+        # whole-buffer selection returns every line's plain text
+        assert log.get_selection(Selection(None, None))[0] == "first line\nsecond line"
+        # a sub-range honours the start/end column+row offsets
+        sel = Selection(Offset(6, 0), Offset(6, 1))
+        assert log.get_selection(sel)[0] == "line\nsecond"
+
+
+async def test_copy_pane_action_copies_log(project, monkeypatch):
+    copied: list[str] = []
+    app = BmadAutoApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        monkeypatch.setattr(app, "copy_to_clipboard", lambda text: copied.append(text))
+        screen.query_one("#tabs", TabbedContent).active = "tab-log"
+        await pilot.pause()
+        log = screen.query_one("#log", SelectableRichLog)
+        log.write(Text("error: boom"))
+        log.write(Text("at file.py:42"))
+        await pilot.pause()
+        await pilot.press("y")
+        await until(pilot, lambda: bool(copied))
+        assert copied == ["error: boom\nat file.py:42"]
+        assert any("copied log pane" in m for m in notifications(app))
+
+
+async def test_copy_pane_wrong_tab_notifies(project):
+    app = BmadAutoApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        assert screen.query_one("#tabs", TabbedContent).active == "tab-journal"  # default
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any("Log or Attention tab" in m for m in notifications(app)),
+        )
+
+
+async def test_copy_pane_empty_notifies(project):
+    app = BmadAutoApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        screen.query_one("#tabs", TabbedContent).active = "tab-attention"
+        await pilot.pause()
+        await pilot.press("y")
+        await until(pilot, lambda: any("nothing to copy" in m for m in notifications(app)))
 
 
 # ------------------------------------------------------- journal -> log jump

@@ -42,6 +42,7 @@ from ..widgets import (
     DeferredEntryOption,
     JournalEntryOption,
     RunHeader,
+    SelectableRichLog,
     SprintTree,
     status_cell,
 )
@@ -122,7 +123,10 @@ class _Snapshot:
 
 
 class DashboardScreen(Screen[None]):
-    BINDINGS = [Binding("escape", "unpin_log", "follow log", show=False)]
+    BINDINGS = [
+        Binding("escape", "unpin_log", "follow log", show=False),
+        Binding("y", "copy_pane", "copy"),
+    ]
 
     def __init__(self, project: Path):
         super().__init__()
@@ -173,9 +177,9 @@ class DashboardScreen(Screen[None]):
                     with TabPane("Log", id="tab-log"):
                         # headroom over the render's 2000-line history cap so
                         # the header row is never silently dropped at capacity
-                        yield RichLog(id="log", max_lines=2048, auto_scroll=True)
+                        yield SelectableRichLog(id="log", max_lines=2048, auto_scroll=True)
                     with TabPane("Attention", id="tab-attention"):
-                        yield RichLog(id="attention", max_lines=500, auto_scroll=True)
+                        yield SelectableRichLog(id="attention", max_lines=500, auto_scroll=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -307,6 +311,23 @@ class DashboardScreen(Screen[None]):
         self._pending_jump = None
         self._log_follow_tail = True
         self._tick(force_rescan=False)
+
+    def action_copy_pane(self) -> None:
+        """Copy the whole Log/Attention pane to the clipboard (mouse-free
+        alternative to click-drag + ctrl+c). Only the two RichLog tabs hold
+        free-form copyable text; the tables/tree are not selectable."""
+        active = self.query_one("#tabs", TabbedContent).active
+        log_id = {"tab-log": "#log", "tab-attention": "#attention"}.get(active)
+        if log_id is None:
+            self.notify("switch to the Log or Attention tab to copy", severity="warning")
+            return
+        pane = self.query_one(log_id, RichLog)
+        text = "\n".join(strip.text for strip in pane.lines).rstrip()
+        if not text:
+            self.notify("nothing to copy", severity="warning")
+            return
+        self.app.copy_to_clipboard(text)
+        self.notify(f"copied {log_id.lstrip('#')} pane to clipboard")
 
     # --------------------------------------------------------------- polling
 
