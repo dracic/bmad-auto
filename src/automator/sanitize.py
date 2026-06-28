@@ -140,6 +140,15 @@ def scrub_text(s: str, *, max_lines: int | None = None) -> str:
     return s
 
 
+def _scrub_str(s: str) -> str:
+    """Sanitize a single string: redact a home path, drop free-form prose, and
+    redact a credential-shaped token; an identifier-shaped slug passes verbatim."""
+    red = redact_home(s)
+    if not looks_like_identifier(red):
+        return _REDACTED_STR
+    return _REDACTED_SECRET if looks_like_secret(red) else red
+
+
 def _scrub(obj: Any, depth: int, max_depth: int) -> Any:
     if depth > max_depth:
         return _REDACTED_DEPTH
@@ -147,12 +156,14 @@ def _scrub(obj: Any, depth: int, max_depth: int) -> Any:
     if obj is None or isinstance(obj, (bool, int, float)):
         return obj
     if isinstance(obj, str):
-        red = redact_home(obj)
-        if not looks_like_identifier(red):
-            return _REDACTED_STR
-        return _REDACTED_SECRET if looks_like_secret(red) else red
+        return _scrub_str(obj)
     if isinstance(obj, dict):
-        return {str(k): _scrub(v, depth + 1, max_depth) for k, v in obj.items()}
+        # Keys get the same scrub as string values, so a home-path or
+        # credential-shaped key can't leak where the equivalent value would be
+        # caught (diagnostics routes unknown/future fields through here). Two
+        # distinct non-identifier keys can collapse to the same <redacted:str>
+        # and merge — acceptable under safe-by-default (redaction over fidelity).
+        return {_scrub_str(str(k)): _scrub(v, depth + 1, max_depth) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_scrub(v, depth + 1, max_depth) for v in obj]
     # any other type (shouldn't appear in JSON) is treated as an opaque string
@@ -189,6 +200,7 @@ class Pseudonymizer:
     def __init__(self, salt: bytes | None = None):
         self._salt = salt if salt is not None else secrets.token_bytes(16)
         self._map: dict[tuple[str, str], str] = {}
+        self._aliases: dict[str, str] = {}  # alias -> original, for collision rejection
 
     def alias(self, value: Any, *, ns: str = "id", epic: int | None = None) -> Any:
         """Map ``value`` to its stable alias. ``None``/empty pass through; a story
@@ -200,9 +212,22 @@ class Pseudonymizer:
         cached = self._map.get(key)
         if cached is not None:
             return cached
-        digest = hashlib.blake2s(self._salt + value.encode("utf-8"), digest_size=3).hexdigest()
         prefix = f"s{epic}" if (ns == "story" and epic is not None) else ns
-        alias = f"{prefix}-{digest}"
+        # 48-bit digest makes collisions vanishingly unlikely even for large
+        # dumps; but a clash is not cosmetic — it would merge two stories'
+        # per_alias_event_counts and overwrite a legend() entry — so on the rare
+        # collision re-hash with a counter until the alias is free.
+        counter = 0
+        while True:
+            material = self._salt + value.encode("utf-8")
+            if counter:
+                material += counter.to_bytes(4, "big")
+            alias = f"{prefix}-{hashlib.blake2s(material, digest_size=6).hexdigest()}"
+            owner = self._aliases.get(alias)
+            if owner is None or owner == value:
+                break
+            counter += 1
+        self._aliases[alias] = value
         self._map[key] = alias
         return alias
 
@@ -231,13 +256,20 @@ def assert_no_leak(text: str, *, extra: Iterable[str] = ()) -> list[str]:
         fired.append("absolute-home-path")
     if any(looks_like_secret(tok) for tok in _LEAK_TOKEN_RE.findall(text)):
         fired.append("secret")
-    user = getpass.getuser()
+    try:
+        user = getpass.getuser()
+    except Exception:
+        # No passwd entry / no USER env (minimal containers): this one
+        # defense-in-depth rule simply can't run; the rest still cover the output.
+        user = ""
     if len(user) >= 5 and re.search(rf"\b{re.escape(user)}\b", text):
         fired.append("username")
-    for item in extra:
+    for i, item in enumerate(extra):
         item = str(item)
         # word-boundary match so a short basename ("proj") can't false-positive on
         # a common word that contains it ("project"); still catches it standalone.
+        # Report the position only — never echo the value, since this rule name is
+        # surfaced in the CLI failure message and would otherwise leak it.
         if len(item) >= 4 and re.search(rf"\b{re.escape(item)}\b", text):
-            fired.append(f"sensitive:{item[:16]}")
+            fired.append(f"sensitive[{i}]")
     return fired

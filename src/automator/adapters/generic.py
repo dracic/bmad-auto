@@ -181,6 +181,18 @@ class GenericAdapter(CodingCLIAdapter):
                 if not self._window_alive(handle):
                     # died without a SessionEnd hook (killed, crashed hard)
                     return self._final(handle, spec, "crashed", session_id, transcript_path)
+                if stall_deadline is not None:
+                    # A terminal result can land mid-grace without a fresh Stop to
+                    # wake us; check non-blocking on each idle tick so completion
+                    # isn't deferred to grace expiry (up to dev_stall_grace_s late).
+                    result_json = self._result_json(handle, spec, wait=False)
+                    if result_json is not None:
+                        return SessionResult(
+                            status="completed",
+                            result_json=result_json,
+                            session_id=session_id,
+                            transcript_path=transcript_path,
+                        )
                 if stall_deadline is not None and time.monotonic() >= stall_deadline:
                     # the grace window elapsed with no re-invocation; one last
                     # non-blocking check in case the spec landed without a fresh

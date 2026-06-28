@@ -1036,7 +1036,12 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
 
     if args.legend:
         legend_path = Path(args.legend)
-        legend_path.write_text(json.dumps(pseudo.legend(), indent=2) + "\n", encoding="utf-8")
+        # The legend reverses the pseudonyms, so it must never land world-readable
+        # via the inherited umask — create it owner-only (0600).
+        fd = os.open(legend_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(pseudo.legend(), f, indent=2)
+            f.write("\n")
         print(
             f"  ok: alias legend written to {legend_path} — LOCAL ONLY, do NOT share "
             "(it reverses the pseudonyms); delete after use",

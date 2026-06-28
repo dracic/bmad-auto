@@ -322,7 +322,10 @@ class DashboardScreen(Screen[None]):
             self.notify("switch to the Log or Attention tab to copy", severity="warning")
             return
         pane = self.query_one(log_id, RichLog)
-        text = "\n".join(strip.text for strip in pane.lines).rstrip()
+        # No rstrip: keep the joined buffer byte-for-byte identical to what
+        # SelectableRichLog.get_selection() returns, so `y` and drag-select+ctrl+c
+        # copy the same text.
+        text = "\n".join(strip.text for strip in pane.lines)
         if not text:
             self.notify("nothing to copy", severity="warning")
             return

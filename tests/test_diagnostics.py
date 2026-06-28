@@ -172,7 +172,7 @@ def test_pseudonymization_is_stable_and_correlates(project):
     diag, _pseudo, combined = _render_all([run_dir])
     (run,) = diag.runs
     alias = run.tasks[0].alias
-    assert re.fullmatch(r"s1-[0-9a-f]{6}", alias), alias
+    assert re.fullmatch(r"s1-[0-9a-f]{12}", alias), alias
     # the same alias appears in the per-task journal event counts (correlation)
     assert alias in run.journal.per_alias_event_counts
     assert alias in combined

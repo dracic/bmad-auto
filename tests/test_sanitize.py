@@ -171,6 +171,21 @@ def test_scrub_json_redacts_identifier_shaped_secrets():
     assert out["token"] == "<redacted:secret>"
 
 
+def test_scrub_json_scrubs_sensitive_dict_keys(home):
+    # diagnostics routes unknown/future fields through scrub_json, so a key —
+    # not just a value — that is a home path or credential-shaped must be
+    # redacted, while a plain identifier key (and a safe value) survives.
+    obj = {
+        "ghp_CANARYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx01": "v",  # secret-shaped key
+        f"{home}/secret/project": "v",  # home-path key
+        "model": "claude-opus-4-8",  # identifier key + safe value
+    }
+    out = sanitize.scrub_json(obj)
+    assert "ghp_CANARYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx01" not in out
+    assert not any(home in k for k in out)
+    assert out["model"] == "claude-opus-4-8"
+
+
 # --------------------------------------------------------------- Pseudonymizer
 
 
@@ -178,7 +193,7 @@ def test_pseudonymizer_is_stable_within_a_dump():
     p = sanitize.Pseudonymizer()
     a = p.alias("1.2-secret", ns="story", epic=1)
     assert a == p.alias("1.2-secret", ns="story", epic=1)  # cached / stable
-    assert re.fullmatch(r"s1-[0-9a-f]{6}", a)
+    assert re.fullmatch(r"s1-[0-9a-f]{12}", a)
     assert p.alias(None) is None and p.alias("") == ""
     # legend reverses locally; original never equals the alias
     assert p.legend()[a] == "1.2-secret"
@@ -212,10 +227,9 @@ def test_assert_no_leak_fires(text, rule):
 
 def test_assert_no_leak_extra_word_boundary():
     # short basename does not false-positive inside a longer word...
-    assert "sensitive:proj" not in [
-        r for r in sanitize.assert_no_leak("the project root", extra=["proj"])
-    ]
-    # ...but a standalone occurrence is caught
-    assert any(
-        r.startswith("sensitive:") for r in sanitize.assert_no_leak("dir proj here", extra=["proj"])
-    )
+    assert sanitize.assert_no_leak("the project root", extra=["proj"]) == []
+    # ...but a standalone occurrence is caught — and the rule names the position,
+    # never the value, so the failure message can't leak the sensitive string.
+    fired = sanitize.assert_no_leak("dir proj here", extra=["proj"])
+    assert fired == ["sensitive[0]"]
+    assert "proj" not in "".join(fired)
