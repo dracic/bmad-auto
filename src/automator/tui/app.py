@@ -23,7 +23,8 @@ from tomlkit.exceptions import ParseError
 from .. import bmadconfig, decisions, runs, verify
 from ..journal import load_state
 from ..policy import POLICY_FILE
-from ..runs import RUNS_DIR
+from ..process_host import ProcessHostError
+from ..runs import RUNS_DIR, StopRunError
 from . import data, launch
 from .screens.dashboard import DashboardScreen
 from .screens.modals import (
@@ -442,7 +443,7 @@ class BmadAutoApp(App[None]):
         try:
             runs.stop_run(run_dir)
             launch.kill_ctl_window(run_id)
-        except OSError as e:
+        except (OSError, StopRunError, ProcessHostError) as e:
             self.call_from_thread(self.notify, f"stop failed: {e}", severity="error")
             return
         self.call_from_thread(self.notify, f"run {run_id} stopped")

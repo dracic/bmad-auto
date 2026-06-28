@@ -41,6 +41,34 @@ def _dead_pid() -> int:
     return proc.pid
 
 
+class _FakeHost:
+    """A ProcessHost stand-in for driving stop_run's escalation deterministically
+    without spawning real processes. ``alive`` / ``identity`` may be a value or a
+    zero-arg callable (so they can change between the stop-time read and the
+    post-grace check)."""
+
+    def __init__(self, *, alive, identity=1.0, on_terminate=None):
+        self._alive = alive
+        self._identity = identity
+        self.on_terminate = on_terminate
+        self.terminated: list[int] = []
+        self.force_killed: list[int] = []
+
+    def terminate(self, pid):
+        self.terminated.append(pid)
+        if self.on_terminate is not None:
+            self.on_terminate(pid)
+
+    def force_kill(self, pid):
+        self.force_killed.append(pid)
+
+    def is_alive(self, pid):
+        return self._alive() if callable(self._alive) else self._alive
+
+    def identity(self, pid):
+        return self._identity() if callable(self._identity) else self._identity
+
+
 def test_list_run_dirs_sorted_and_filtered(tmp_path):
     _make_run(tmp_path, "20260611-120000-bbbb")
     _make_run(tmp_path, "20260610-090000-aaaa")
@@ -190,26 +218,71 @@ def test_stop_run_respects_engine_written_stopped(tmp_path, monkeypatch):
     trusts it and does not re-journal a fallback entry."""
     monkeypatch.setattr(runs, "kill_session", lambda _rid: None)
     run_dir = _make_state_run(tmp_path, "r1")
-    proc = subprocess.Popen(["sleep", "30"])
-    (run_dir / "engine.pid").write_text(str(proc.pid))
+    (run_dir / "engine.pid").write_text("4242")
 
-    real_kill = os.kill
-
-    def fake_kill(pid, sig):
+    def _mark_stopped(_pid):
         # emulate the engine handler marking stopped, then dying on SIGTERM
-        if pid == proc.pid and sig != 0:
-            st = load_state(run_dir)
-            st.stopped = True
-            save_state(run_dir, st)
-        return real_kill(pid, sig)
+        st = load_state(run_dir)
+        st.stopped = True
+        save_state(run_dir, st)
 
-    monkeypatch.setattr(runs.os, "kill", fake_kill)
+    host = _FakeHost(alive=False, on_terminate=_mark_stopped)
+    monkeypatch.setattr(runs, "get_process_host", lambda: host)
     assert runs.stop_run(run_dir) is True
-    proc.wait(timeout=5)
     assert load_state(run_dir).stopped is True
+    assert host.force_killed == []  # exited gracefully — no escalation
     # trusted the engine: no fallback journal entry written
     journal = run_dir / "journal.jsonl"
     assert not journal.exists() or "fallback" not in journal.read_text()
+
+
+def test_stop_run_force_kills_wedged_engine(tmp_path, monkeypatch):
+    """An engine that ignores SIGTERM past the grace window is force-killed, then
+    marked stopped — as long as its pid identity still matches what we recorded."""
+    monkeypatch.setattr(runs, "kill_session", lambda _rid: None)
+    monkeypatch.setattr(runs, "_STOP_WAIT_S", 0.05)
+    monkeypatch.setattr(runs, "_STOP_POLL_S", 0.01)
+    run_dir = _make_state_run(tmp_path, "r1")
+    (run_dir / "engine.pid").write_text("4242")
+
+    host = _FakeHost(alive=True, identity=123.0)  # never exits, identity stable
+    monkeypatch.setattr(runs, "get_process_host", lambda: host)
+    assert runs.stop_run(run_dir) is True
+    assert host.force_killed == [4242]
+    assert load_state(run_dir).stopped is True
+
+
+def test_stop_run_refuses_force_kill_on_identity_mismatch(tmp_path, monkeypatch):
+    """If the pid is still 'alive' but its identity changed during the grace window
+    (possible pid reuse), refuse to force-kill and raise StopRunError instead."""
+    monkeypatch.setattr(runs, "kill_session", lambda _rid: None)
+    monkeypatch.setattr(runs, "_STOP_WAIT_S", 0.05)
+    monkeypatch.setattr(runs, "_STOP_POLL_S", 0.01)
+    run_dir = _make_state_run(tmp_path, "r1")
+    (run_dir / "engine.pid").write_text("4242")
+
+    identities = iter([123.0, 999.0])  # recorded at stop-time, then changed
+    host = _FakeHost(alive=True, identity=lambda: next(identities))
+    monkeypatch.setattr(runs, "get_process_host", lambda: host)
+    with pytest.raises(runs.StopRunError):
+        runs.stop_run(run_dir)
+    assert host.force_killed == []
+
+
+def test_stop_run_refuses_force_kill_without_identity(tmp_path, monkeypatch):
+    """On a platform that can't provide an identity (None), a wedged engine can't
+    be safely force-killed — raise StopRunError rather than risk a reused pid."""
+    monkeypatch.setattr(runs, "kill_session", lambda _rid: None)
+    monkeypatch.setattr(runs, "_STOP_WAIT_S", 0.05)
+    monkeypatch.setattr(runs, "_STOP_POLL_S", 0.01)
+    run_dir = _make_state_run(tmp_path, "r1")
+    (run_dir / "engine.pid").write_text("4242")
+
+    host = _FakeHost(alive=True, identity=None)
+    monkeypatch.setattr(runs, "get_process_host", lambda: host)
+    with pytest.raises(runs.StopRunError):
+        runs.stop_run(run_dir)
+    assert host.force_killed == []
 
 
 # ---------------------------------------------------------------- prune sessions

@@ -1,0 +1,88 @@
+"""Tests for the cross-platform process-lifecycle seam."""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import pytest
+
+from automator import process_host
+from automator.process_host import PosixProcessHost, WindowsProcessHost, get_process_host
+
+
+@pytest.fixture(autouse=True)
+def _clear_host_cache():
+    # get_process_host is lru_cached and env-driven; isolate every case.
+    get_process_host.cache_clear()
+    yield
+    get_process_host.cache_clear()
+
+
+@pytest.fixture
+def host():
+    return PosixProcessHost()
+
+
+def test_is_alive_true_for_self(host):
+    assert host.is_alive(os.getpid()) is True
+
+
+def test_is_alive_rejects_non_positive(host, monkeypatch):
+    # 0/negative would target a process group via os.kill — the guard must short
+    # out before os.kill is ever reached.
+    def _boom(*_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("os.kill must not be called for pid <= 0")
+
+    monkeypatch.setattr(process_host.os, "kill", _boom)
+    assert host.is_alive(0) is False
+    assert host.is_alive(-1) is False
+
+
+def test_terminate_rejects_non_positive(host, monkeypatch):
+    def _boom(*_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("os.kill must not be called for pid <= 0")
+
+    monkeypatch.setattr(process_host.os, "kill", _boom)
+    host.terminate(0)  # no raise, no signal
+    host.terminate(-42)
+
+
+def test_force_kill_rejects_non_positive(host, monkeypatch):
+    def _boom(*_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("os.kill must not be called for pid <= 0")
+
+    monkeypatch.setattr(process_host.os, "kill", _boom)
+    host.force_kill(0)  # no raise, no signal
+    host.force_kill(-42)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="identity via /proc is Linux-only")
+def test_identity_stable_and_present_for_self(host):
+    first = host.identity(os.getpid())
+    second = host.identity(os.getpid())
+    assert isinstance(first, float)
+    assert first == second  # stable for the life of the pid → a usable reuse guard
+
+
+def test_identity_none_for_non_positive(host):
+    assert host.identity(0) is None
+    assert host.identity(-1) is None
+
+
+def test_default_host_is_posix_on_posix(monkeypatch):
+    monkeypatch.delenv("BMAD_AUTO_PROCESS_HOST", raising=False)
+    get_process_host.cache_clear()
+    assert isinstance(get_process_host(), PosixProcessHost)
+
+
+def test_env_override_selects_by_name(monkeypatch):
+    # The registry selects by name without monkeypatching sys.platform — the hook
+    # PR #19's WindowsProcessHost registration relies on.
+    monkeypatch.setenv("BMAD_AUTO_PROCESS_HOST", "posix")
+    get_process_host.cache_clear()
+    assert isinstance(get_process_host(), PosixProcessHost)
+
+    monkeypatch.setenv("BMAD_AUTO_PROCESS_HOST", "windows")
+    get_process_host.cache_clear()
+    assert isinstance(get_process_host(), WindowsProcessHost)

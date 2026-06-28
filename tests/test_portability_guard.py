@@ -31,11 +31,13 @@ ACK = "portability:"
 # *are* the sanctioned spot (their module docstrings say so).
 TMUX_BACKENDS = {"adapters/tmux_base.py", "adapters/tmux_backend.py"}
 
-# Platform-guarded Unity plugin files that may name a bare POSIX path, each on a
-# line carrying a `# portability:` ack (and guarded by a sys.platform branch).
+# Platform-guarded files that may name a bare POSIX path, each on a line carrying
+# a `# portability:` ack (and guarded by a sys.platform branch). process_host.py's
+# Linux identity reader walks `/proc/<pid>/stat`.
 PATH_ALLOW = {
     "data/plugins/unity/unity_cleanup.py",
     "data/plugins/unity/unity_teardown.py",
+    "process_host.py",
 }
 
 # The two detach helpers that legitimately request POSIX `start_new_session`.
@@ -47,9 +49,9 @@ DETACH_ALLOW = {
 # `os.kill(pid, 0)` is a read-only existence probe on POSIX but *destructive* on
 # Windows (it maps to TerminateProcess). Confine it to the platform-guarded
 # liveness helpers, each on a line carrying a `# portability:` ack; everything
-# else routes through `platform_util.pid_alive`.
+# else routes through the ProcessHost seam (`get_process_host().is_alive`).
 KILL_PROBE_ALLOW = {
-    "platform_util.py",
+    "process_host.py",
     "data/plugins/unity/unity_teardown.py",
 }
 
