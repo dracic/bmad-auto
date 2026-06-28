@@ -140,6 +140,25 @@ def scrub_text(s: str, *, max_lines: int | None = None) -> str:
     return s
 
 
+def _is_word_boundary(ch: str) -> bool:
+    # a string edge ("") or any non-word char counts as a boundary; "word" = [A-Za-z0-9_]
+    return ch == "" or not (ch.isalnum() or ch == "_")
+
+
+def _contains_standalone(text: str, needle: str) -> bool:
+    """Whole-token search for an opaque needle: matches only when the needle is not
+    flanked by word characters. Unlike re's ``\\b`` on the needle's own edges, this
+    still fires when the needle begins or ends with punctuation (e.g. ``.acme``)."""
+    start = 0
+    while (idx := text.find(needle, start)) >= 0:
+        before = text[idx - 1] if idx else ""
+        after = text[idx + len(needle)] if idx + len(needle) < len(text) else ""
+        if _is_word_boundary(before) and _is_word_boundary(after):
+            return True
+        start = idx + 1
+    return False
+
+
 def _scrub_str(s: str) -> str:
     """Sanitize a single string: redact a home path, drop free-form prose, and
     redact a credential-shaped token; an identifier-shaped slug passes verbatim."""
@@ -262,14 +281,15 @@ def assert_no_leak(text: str, *, extra: Iterable[str] = ()) -> list[str]:
         # No passwd entry / no USER env (minimal containers): this one
         # defense-in-depth rule simply can't run; the rest still cover the output.
         user = ""
-    if len(user) >= 5 and re.search(rf"\b{re.escape(user)}\b", text):
+    if len(user) >= 5 and _contains_standalone(text, user):
         fired.append("username")
     for i, item in enumerate(extra):
         item = str(item)
-        # word-boundary match so a short basename ("proj") can't false-positive on
-        # a common word that contains it ("project"); still catches it standalone.
+        # delimiter check so a short basename ("proj") can't false-positive on a
+        # common word that contains it ("project"), yet a value whose own edge is
+        # punctuation (".acme") is still caught — a blind spot of a \b regex.
         # Report the position only — never echo the value, since this rule name is
         # surfaced in the CLI failure message and would otherwise leak it.
-        if len(item) >= 4 and re.search(rf"\b{re.escape(item)}\b", text):
+        if len(item) >= 4 and _contains_standalone(text, item):
             fired.append(f"sensitive[{i}]")
     return fired

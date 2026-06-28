@@ -233,3 +233,6 @@ def test_assert_no_leak_extra_word_boundary():
     fired = sanitize.assert_no_leak("dir proj here", extra=["proj"])
     assert fired == ["sensitive[0]"]
     assert "proj" not in "".join(fired)
+    # values whose own edge is punctuation are still caught (the \b blind spot)
+    assert sanitize.assert_no_leak("see .acme here", extra=[".acme"]) == ["sensitive[0]"]
+    assert sanitize.assert_no_leak("use acme. now", extra=["acme."]) == ["sensitive[0]"]
