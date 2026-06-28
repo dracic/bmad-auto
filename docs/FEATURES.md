@@ -165,6 +165,7 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 - `bmad-auto decisions` — answer deferred-work decisions past sweeps left unanswered (`--list` to just show them).
 - `bmad-auto list` (`ls`) — list every run/sweep with its short ref, type, and status.
 - `bmad-auto status [<run-id>]` — run + sprint summary with per-story token totals.
+- `bmad-auto diagnose [<run-id>]` (`diag`) — emit a sanitized diagnostic dump of a run/sweep to hand maintainers (histograms, counts, env, file sizes — no code/spec/prompts/paths/PII); defaults to the latest run (`--all`, `--out`, `--json`, `--max-journal-entries`).
 - `bmad-auto attach [<run-id>]` — tmux-attach to a run's live agent session.
 - `bmad-auto stop <run-id>` — stop a live run (engine + agent session).
 - `bmad-auto delete <run-id>` — delete a run directory (`--force` stops it first if live).

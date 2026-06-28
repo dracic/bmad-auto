@@ -5,6 +5,42 @@ All notable changes to `bmad-auto` are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
+## [0.7.5] — 2026-06-28
+
+### Added
+
+- **Select and copy text from the TUI Log and Attention panes.** Click-drag highlights and `ctrl+c`
+  copies (those panes are now selectable `RichLog`s with a working `get_selection`); `y` copies the
+  whole active pane in one keystroke. The other panes are interactive widgets — hold your terminal's
+  bypass modifier (Shift on most Linux terminals, Option on iTerm) to use its native selection. Copy
+  rides OSC 52, so under tmux it needs `set -g set-clipboard on` to reach the system clipboard.
+- **`bmad-auto diagnose` emits a sanitized diagnostic dump of a run/sweep** so a user can hand
+  maintainers what's needed to debug a run without shipping any code, spec/story content, prompts,
+  transcripts, file paths, or PII. It derives the diagnostic _shape_ — phase/token/session
+  histograms, escalation counts, adapter/model, env, run-dir file sizes — and routes every
+  content-bearing value through the audited `sanitize` chokepoint: identifiers (story keys,
+  branches, SHAs) are pseudonymized to stable per-dump aliases so events still correlate, free text
+  collapses to presence booleans, and the rendered output is re-scanned by a fail-closed leak
+  self-check before writing. Defaults to the latest run; `--all`, `--out`, `--json`, and a
+  local-only `--legend` are supported.
+
+### Changed
+
+- **The `sanitize` chokepoint now redacts credential-shaped strings.** Identifier-shaped secrets
+  (`ghp_`/`sk-`/`AKIA`/`xoxb-`/JWTs and long high-entropy blobs) previously passed the slug gate
+  verbatim; they are now `<redacted:secret>`, closing the same hole for `probe-adapter`.
+
+### Fixed
+
+- **A dev session that ends its turn to await a long-running background process is no longer
+  mis-stalled.** A `bmad-dev-auto` session that yields to wait on a slow job (a Unity PlayMode run, a
+  long test) and expects to be re-invoked on completion fired a result-less Stop — and since the
+  generic dev adapter runs zero nudges, that was ruled stalled after only the 15s result grace,
+  driving a retry that (with `scm.rollback_on_failure` off) paused the whole sweep for a manual
+  reset. A new `limits.dev_stall_grace_s` (default 600s) opens an idle-grace window on a result-less
+  dev Stop and re-arms it on each re-invocation, so only a genuinely idle gap with no terminal spec —
+  or the session timeout — counts as a stall. Non-dev adapters keep zero grace and are unchanged.
+
 ## [0.7.4] — 2026-06-26
 
 ### Fixed
@@ -680,6 +716,7 @@ enforced in CI.
   implementation phase, driven by a Python control loop with hook-based session transport and
   resumable on-disk run state.
 
+[0.7.5]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.5
 [0.7.4]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.4
 [0.7.3]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.3
 [0.7.2]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.2
