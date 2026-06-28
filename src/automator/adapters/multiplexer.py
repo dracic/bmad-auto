@@ -8,14 +8,20 @@ the seam exists so a future non-POSIX backend (an eventual native-Windows "psmux
 can slot in without the rest of the codebase shelling out to ``tmux`` directly.
 
 ``TerminalMultiplexer`` is the contract a backend author implements. Operation
-names mirror today's call sites verbatim so the migration is mechanical. Get the
-process-wide backend through :func:`get_multiplexer`.
+names mirror today's call sites verbatim so the migration is mechanical. Backends
+register themselves through :func:`register_multiplexer` (bundled ones from
+:func:`_load_builtin_backends`, out-of-tree ones at import time); the process-wide
+backend is selected by registry — by platform, or forced by name through the
+``BMAD_AUTO_MUX_BACKEND`` env var — and returned by :func:`get_multiplexer`.
 """
 
 from __future__ import annotations
 
 import functools
+import os
+import sys
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -171,10 +177,46 @@ class TerminalMultiplexer(ABC):
         return None
 
 
+# (name, matches(platform) -> bool, factory() -> TerminalMultiplexer)
+_BACKENDS: list[tuple[str, Callable[[str], bool], Callable[[], TerminalMultiplexer]]] = []
+_BUILTINS_LOADED = False
+
+
+def register_multiplexer(
+    name: str,
+    matches: Callable[[str], bool],
+    factory: Callable[[], TerminalMultiplexer],
+) -> None:
+    """Register a transport backend. ``matches(sys.platform)`` decides automatic
+    selection; ``name`` is the key for the ``BMAD_AUTO_MUX_BACKEND`` override.
+    Bundled backends register from :func:`_load_builtin_backends`; an out-of-tree
+    backend calls this at import time — no core edit required."""
+    _BACKENDS.append((name, matches, factory))
+
+
+def _load_builtin_backends() -> None:
+    """Import the bundled backends so they self-register. Idempotent and lazy
+    (called from :func:`get_multiplexer`, not at module import) to stay cycle-safe."""
+    global _BUILTINS_LOADED
+    if _BUILTINS_LOADED:
+        return
+    _BUILTINS_LOADED = True
+    from . import tmux_backend  # noqa: F401 — import triggers registration
+
+
 @functools.lru_cache(maxsize=1)
 def get_multiplexer() -> TerminalMultiplexer:
-    """Return the process-wide terminal multiplexer. The seam where a backend
-    would later be selected by policy; today it is always tmux."""
-    from .tmux_backend import TmuxMultiplexer  # lazy import: avoid a cycle
+    """Return the process-wide terminal multiplexer, selected by registry.
+
+    ``BMAD_AUTO_MUX_BACKEND`` forces a backend by name (test / override hook);
+    otherwise the first backend whose ``matches(sys.platform)`` is true wins. tmux
+    is the default fallback, so POSIX behavior is unchanged. Cached — tests that
+    flip the env var must call ``get_multiplexer.cache_clear()``."""
+    forced = os.environ.get("BMAD_AUTO_MUX_BACKEND")
+    _load_builtin_backends()
+    for name, matches, factory in _BACKENDS:
+        if name == forced or (not forced and matches(sys.platform)):
+            return factory()
+    from .tmux_backend import TmuxMultiplexer  # default fallback
 
     return TmuxMultiplexer()
