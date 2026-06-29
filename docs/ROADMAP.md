@@ -9,25 +9,37 @@ Status legend: **planned** (agreed, not started) · **exploring** (shape still o
 
 ## Native Windows multiplexer backend
 
-**Status:** planned · **Foundation:** multiplexer seam + portability hardening landed (v0.7.0)
+**Status:** planned · **Foundation:** the full platform-seam series landed (multiplexer registry + `BaseTmuxBackend` + `ProcessHost` + hook interpreter + validate preflight, v0.7.6; original seam v0.7.0)
 
 The orchestrator no longer fuses tmux into the engine. All session/window/pane operations
 go through a single `TerminalMultiplexer` ABC (`src/automator/adapters/multiplexer.py`),
-obtained from `get_multiplexer()`; `TmuxMultiplexer` (`adapters/tmux_backend.py`) is the
-**only** file allowed to shell out to `tmux`, and it quarantines the POSIX `sh -c`
-parked-window trailer. Alongside it, the scattered POSIX-isms were guarded behind a
-platform-util seam (`terminate_pid`, detach kwargs, `SIGKILL` fallback, `os.devnull`) and
-the Unity plugin's `/proc`/`/tmp`/`cp -a`/symlink primitives now degrade off Linux (with
-`psutil` from the optional `windows` extra), all verified by a CI portability guard
-(`tests/test_portability_guard.py`). **WSL already works today** — it _is_ Linux, so it
-takes every fast path unchanged; this is purely about a future _native_ Windows host.
+obtained from `get_multiplexer()`; the tmux backend — argv + spawn primitive in
+`BaseTmuxBackend` (`adapters/tmux_base.py`), POSIX leaf `TmuxMultiplexer`
+(`adapters/tmux_backend.py`) — is the **only** place allowed to shell out to `tmux`, and it
+quarantines the POSIX `sh -c` parked-window trailer. Backends now self-**register**
+(`register_multiplexer`, selected by platform with a `BMAD_AUTO_MUX_BACKEND` override) rather
+than being hardcoded into `get_multiplexer()`. The process-lifecycle POSIX-isms moved behind a
+matching seam, `ProcessHost` (`src/automator/process_host.py`): `terminate` / `force_kill` /
+`is_alive` / `identity` (a PID-reuse guard) plus `hook_interpreter()` (so hook registration
+never branches on platform), registered the same way (`register_process_host`,
+`BMAD_AUTO_PROCESS_HOST`); `WindowsProcessHost` already ships. `bmad-auto validate` runs a
+`_platform_preflight()` that reports the selected backend's readiness and names the process
+host — so a new OS surfaces in preflight by registering, not by a `validate` edit. The Unity
+plugin's `/proc`/`/tmp`/`cp -a`/symlink primitives degrade off Linux (with `psutil` from the
+optional `non-linux` extra) and its pid lifecycle now delegates to `ProcessHost`; everything is
+held by a CI portability guard (`tests/test_portability_guard.py`). **WSL already works today**
+— it _is_ Linux, so it takes every fast path unchanged; this is purely about a future _native_
+Windows host.
 
 The remaining work is a real non-tmux backend (a "psmux"-style multiplexer) that implements
-the `TerminalMultiplexer` contract on native Windows and is returned from `get_multiplexer()`
-behind a platform/policy check. The seam is designed so this slots in with **no change to
-the adapters, `runs.py`, `tui/launch.py`, `probe.py`, or `tui/data.py`** — a backend author
-reads `multiplexer.py` for the contract and `tmux_backend.py` for the reference
-implementation (see the [adapter authoring guide](adapter-authoring-guide.md#the-transport-contract-for-a-backend-author)).
+the `TerminalMultiplexer` contract on native Windows and registers itself for `win32`. The
+seams are designed so this slots in as **new files + one registration line each, with no
+change to the adapters, `runs.py`, `tui/launch.py`, `probe.py`, `tui/data.py`, or
+`cli.py`'s `validate`** (`WindowsProcessHost` and its hook interpreter are already in place
+and registered). The end-to-end port path — both build options, the test-override env vars,
+and exactly what a native-Windows port costs — is documented in
+[Porting bmad-auto to a new OS](porting-to-a-new-os.md); the deep transport contract is in
+the [adapter authoring guide](adapter-authoring-guide.md#the-transport-contract-for-a-backend-author).
 
 **Open questions:** what hosts the windows on native Windows (Windows Terminal panes, a
 ConPTY-based manager, a headless process supervisor?); how attach/detach and the parked

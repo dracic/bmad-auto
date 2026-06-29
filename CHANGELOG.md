@@ -5,6 +5,38 @@ All notable changes to `bmad-auto` are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
+## [0.7.6] — 2026-06-28
+
+### Changed
+
+- **The OS is now abstracted behind a registry of seams, so a non-tmux/native-Windows port is new
+  files plus one registration line each — no core edits.** The terminal multiplexer is selected
+  through a registry (`register_multiplexer`, by `sys.platform` with a `BMAD_AUTO_MUX_BACKEND`
+  override) rather than hardcoded in `get_multiplexer()`, and the tmux backend split into a reusable
+  `BaseTmuxBackend` extension point — every tmux invocation funnels through one overridable `_run()`
+  primitive — with `TmuxMultiplexer` as a thin POSIX leaf, so a tmux-family backend (an eventual
+  "psmux") overrides only the spawn primitive and the few divergent methods.
+- **Process-lifecycle primitives moved behind a `ProcessHost` seam.** Politely-stop / force-kill /
+  liveness / PID-reuse-identity now route through `get_process_host()` (registered like the
+  multiplexer, with a `BMAD_AUTO_PROCESS_HOST` override); a `WindowsProcessHost` ships ready to
+  register. Hook registration no longer hardcodes `python3` — it takes the interpreter prefix from
+  `ProcessHost.hook_interpreter()` (POSIX `python3`; Windows `uv run --no-project python`), and
+  `bmad-auto validate` runs a platform preflight that reports the selected backend's readiness and
+  names the process host. Behavior on Linux/macOS/WSL is unchanged.
+- **The bundled Unity plugin's teardown delegates pid lifecycle to `ProcessHost` and its helper
+  scripts run under the orchestrator's own interpreter.** Plugin helper scripts are spawned via
+  `sys.executable` (not a PATH-resolved `python3`), so a bundled script may import `automator` seams;
+  `unity_teardown.py` now reaps leaked Editor/MCP processes through `get_process_host()` instead of
+  re-implementing kill/liveness, gaining Windows behavior for free.
+
+### Added
+
+- **A consolidated [porting guide](docs/porting-to-a-new-os.md)** maps the four OS seams (terminal
+  multiplexer, process lifecycle, hook interpreter, validate preflight), their registries and
+  test-override env vars, and exactly what a native-Windows port costs end to end. The
+  adapter-/plugin-authoring guides, ROADMAP, README, and FEATURES are updated to the post-registry
+  world.
+
 ## [0.7.5] — 2026-06-28
 
 ### Added
@@ -716,6 +748,7 @@ enforced in CI.
   implementation phase, driven by a Python control loop with hook-based session transport and
   resumable on-disk run state.
 
+[0.7.6]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.6
 [0.7.5]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.5
 [0.7.4]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.4
 [0.7.3]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.3

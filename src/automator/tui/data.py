@@ -30,7 +30,7 @@ from ..adapters.multiplexer import MultiplexerError, get_multiplexer
 from ..gates import ATTENTION_FILE
 from ..journal import JOURNAL_FILE, LOGS_DIR, STATE_FILE, load_state
 from ..model import RunState
-from ..platform_util import pid_alive
+from ..process_host import get_process_host
 from ..runs import PID_FILE, list_run_dirs, session_name
 
 # Run statuses shown by the dashboard.
@@ -69,7 +69,7 @@ def liveness(run_dir: Path) -> str:
     except (OSError, ValueError):
         return _session_liveness(run_dir.name)
     try:
-        return "alive" if pid_alive(pid) else "dead"
+        return "alive" if get_process_host().is_alive(pid) else "dead"
     except Exception:
         # never falsely dead — an unexpected probe failure stays 'unknown'
         return "unknown"

@@ -600,28 +600,51 @@ goes completely inert — proof of the trust gate.
 
 ## Platform portability
 
-bmad-auto's core is portable Python and the tmux dependency is quarantined behind
-the multiplexer seam (see the [adapter authoring guide](adapter-authoring-guide.md)).
-Plugin **helper scripts** run as standalone `python3 <script>` subprocesses in the
-unit's worktree, so they should follow the same discipline:
+bmad-auto's core is portable Python, and the OS-specific work is quarantined behind
+seams (the tmux transport, the `ProcessHost` lifecycle, the hook interpreter — see
+[Porting bmad-auto to a new OS](porting-to-a-new-os.md)). Plugin **helper scripts**
+are spawned under the orchestrator's own interpreter (`sys.executable`), **not** a
+PATH-resolved `python3` — so a bundled script may `import automator` and reach those
+seams instead of re-implementing OS primitives. Follow this discipline:
 
-- **Stay dependency-free.** Import only the stdlib so the script runs anywhere the
-  core does. If you genuinely need a third-party package on one platform, make it an
-  **optional extra** in `pyproject.toml` and **import it lazily** with a clear error
-  if missing — never at module top level. The bundled Unity plugin does exactly this
-  for `psutil`: a `windows` extra it imports only on non-Linux process discovery, so
-  the dep-free Linux/WSL path never pulls it in.
-- **Guard POSIX-only primitives.** Anything absent or differently-shaped on Windows —
-  `signal.SIGKILL`, `os.kill`, `start_new_session`, `cp`/`--reflink`, symlinks,
-  `/proc`, `/tmp` — needs a fallback behind a `sys.platform` branch, with a
-  `# portability: <reason>` comment so the intent (and the CI portability guard)
-  stays honest. Keep the Linux fast path byte-identical; the Windows branch can be
-  best-effort and is not exercised until a native-Windows backend ships. WSL **is**
-  Linux, so it takes the fast path unchanged.
+- **Use the `ProcessHost` seam for pid lifecycle.** For terminate / force-kill /
+  liveness, call `get_process_host()` rather than guarding `os.kill` /
+  `signal.SIGKILL` / `taskkill` behind your own `sys.platform` branch:
 
-See the Unity plugin's `unity_setup.py` / `unity_teardown.py` / `unity_cleanup.py`
-(and the [Game Engine plugin guide](game-engine-plugin-guide.md)) for worked
-examples of each guard.
+  ```python
+  from automator.process_host import get_process_host
+
+  host = get_process_host()
+  host.terminate(pid)
+  if host.is_alive(pid):
+      host.force_kill(pid)
+  ```
+
+  The seam already carries the POSIX and Windows behavior, so the script gains a
+  new OS for free when a host registers.
+
+- **Stay dependency-free.** Beyond `automator` itself, import only the stdlib so the
+  script runs anywhere the core does. If you genuinely need a third-party package on
+  one platform, make it an **optional extra** in `pyproject.toml` and **import it
+  lazily** with a clear error if missing — never at module top level. The bundled
+  Unity plugin does exactly this for `psutil`: a `non-linux` extra it imports only on
+  non-Linux process _discovery_, so the dep-free Linux/WSL path never pulls it in.
+
+- **Guard the primitives that have no seam.** Anything absent or differently-shaped
+  on Windows that isn't behind a seam — `cp`/`--reflink`, symlinks, `/proc` scanning,
+  `/tmp`, `start_new_session` — still needs a fallback behind a `sys.platform`
+  branch, with a `# portability: <reason>` comment so the intent (and the CI
+  portability guard, `tests/test_portability_guard.py`) stays honest. Keep the Linux
+  fast path byte-identical; the Windows branch can be best-effort and is not
+  exercised until a native-Windows backend ships. WSL **is** Linux, so it takes the
+  fast path unchanged.
+
+The Unity plugin's `unity_teardown.py` is the worked example: it **delegates** its
+SIGTERM→SIGKILL sweep of leaked Editor / MCP-server processes to
+`get_process_host()` (so it inherits Windows behavior), while still doing its own
+worktree-bound process _discovery_ via the guarded `/proc`-with-psutil-fallback
+scan. See it alongside `unity_setup.py` / `unity_cleanup.py` (and the
+[Game Engine plugin guide](game-engine-plugin-guide.md)) for both shapes.
 
 ## Reference
 

@@ -26,13 +26,17 @@ These are independent and abstracted separately:
 - **Transport axis** — `TerminalMultiplexer` (`adapters/multiplexer.py`): how
   sessions, windows, and panes are created, observed, and torn down. The generic
   adapter never shells out itself — it goes through `self.mux`, obtained from
-  `get_multiplexer()`. The one backend today is tmux
-  (`adapters/tmux_backend.py`), which is the **only** file allowed to invoke
-  `tmux` (and the only place POSIX-shell trailers live). A future non-POSIX
-  backend (e.g. a native-Windows "psmux") implements the `TerminalMultiplexer`
-  contract and slots in behind `get_multiplexer()` with no change to the adapters.
-  A backend author reads `multiplexer.py` for the contract and `tmux_backend.py`
-  for the reference implementation.
+  `get_multiplexer()`. The one backend today is tmux: argv construction and the
+  single spawn primitive live in `BaseTmuxBackend` (`adapters/tmux_base.py`), with
+  the thin POSIX leaf `TmuxMultiplexer` (`adapters/tmux_backend.py`); together they
+  are the **only** files allowed to invoke `tmux` (and the only place POSIX-shell
+  trailers live). A future non-POSIX backend (e.g. a native-Windows "psmux")
+  registers itself via `register_multiplexer(...)` and slots in behind
+  `get_multiplexer()` with no change to the adapters. A backend author reads
+  `multiplexer.py` for the contract and `tmux_backend.py` / `tmux_base.py` for the
+  reference implementation. Transport is one of **four OS seams** — the others
+  (process lifecycle, hook interpreter, validate preflight) are mapped in
+  [Porting bmad-auto to a new OS](porting-to-a-new-os.md).
 
 ### The transport contract (for a backend author)
 
@@ -40,12 +44,21 @@ Every part of the codebase that touches sessions, windows, or clients now goes
 through `get_multiplexer()` — not just the generic adapter but also `runs.py`
 (session listing/tagging, kill, attach argv), `tui/launch.py` (the control
 session and its parked orchestrator windows), `probe.py` (the throwaway probe
-session), and `tui/data.py` (legacy-run liveness). A grep for `"tmux"` outside
-`adapters/tmux_backend.py` should turn up only `shutil.which("tmux")` presence
-checks, never an invocation.
+session), and `tui/data.py` (legacy-run liveness). A grep for `"tmux"` outside the
+tmux backend (`adapters/tmux_base.py` + `adapters/tmux_backend.py`) should turn up
+only `shutil.which("tmux")` presence checks, never an invocation.
 
-To add a backend, implement `TerminalMultiplexer` (`adapters/multiplexer.py`) and
-return it from `get_multiplexer()`. The contract groups into:
+To add a backend, build a `TerminalMultiplexer` (`adapters/multiplexer.py`) and
+**register** it — `register_multiplexer(name, matches, factory)`, where
+`matches(sys.platform)` decides automatic selection and `name` is the key the
+`BMAD_AUTO_MUX_BACKEND` env var forces (for tests / overrides). `get_multiplexer()`
+returns the first backend whose `matches` is true, with tmux as the default
+fallback. There are two build paths: extend `BaseTmuxBackend` (`adapters/tmux_base.py`)
+for a tmux-family backend — overriding only its single spawn primitive `_run()`
+plus the few divergent methods (e.g. the parked-window trailer) — or implement
+`TerminalMultiplexer` fresh for a host with no tmux-shaped CLI. The non-transport
+seams of a full OS port are in
+[Porting bmad-auto to a new OS](porting-to-a-new-os.md). The contract groups into:
 
 - **Sessions** — `has_session`, `new_session` (geometry is optional: agent
   sessions pin a fixed pane size because they are observed while detached; the

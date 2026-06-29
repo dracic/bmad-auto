@@ -29,6 +29,7 @@ from .adapters.base import CodingCLIAdapter
 from .engine import Engine
 from .journal import Journal, load_state, save_state
 from .model import RunState
+from .process_host import ProcessHostError
 from .runs import RUNS_DIR
 from .sweep import SweepEngine
 
@@ -108,6 +109,43 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
 # ----------------------------------------------------------------- commands
 
 
+def _platform_preflight() -> tuple[list[str], list[str]]:
+    """Probe the platform-selected seams — the terminal multiplexer and the process
+    host — for `cmd_validate`, returning ``(notes, problems)``.
+
+    A backend reports its own readiness through ``available()`` / ``version()``, so
+    a new OS or transport surfaces here by *registering* rather than by adding a
+    ``sys.platform`` branch to validate. The process host is named so a
+    misselection (e.g. the Windows host picked on Linux) is visible at a glance.
+    """
+    from .adapters.multiplexer import get_multiplexer
+    from .process_host import get_process_host
+
+    notes: list[str] = []
+    problems: list[str] = []
+
+    try:
+        backend = get_multiplexer()
+        label = type(backend).__name__
+        if backend.available():
+            version = backend.version()
+            notes.append(f"multiplexer {label} available" + (f" ({version})" if version else ""))
+        else:
+            problems.append(
+                f"multiplexer {label} unavailable — its transport binary is not on PATH; "
+                f"see `bmad-auto diagnose`"
+            )
+    except Exception as e:  # noqa: BLE001 — selection or readiness must not abort validate
+        problems.append(f"multiplexer preflight failed: {e}")
+
+    try:
+        notes.append(f"process host: {type(get_process_host()).__name__}")
+    except Exception as e:  # noqa: BLE001 — a bad BMAD_AUTO_PROCESS_HOST must report, not crash
+        problems.append(f"process host preflight failed: {e}")
+
+    return notes, problems
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     project = _project(args)
     problems: list[str] = []
@@ -160,8 +198,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
     except verify.GitError as e:
         problems.append(f"git check failed: {e}")
 
-    tools = ("tmux", *dict.fromkeys(p.binary for p in profiles))
-    for tool in tools:
+    pf_notes, pf_problems = _platform_preflight()
+    notes.extend(pf_notes)
+    problems.extend(pf_problems)
+
+    for tool in dict.fromkeys(p.binary for p in profiles):
         if shutil.which(tool):
             notes.append(f"{tool} found")
         else:
@@ -579,7 +620,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             return 1
         if not produced:
             print(
-                f"no resolution recorded for {story_key} " f"(agent did not write resolution.json)",
+                f"no resolution recorded for {story_key} (agent did not write resolution.json)",
                 file=sys.stderr,
             )
 
@@ -754,7 +795,12 @@ def cmd_stop(args: argparse.Namespace) -> int:
         print(str(e), file=sys.stderr)
         return 1
     args.run_id = run_dir.name
-    if not runs.stop_run(run_dir):
+    try:
+        stopped = runs.stop_run(run_dir)
+    except (runs.StopRunError, ProcessHostError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    if not stopped:
         print(f"run {args.run_id} already finished", file=sys.stderr)
         return 1
     print(f"run {args.run_id} stopped")
@@ -776,7 +822,11 @@ def cmd_delete(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        runs.stop_run(run_dir)
+        try:
+            runs.stop_run(run_dir)
+        except (runs.StopRunError, ProcessHostError) as e:
+            print(str(e), file=sys.stderr)
+            return 1
     runs.delete_run(run_dir)
     print(f"run {args.run_id} deleted")
     return 0
@@ -797,7 +847,11 @@ def cmd_archive(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        runs.stop_run(run_dir)
+        try:
+            runs.stop_run(run_dir)
+        except (runs.StopRunError, ProcessHostError) as e:
+            print(str(e), file=sys.stderr)
+            return 1
     dest = runs.archive_run(project, run_dir)
     print(f"run {args.run_id} archived to {dest}")
     return 0
@@ -939,8 +993,7 @@ def cmd_tui(args: argparse.Namespace) -> int:
     except ModuleNotFoundError as e:
         if (e.name or "").partition(".")[0] in ("textual", "tomlkit"):
             print(
-                "error: the TUI requires optional dependencies — "
-                "uv tool install 'bmad-auto[tui]'",
+                "error: the TUI requires optional dependencies — uv tool install 'bmad-auto[tui]'",
                 file=sys.stderr,
             )
             return 1

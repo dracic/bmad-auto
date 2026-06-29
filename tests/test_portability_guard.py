@@ -25,16 +25,19 @@ ACK = "portability:"
 
 # ----------------------------------------------------------------- allowlists
 
-# The single file allowed to shell out to ``tmux`` — the whole-file quarantine
-# for tmux/POSIX-shell knowledge. No per-line ack needed: the file *is* the
-# sanctioned spot (its module docstring says so).
-TMUX_BACKEND = "adapters/tmux_backend.py"
+# The files allowed to shell out to ``tmux`` — the whole-file quarantine for
+# tmux/POSIX-shell knowledge, split across the shared base (where the spawn
+# primitive + argv live) and its POSIX leaf. No per-line ack needed: these files
+# *are* the sanctioned spot (their module docstrings say so).
+TMUX_BACKENDS = {"adapters/tmux_base.py", "adapters/tmux_backend.py"}
 
-# Platform-guarded Unity plugin files that may name a bare POSIX path, each on a
-# line carrying a `# portability:` ack (and guarded by a sys.platform branch).
+# Platform-guarded files that may name a bare POSIX path, each on a line carrying
+# a `# portability:` ack (and guarded by a sys.platform branch). process_host.py's
+# Linux identity reader walks `/proc/<pid>/stat`.
 PATH_ALLOW = {
     "data/plugins/unity/unity_cleanup.py",
     "data/plugins/unity/unity_teardown.py",
+    "process_host.py",
 }
 
 # The two detach helpers that legitimately request POSIX `start_new_session`.
@@ -46,10 +49,10 @@ DETACH_ALLOW = {
 # `os.kill(pid, 0)` is a read-only existence probe on POSIX but *destructive* on
 # Windows (it maps to TerminateProcess). Confine it to the platform-guarded
 # liveness helpers, each on a line carrying a `# portability:` ack; everything
-# else routes through `platform_util.pid_alive`.
+# else routes through the ProcessHost seam (`get_process_host().is_alive`). The
+# Unity teardown no longer probes directly — it delegates to the seam.
 KILL_PROBE_ALLOW = {
-    "platform_util.py",
-    "data/plugins/unity/unity_teardown.py",
+    "process_host.py",
 }
 
 # The two sanctioned `shell=True` spots: operator-authored command strings whose
@@ -197,10 +200,10 @@ def _of(kind: str):
 def test_no_tmux_invocation_outside_backend():
     """Only the tmux backend may build a ``["tmux", ...]`` argv — every other call
     site goes through the multiplexer seam."""
-    offenders = [(rel, ln, txt) for _, rel, ln, txt in _of("tmux") if rel != TMUX_BACKEND]
+    offenders = [(rel, ln, txt) for _, rel, ln, txt in _of("tmux") if rel not in TMUX_BACKENDS]
     assert not offenders, (
-        "tmux invoked outside adapters/tmux_backend.py — route it through "
-        "get_multiplexer() instead:\n"
+        "tmux invoked outside the tmux backend (adapters/tmux_base.py, "
+        "adapters/tmux_backend.py) — route it through get_multiplexer() instead:\n"
         + "\n".join(f"  {rel}:{ln}: {txt.strip()}" for rel, ln, txt in offenders)
     )
 

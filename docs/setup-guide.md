@@ -24,12 +24,13 @@ of the README.
   tmux is the only backend shipped today. It is required for launching, attaching, and
   driving runs (pure TUI observation works without it). The multiplexer sits behind a
   pluggable seam (`TerminalMultiplexer`), so a native-Windows backend can be added later
-  without changing the engine — see the
-  [adapter authoring guide](adapter-authoring-guide.md#the-transport-contract-for-a-backend-author).
+  without changing the engine — contributors should start with
+  [Porting bmad-auto to a new OS](porting-to-a-new-os.md).
 - **OS** — Linux or macOS. **Windows is supported via WSL**, which _is_ Linux: tmux and
   every POSIX path work unchanged there, so no special setup is needed. **Native Windows
   is not yet shipped** — it awaits a non-tmux multiplexer backend (tracked in
-  [the roadmap](ROADMAP.md#native-windows-multiplexer-backend)).
+  [the roadmap](ROADMAP.md#native-windows-multiplexer-backend); the port path is in
+  [Porting bmad-auto to a new OS](porting-to-a-new-os.md)).
 
 ## Installed via the BMAD-method installer? (recommended)
 

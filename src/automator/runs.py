@@ -13,11 +13,18 @@ from . import verify
 from .adapters.multiplexer import get_multiplexer
 from .journal import STATE_FILE, Journal, load_state, save_state
 from .model import PAUSE_ESCALATION, Phase
-from .platform_util import pid_alive, terminate_pid
+from .process_host import get_process_host
 
 RUNS_DIR = Path(".automator") / "runs"
 ARCHIVE_DIR = Path(".automator") / "archive"
 PID_FILE = "engine.pid"
+
+
+class StopRunError(Exception):
+    """A live run could not be stopped — the engine ignored SIGTERM and its pid's
+    identity can no longer be verified, so force-killing would risk an unrelated
+    (reused) pid. The caller surfaces this rather than silently marking stopped."""
+
 
 # How long stop_run waits for a signalled engine to exit before falling back to
 # marking the run stopped itself.
@@ -120,7 +127,7 @@ def engine_alive(run_dir: Path) -> bool:
     pid = read_pid(run_dir)
     if pid is None:
         return False
-    return pid_alive(pid)
+    return get_process_host().is_alive(pid)
 
 
 # ----------------------------------------------------------- stop / delete / archive
@@ -213,24 +220,45 @@ def stop_run(run_dir: Path) -> bool:
     Prefers the engine's own SIGTERM handler so the engine stays the single
     writer of `stopped` (it marks the run, kills its in-flight agent window, and
     exits). Falls back to an external kill + mark when there is no live engine
-    pid, it is a legacy run, or it does not exit in time.
+    pid, it is a legacy run, or it does not exit in time. A wedged engine that
+    ignores SIGTERM past the grace window is force-killed — but only while we can
+    still prove the pid is the same process we signalled (a pid-reuse guard);
+    otherwise we raise StopRunError rather than risk killing an unrelated process.
     """
     state = load_state(run_dir)
     if state.finished:
         return False
 
+    host = get_process_host()
     pid = read_pid(run_dir)
+    identity = None
     if pid is not None:
+        identity = host.identity(pid)  # recorded before signalling, for the reuse guard
         try:
-            terminate_pid(pid)
+            host.terminate(pid)
         except (ProcessLookupError, PermissionError, OSError):
             pid = None  # already gone / not ours — go straight to fallback
     if pid is not None:
         deadline = time.monotonic() + _STOP_WAIT_S
         while time.monotonic() < deadline:
-            if not pid_alive(pid):
+            if not host.is_alive(pid):
                 break  # exited
             time.sleep(_STOP_POLL_S)
+        if host.is_alive(pid):
+            # still wedged past the grace window — escalate to a force-kill, but
+            # only if this is provably the same process we signalled (never SIGKILL
+            # a pid the kernel may have recycled to an unrelated process).
+            if identity is not None and host.identity(pid) == identity:
+                try:
+                    host.force_kill(pid)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass  # raced us to exit — that's the outcome we wanted
+            else:
+                raise StopRunError(
+                    f"run {run_dir.name}: engine pid {pid} ignored SIGTERM and its "
+                    "identity can no longer be verified; refusing to force-kill a "
+                    "possibly-reused pid"
+                )
         # the engine clears its agent window itself, but kill the session as a
         # backstop in case it died before tearing it down
         kill_session(run_dir.name)

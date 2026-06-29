@@ -147,6 +147,23 @@ def test_install_into_full(tmp_path):
     assert final_gitignore.count(".automator/cache/") == 1
 
 
+def test_hook_command_uses_selected_process_host(tmp_path, monkeypatch):
+    # The hook interpreter is platform-selected: forcing the Windows host swaps the
+    # registered command's prefix without `install` branching on sys.platform.
+    from automator.process_host import get_process_host
+
+    monkeypatch.setenv("BMAD_AUTO_PROCESS_HOST", "windows")
+    get_process_host.cache_clear()
+    try:
+        assert install_into(tmp_path) == 0
+        settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        cmd = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+        assert cmd.startswith("uv run --no-project python ")
+    finally:
+        monkeypatch.delenv("BMAD_AUTO_PROCESS_HOST", raising=False)
+        get_process_host.cache_clear()
+
+
 def test_install_into_multiple_clis(tmp_path):
     assert install_into(tmp_path, clis=("codex", "gemini")) == 0
 
