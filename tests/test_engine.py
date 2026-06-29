@@ -340,6 +340,150 @@ def test_generic_dev_path_no_sprint_advance_when_spec_unfinalized(project):
     assert story_status(project.sprint_status, "1-1-a") == "ready-for-dev"
 
 
+def test_generic_reconcile_advances_stale_frontmatter_done(project):
+    """bmad-dev-auto finalized in prose (## Auto Run Result: Status done) but left
+    the frontmatter at the template default. The orchestrator reconciles the
+    frontmatter before the sprint sync + verify, so completed, tested work reaches
+    DONE instead of falsely deferring — and the repair is journaled loudly."""
+    from automator.policy import DevPolicy, ReviewPolicy
+    from automator.sprintstatus import story_status
+    from automator.verify import read_frontmatter, status_of
+
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    pol = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        review=ReviewPolicy(enabled=False),
+        dev=DevPolicy(skill="bmad-dev-auto"),
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(
+        project,
+        [generic_dev_effect(project, "1-1-a", final_status="draft", prose_status="done")],
+        policy=pol,
+    )
+    summary = engine.run()
+
+    assert summary.done == 1 and summary.deferred == 0 and not summary.paused
+    assert engine.state.tasks["1-1-a"].phase == Phase.DONE
+    assert story_status(project.sprint_status, "1-1-a") == "done"
+    # the frontmatter on disk was repaired to the success status
+    assert status_of(read_frontmatter(spec_path(project, "1-1-a"))) == "done"
+    # and the repair is recorded loudly so the upstream skill quirk stays visible
+    recon = [e for e in engine.journal.entries() if e["kind"] == "spec-status-reconciled"]
+    assert len(recon) == 1
+    assert recon[0]["frm"] == "draft" and recon[0]["to"] == "done"
+
+
+def test_generic_reconcile_idempotent_when_already_done(project):
+    """When the skill DID advance the frontmatter to done, reconcile is a no-op:
+    no second write, no `spec-status-reconciled` journal entry."""
+    from automator.policy import DevPolicy, ReviewPolicy
+
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    pol = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        review=ReviewPolicy(enabled=False),
+        dev=DevPolicy(skill="bmad-dev-auto"),
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(
+        project,
+        [generic_dev_effect(project, "1-1-a", final_status="done", prose_status="done")],
+        policy=pol,
+    )
+    summary = engine.run()
+
+    assert summary.done == 1
+    recon = [e for e in engine.journal.entries() if e["kind"] == "spec-status-reconciled"]
+    assert recon == []
+
+
+def test_generic_reconcile_skips_blocked_prose(project):
+    """A blocked outcome (prose Status: blocked) is NEVER reconciled: the
+    frontmatter stays non-terminal, no `spec-status-reconciled` is emitted, and the
+    story does not falsely pass (it defers via the unfinalized-spec gate)."""
+    from automator.policy import DevPolicy, LimitsPolicy, ReviewPolicy
+
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    pol = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        review=ReviewPolicy(enabled=False),
+        dev=DevPolicy(skill="bmad-dev-auto"),
+        limits=LimitsPolicy(max_dev_attempts=1),
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(
+        project,
+        [generic_dev_effect(project, "1-1-a", final_status="draft", prose_status="blocked")],
+        policy=pol,
+    )
+    summary = engine.run()
+
+    assert summary.done == 0  # blocked prose never rides reconcile to a pass
+    # reconcile never fired (no journal entry); the unfinalized spec defers as before
+    recon = [e for e in engine.journal.entries() if e["kind"] == "spec-status-reconciled"]
+    assert recon == []
+
+
+def test_generic_reconcile_does_not_bypass_no_change_gate(project):
+    """Reconcile repairs a bookkeeping field, never the proof-of-work gate. A
+    session that finalizes in prose (Status: done) but produced NO real code change
+    is reconciled to done on disk yet still DEFERS — has_changes_since backstops it,
+    so empty work cannot ride the prose marker to PROCEED."""
+    from conftest import git
+
+    from automator.adapters.base import SessionResult
+    from automator.policy import DevPolicy, LimitsPolicy, ReviewPolicy
+    from automator.verify import rev_parse_head
+
+    # match real projects (#2522): the spec dir is gitignored, so the spec file
+    # itself is not a "change" — only real code edits count toward the diff gate.
+    gi = project.project / ".gitignore"
+    gi.write_text(gi.read_text() + "_bmad-output/\n")
+    git(project.project, "add", "-A")
+    git(project.project, "commit", "-q", "-m", "ignore artifacts")
+
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+
+    def effect(spec):
+        # finalize in prose only; touch NO source file
+        baseline = rev_parse_head(project.project)
+        sp = spec_path(project, "1-1-a")
+        write_spec(sp, "draft", baseline, prose_status="done")
+        return SessionResult(
+            status="completed",
+            result_json={
+                "workflow": "auto-dev",
+                "story_key": "1-1-a",
+                "spec_file": str(sp),
+                "baseline_commit": baseline,
+                "escalations": [],
+            },
+        )
+
+    pol = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        review=ReviewPolicy(enabled=False),
+        dev=DevPolicy(skill="bmad-dev-auto"),
+        limits=LimitsPolicy(max_dev_attempts=1),
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(project, [effect], policy=pol)
+    summary = engine.run()
+
+    assert summary.deferred == 1 and summary.done == 0
+    # reconcile DID fire (the spec was advanced to done; recorded before the
+    # deferral relocates the spec to the archive) ...
+    recon = [e for e in engine.journal.entries() if e["kind"] == "spec-status-reconciled"]
+    assert len(recon) == 1 and recon[0]["to"] == "done"
+    # ... but the deterministic diff gate still deferred the empty work
+    assert "no changes" in (engine.state.tasks["1-1-a"].defer_reason or "")
+
+
 def test_generic_repair_reopens_spec_before_reinvocation(project):
     """B6: bmad-dev-auto self-finalizes to `done`; its step-01 would route a done
     spec to "ingest as context, don't resume." So before a verify-failure repair

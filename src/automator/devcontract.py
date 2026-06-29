@@ -43,6 +43,13 @@ STATUS_LINE_RE = re.compile(
 DONE = "done"
 BLOCKED = "blocked"
 
+# Frontmatter statuses a half-finalized generic spec may be reconciled FROM when
+# its prose terminal `## Auto Run Result` Status is `done`. Deliberately an
+# allowlist: anything else (already-terminal done/in-review, blocked, or an
+# unknown custom token) is left untouched, so reconciliation can never override a
+# status the skill set on purpose.
+RECONCILABLE_FROM = frozenset({"", "draft", "ready-for-dev", "in-progress"})
+
 # The leading `---\n …frontmatter… \n---` block, captured in three parts so the
 # body can be rewritten while the fences stay byte-identical.
 _FRONTMATTER_RE = re.compile(r"\A(---\r?\n)(.*?\r?\n)(---[ \t]*\r?\n)", re.DOTALL)

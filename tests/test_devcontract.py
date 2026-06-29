@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from automator import devcontract
 
 
@@ -228,3 +230,26 @@ def test_reset_status_no_frontmatter(tmp_path):
     sp.write_text("# just a heading\n\nstatus: done\n", encoding="utf-8")
     assert devcontract.reset_spec_status(sp, "in-progress") is False
     assert "status: done\n" in sp.read_text()  # body status not touched
+
+
+# ----------------------------------------------------------- RECONCILABLE_FROM
+
+
+def test_reconcilable_from_excludes_terminal_and_deliberate_statuses():
+    """The allowlist must contain only non-terminal statuses a half-finalized spec
+    can be reconciled FROM — never a status the skill set on purpose."""
+    assert devcontract.RECONCILABLE_FROM == frozenset({"", "draft", "ready-for-dev", "in-progress"})
+    for deliberate in ("done", "in-review", "blocked"):
+        assert deliberate not in devcontract.RECONCILABLE_FROM
+
+
+@pytest.mark.parametrize("frm", ["draft", "ready-for-dev", "in-progress"])
+def test_reset_status_from_each_reconcilable_value_to_done(tmp_path, frm):
+    """reset_spec_status advances every line-valued reconcilable frontmatter status
+    to done, rewriting only the frontmatter line. (The "" allowlist member has no
+    status token to rewrite, so it is covered by the engine-helper guard, not here.)"""
+    sp = _spec(tmp_path / "spec.md", status=frm, auto_run="done")
+    assert devcontract.reset_spec_status(sp, "done") is True
+    text = sp.read_text()
+    assert "status: 'done'\n" in text  # frontmatter advanced
+    assert "- Status: done\n" in text  # prose untouched
