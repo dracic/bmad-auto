@@ -283,6 +283,24 @@ def test_reset_status_fills_bare_yaml_null(tmp_path):
     assert "- Status: done\n" in text  # prose untouched
 
 
+def test_reset_status_blank_value_keeps_inline_comment(tmp_path):
+    """A blank value with a trailing inline comment (`status: # tbd`, parsed as
+    YAML-null) is filled without merging the comment into the scalar: the result
+    must stay valid YAML re-parsing to the new status, comment preserved."""
+    from automator import verify
+
+    sp = tmp_path / "spec.md"
+    sp.write_text(
+        "---\ntitle: 'x'\nstatus: # intentionally blank\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+    assert devcontract.reset_spec_status(sp, "done") is True
+    text = sp.read_text()
+    assert "status: done # intentionally blank\n" in text  # space kept before `#`
+    assert "done#" not in text  # never abut the value to the comment
+    assert verify.status_of(verify.read_frontmatter(sp)) == "done"  # re-parses cleanly
+
+
 def test_reset_status_inserts_missing_line(tmp_path):
     """A frontmatter block with NO `status:` line gets one inserted before the
     closing fence; existing keys survive and the prose body is untouched."""

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from conftest import git, spec_path, write_spec, write_sprint
 
@@ -742,3 +744,14 @@ def test_has_changes_since_excludes_artifact_only_edit(project):
         )
         is True
     )
+
+
+def test_spec_within_roots(project, tmp_path):
+    """Specs under the project / artifact roots are writable; an out-of-tree
+    absolute path is refused (guards the reconcile mutation)."""
+    assert verify.spec_within_roots(project.implementation_artifacts / "spec-x.md", project)
+    assert verify.spec_within_roots(project.project / "anywhere.md", project)
+    assert verify.spec_within_roots(project.output_folder, project)  # the root itself
+    outside = tmp_path / "outside" / "spec.md"
+    assert verify.spec_within_roots(outside, project) is False
+    assert verify.spec_within_roots(Path("/etc/passwd"), project) is False

@@ -426,6 +426,37 @@ def test_generic_reconcile_advances_bare_null_frontmatter_status(project):
     assert len(recon) == 1 and recon[0]["frm"] == "" and recon[0]["to"] == "done"
 
 
+def test_generic_reconcile_skips_out_of_tree_spec(project, tmp_path):
+    """Reconcile refuses to mutate a spec the session reports outside the
+    orchestrator-owned roots: the file is left untouched and the skip is journaled,
+    so a surprising `spec_file` can never be silently rewritten."""
+    from automator.policy import DevPolicy, ReviewPolicy
+
+    outside = tmp_path / "outside" / "spec.md"
+    outside.parent.mkdir(parents=True)
+    original = "---\ntitle: 'x'\nstatus:\n---\n\n## Auto Run Result\n\n- Status: done\n"
+    outside.write_text(original, encoding="utf-8")
+
+    pol = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        review=ReviewPolicy(enabled=False),
+        dev=DevPolicy(skill="bmad-dev-auto"),
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(project, [generic_dev_effect(project, "1-1-a")], policy=pol)
+    task = StoryTask(story_key="1-1-a", epic=1)
+    engine._reconcile_generic_terminal_status(task, {"spec_file": str(outside)})
+
+    assert outside.read_text() == original  # never written
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    skipped = [
+        e for e in engine.journal.entries() if e["kind"] == "spec-reconcile-skipped-out-of-tree"
+    ]
+    assert len(skipped) == 1 and skipped[0]["spec"] == str(outside)
+    assert "spec-status-reconciled" not in kinds  # no reconcile happened
+
+
 def test_generic_reconcile_idempotent_when_already_done(project):
     """When the skill DID advance the frontmatter to done, reconcile is a no-op:
     no second write, no `spec-status-reconciled` journal entry."""

@@ -1330,6 +1330,15 @@ class Engine:
         spec_path = verify.resolve_spec_path(str(spec_file), self.workspace.paths)
         if not spec_path.is_file():
             return
+        # Refuse to mutate a spec the session reported outside the orchestrator-owned
+        # roots — reconcile is the only write keyed off a session-supplied path.
+        if not verify.spec_within_roots(spec_path, self.workspace.paths):
+            self.journal.append(
+                "spec-reconcile-skipped-out-of-tree",
+                story_key=task.story_key,
+                spec=str(spec_path),
+            )
+            return
         success_status = "in-review" if self._dev_review_enabled() else "done"
         # A YAML-null status (bare `status:` / `status: null`) reads as the string
         # "none" through verify.status_of (str(None)), which would dodge the

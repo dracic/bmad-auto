@@ -666,6 +666,23 @@ def artifact_relpaths(paths: ProjectPaths) -> tuple[str, ...]:
     return tuple(out)
 
 
+def spec_within_roots(spec_path: Path, paths: ProjectPaths) -> bool:
+    """True if ``spec_path`` is, or sits under, an orchestrator-owned root (the
+    project root or an artifact dir). A mutating repair (the frontmatter-status
+    reconcile) must refuse a session-reported ``spec_file`` that resolves outside
+    these roots, so a surprising path can never be silently rewritten. Artifact
+    dirs configured outside ``project`` are roots too, so a legitimately
+    out-of-project spec is still allowed."""
+    sp = spec_path.resolve()
+    roots = (
+        paths.project,
+        paths.output_folder,
+        paths.implementation_artifacts,
+        paths.planning_artifacts,
+    )
+    return any(sp == r.resolve() or sp.is_relative_to(r.resolve()) for r in roots)
+
+
 def resolve_spec_path(spec_file: str, paths: ProjectPaths) -> Path:
     p = Path(spec_file)
     if p.is_absolute():

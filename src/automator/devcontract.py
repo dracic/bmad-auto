@@ -238,7 +238,13 @@ def reset_spec_status(spec_path: Path, new_status: str) -> bool:
         pre = m.group("pre")
         if not pre.endswith((" ", "\t")):
             pre += " "
-        return f"{pre}{m.group('q')}{new_status}{m.group('q')}{m.group('rest')}"
+        # When the value was blank with a trailing inline comment, `rest` begins at
+        # the `#`; abutting the value (`status: done# c`) makes the `#` part of the
+        # scalar instead of a comment. Re-insert a separating space.
+        rest = m.group("rest")
+        if rest.startswith("#"):
+            rest = " " + rest
+        return f"{pre}{m.group('q')}{new_status}{m.group('q')}{rest}"
 
     if _FM_STATUS_RE.search(body):
         new_body = _FM_STATUS_RE.sub(_repl, body, count=1)
