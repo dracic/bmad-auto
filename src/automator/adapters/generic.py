@@ -3,8 +3,10 @@
 Each pipeline step gets a fresh tmux window running the full interactive CLI
 with the skill invocation as the initial prompt. Completion is detected
 exclusively through hook-written event files (Stop/SessionEnd) plus the
-presence of the skill-written result.json — the pane is piped to a log file
-for human debugging but NEVER parsed for control flow.
+presence of the skill-written result.json — the pane log's *contents* are
+never parsed for control flow (only tee'd for human debugging), though its
+*growth* (mtime/size, never the bytes — see ``_log_activity_key``) is read as
+a liveness signal to re-arm the dev-stall grace window.
 
 Everything CLI-specific (binary, prompt rendering, bypass flags, usage
 parser) comes from a declarative CLIProfile; each CLI's hook config registers

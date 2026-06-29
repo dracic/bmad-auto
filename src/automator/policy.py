@@ -55,9 +55,12 @@ class LimitsPolicy:
     # dev_stall_grace_s window elapses with no output — bmad-auto has no
     # background-completion re-invocation, so a session that ended its turn to
     # await a background process is nudged back to life before being called
-    # stalled. Any response (fresh output or a Stop) restores the budget, so a
-    # cooperative-but-slow session waits up to session_timeout_min; only a truly
-    # unresponsive one exhausts the budget and stalls. 0 = stall on grace expiry.
+    # stalled. Fresh pane output re-arms the grace window (an actively streaming
+    # session never reaches grace expiry, so never spends a nudge); a fresh Stop
+    # additionally restores any spent budget. Either way a cooperative-but-slow
+    # session waits up to session_timeout_min; only one that stays silent through
+    # the full grace, nudge after nudge, drains the budget and stalls. 0 = stall
+    # on grace expiry.
     dev_stall_nudges: int = 2
     max_tokens_per_story: int = 2_000_000
     # weight of cache-read tokens in the budget check (1.0 = count raw)
@@ -662,7 +665,7 @@ max_dev_attempts = 2
 session_timeout_min = 90
 stop_without_result_nudges = 1
 dev_stall_grace_s = 600      # grace for a dev session that ended its turn awaiting a background process (e.g. a slow PlayMode/test run) before it is called stalled; each re-invocation resets it. 0 = fail fast on the first result-less Stop
-dev_stall_nudges = 2         # times an idle dev session is nudged awake on grace expiry before it is called stalled (bmad-auto has no background-completion re-invocation); any response restores the budget. 0 = stall on grace expiry
+dev_stall_nudges = 2         # times an idle dev session is nudged awake on grace expiry before it is called stalled (bmad-auto has no background-completion re-invocation); pane output re-arms the grace window and a fresh Stop restores the budget. 0 = stall on grace expiry
 max_tokens_per_story = 2000000
 cache_read_weight = 0.1      # cache reads bill at ~0.1x input on all vendors; 1.0 = count raw
 
