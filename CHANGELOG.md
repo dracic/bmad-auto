@@ -28,6 +28,15 @@ breaking changes may land in a minor release.
   stat-gated cache keyed on `(mtime_ns, size)`, so an atomic `state.json` rewrite of identical size
   within one coarse mtime tick (e.g. WSL2 drvfs) could be served stale. The engine rewrites
   atomically onto a fresh inode, so the cache signature now includes `st_ino`.
+- **A dev session is no longer mis-stalled while it is actively working or legitimately waiting.**
+  Building on `dev_stall_grace_s` (0.7.5), the idle-grace window now measures genuine _inactivity_
+  rather than time-since-last-Stop: any growth of the session's pane log (a long productive turn, a
+  streaming subagent) re-arms it, so a session that has finished implementation and is mid-review is
+  no longer killed and rolled back. And because bmad-auto cannot re-invoke a turn that ended to await
+  a background process, the grace window no longer dead-ends in a stall — on real silence the
+  orchestrator wakes the session with up to `limits.dev_stall_nudges` (new, default 2) nudges before
+  giving up; a genuine Stop restores the budget, so a slow-but-cooperative session waits up to
+  `session_timeout_min` while a truly unresponsive one still stalls. `0` restores stall-on-grace-expiry.
 
 ## [0.7.6] — 2026-06-28
 
