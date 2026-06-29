@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .process_host import get_process_host
 
@@ -40,3 +41,26 @@ def detach_kwargs() -> dict[str, object]:
         # is the Windows analogue.
         return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
     return {"start_new_session": True}  # portability: POSIX detach kwarg; Windows branch above
+
+
+def is_absolute_path(value: str | Path) -> bool:
+    """True if ``value`` is absolute in *either* POSIX or Windows terms.
+
+    ``Path.is_absolute()`` is platform-dependent: on Windows a POSIX path like
+    ``/etc/passwd`` is not absolute (it has a root but no drive), so a
+    "must be project-relative" guard built on it silently accepts POSIX-absolute
+    escapes when running on Windows. Checking both flavors rejects ``/etc/passwd``
+    *and* ``C:\\x`` on every platform — the right test for "is this a relative path
+    inside the project?" validation."""
+    text = str(value)
+    win = PureWindowsPath(text)
+    return PurePosixPath(text).is_absolute() or bool(win.drive or win.root)
+
+
+def has_parent_ref(value: str | Path) -> bool:
+    """True if ``value`` contains a ``..`` segment in *either* POSIX or Windows
+    terms. ``is_absolute_path`` rejects absolute escapes but not relative ones:
+    ``../../etc`` is not absolute yet still climbs out of the project tree. Pair
+    the two for a complete "must stay inside the project" guard."""
+    text = str(value)
+    return ".." in PurePosixPath(text).parts or ".." in PureWindowsPath(text).parts
