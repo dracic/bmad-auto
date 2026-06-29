@@ -42,6 +42,7 @@ def test_detach_kwargs_posix():
         "C:\\Windows\\system32",  # Windows-absolute — rejected even on POSIX
         "C:/Windows",
         "\\\\server\\share",  # UNC root
+        "C:foo",  # Windows drive-*relative* — still drive-qualified, intentionally rejected
     ],
 )
 def test_is_absolute_path_rejects_both_flavors(value):

@@ -44,14 +44,18 @@ def detach_kwargs() -> dict[str, object]:
 
 
 def is_absolute_path(value: str | Path) -> bool:
-    """True if ``value`` is absolute in *either* POSIX or Windows terms.
+    """True if ``value`` is rooted or drive-qualified in *either* POSIX or Windows
+    terms — i.e. not safe as a path *inside* the project.
 
-    ``Path.is_absolute()`` is platform-dependent: on Windows a POSIX path like
-    ``/etc/passwd`` is not absolute (it has a root but no drive), so a
-    "must be project-relative" guard built on it silently accepts POSIX-absolute
-    escapes when running on Windows. Checking both flavors rejects ``/etc/passwd``
-    *and* ``C:\\x`` on every platform — the right test for "is this a relative path
-    inside the project?" validation."""
+    Purpose-built for the "must be project-relative" guards (profile/manifest):
+    ``Path.is_absolute()`` is platform-dependent, so on Windows a POSIX-absolute
+    ``/etc/passwd`` reads as *not* absolute and slips a guard built on it. This
+    rejects, on every platform: a POSIX root (``/etc/passwd``), a Windows root or
+    drive-absolute path (``\\x``, ``C:\\x``), *and* a Windows drive-*relative* path
+    (``C:foo`` — technically relative, but still drive-qualified and never a valid
+    in-project path). Strictly broader than "absolute"; the extra rejection of
+    ``C:foo`` is intentional for these guards. Pair with :func:`has_parent_ref` to
+    also reject ``..`` escapes."""
     text = str(value)
     win = PureWindowsPath(text)
     return PurePosixPath(text).is_absolute() or bool(win.drive or win.root)
