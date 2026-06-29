@@ -866,3 +866,34 @@ def test_platform_preflight_flags_unavailable_backend(monkeypatch):
     _patch_preflight(monkeypatch, _FakeBackend(ok=False))
     notes, problems = cli._platform_preflight()
     assert any("unavailable" in p for p in problems)
+
+
+def test_platform_preflight_reports_multiplexer_selection_error(monkeypatch):
+    # A bad BMAD_AUTO_MUX_BACKEND makes get_multiplexer() raise; preflight must report
+    # it as a problem (so `validate` exits cleanly) rather than let it abort the command.
+    from automator.adapters import multiplexer as mux_mod
+    from automator.adapters.multiplexer import MultiplexerError
+
+    def _boom():
+        raise MultiplexerError("BMAD_AUTO_MUX_BACKEND='bogus' matches no registered backend")
+
+    monkeypatch.setattr(mux_mod, "get_multiplexer", _boom)
+    notes, problems = cli._platform_preflight()  # must not raise
+    assert any("bogus" in p for p in problems)
+
+
+def test_platform_preflight_reports_process_host_selection_error(monkeypatch):
+    # A bad BMAD_AUTO_PROCESS_HOST makes get_process_host() raise; preflight must report
+    # it as a problem, and an otherwise-healthy multiplexer still gets its note.
+    from automator import process_host as ph_mod
+    from automator.process_host import ProcessHostError
+
+    _patch_preflight(monkeypatch, _FakeBackend(ok=True, version="tmux 3.4"))
+
+    def _boom():
+        raise ProcessHostError("BMAD_AUTO_PROCESS_HOST='bogus' matches no registered host")
+
+    monkeypatch.setattr(ph_mod, "get_process_host", _boom)
+    notes, problems = cli._platform_preflight()  # must not raise
+    assert any("bogus" in p for p in problems)
+    assert any("_FakeBackend" in n for n in notes)  # the healthy seam still reported

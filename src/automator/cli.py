@@ -124,9 +124,9 @@ def _platform_preflight() -> tuple[list[str], list[str]]:
     notes: list[str] = []
     problems: list[str] = []
 
-    backend = get_multiplexer()
-    label = type(backend).__name__
     try:
+        backend = get_multiplexer()
+        label = type(backend).__name__
         if backend.available():
             version = backend.version()
             notes.append(f"multiplexer {label} available" + (f" ({version})" if version else ""))
@@ -135,10 +135,14 @@ def _platform_preflight() -> tuple[list[str], list[str]]:
                 f"multiplexer {label} unavailable — its transport binary is not on PATH; "
                 f"see `bmad-auto diagnose`"
             )
-    except Exception as e:  # noqa: BLE001 — a misbehaving backend must not abort validate
-        problems.append(f"multiplexer {label} readiness check failed: {e}")
+    except Exception as e:  # noqa: BLE001 — selection or readiness must not abort validate
+        problems.append(f"multiplexer preflight failed: {e}")
 
-    notes.append(f"process host: {type(get_process_host()).__name__}")
+    try:
+        notes.append(f"process host: {type(get_process_host()).__name__}")
+    except Exception as e:  # noqa: BLE001 — a bad BMAD_AUTO_PROCESS_HOST must report, not crash
+        problems.append(f"process host preflight failed: {e}")
+
     return notes, problems
 
 
