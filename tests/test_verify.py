@@ -92,11 +92,18 @@ def test_attempt_dirty_excludes_tracked_artifact(project):
         ("In-Review", "in-review"),
         ("DONE", "done"),
         (None, ""),
+        (False, "false"),  # falsy but not None: stringify, don't collapse to ""
+        (0, "0"),
         (123, "123"),
     ],
 )
 def test_status_of_normalizes(raw, expected):
-    assert verify.status_of({"status": raw} if raw is not None else {}) == expected
+    assert verify.status_of({"status": raw}) == expected
+
+
+def test_status_of_missing_key():
+    # explicit null and a missing key normalize identically
+    assert verify.status_of({}) == verify.status_of({"status": None}) == ""
 
 
 def test_verify_dev_happy(project):

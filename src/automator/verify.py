@@ -595,8 +595,13 @@ def status_of(fm: dict[str, Any]) -> str:
     lowercase, so a stray ``Done``/``In-Review`` from a hand-edited spec still
     matches. (``devcontract`` keeps its own lowercasing; it parses skill-written
     prose where casing genuinely varies.)
+
+    A missing key and an explicit valueless ``status:`` (YAML null) both
+    normalize to ``""`` — never the literal ``"none"`` that ``str(None)`` would
+    yield — so a blank status reads as "unset" at every gate.
     """
-    return str(fm.get("status", "")).strip().lower()
+    status = fm.get("status")
+    return str(status).strip().lower() if status is not None else ""
 
 
 def set_frontmatter_status(path: Path, status: str) -> bool:

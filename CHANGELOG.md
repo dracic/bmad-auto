@@ -5,6 +5,16 @@ All notable changes to `bmad-auto` are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
+## [Unreleased]
+
+### Fixed
+
+- **`verify.status_of` normalizes an explicit null `status:` to `""`, not `"none"`.** A spec whose
+  frontmatter carried a valueless `status:` (YAML null) stringified to the literal `"none"`, which
+  read like an operator-set value in `verify_*` diagnostics. A missing key and an explicit null now
+  normalize identically to `""`. No gate behavior changes — every gate already treated both as
+  "not done".
+
 ## [0.7.7] — 2026-06-28
 
 ### Fixed
