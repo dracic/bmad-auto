@@ -912,6 +912,13 @@ def test_budget_exhausted_unfinalized_defers(project):
     # repo rolled back for the next story
     assert (project.project / "src.txt").read_text() == "original\n"
     assert rev_parse_head(project.project) == task.baseline_commit
+    # the in-review spec is stashed out of artifacts into the run dir so a
+    # leftover can't confuse the next attempt — the work is kept for the human
+    from conftest import spec_path
+
+    assert not spec_path(project, "1-1-a").exists()
+    stashed = engine.run_dir / "deferred" / "1-1-a" / "spec-1-1-a.md"
+    assert stashed.is_file() and "status: 'in-progress'" in stashed.read_text()
 
 
 def test_defer_preserves_deferred_work_additions(project):
