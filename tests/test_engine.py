@@ -921,6 +921,37 @@ def test_budget_exhausted_unfinalized_defers(project):
     assert stashed.is_file() and "status: 'in-progress'" in stashed.read_text()
 
 
+def test_budget_exhausted_failed_review_sessions_defer_not_commit(project):
+    """A *failed* final review session must never trigger the commit-instead-of-
+    rollback rescue. Dev finalizes the story (status: done, recommends a follow-up),
+    but every review session crashes/stalls. On the last cycle the budget is spent,
+    so decide_review_session returns DEFER (not RETRY) and the loop rolls the tree
+    back — it does not reach (or fire) the budget-exhaustion rescue commit. Locks in
+    the invariant that makes a 'final-iteration RETRY commits un-reviewed work' path
+    unreachable."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(
+        project,
+        [
+            dev_effect(project, "1-1-a"),  # finalizes spec to done, recommends follow-up
+            SessionResult(status="crashed"),
+            SessionResult(status="stalled"),
+            SessionResult(status="crashed"),  # final cycle: budget spent -> DEFER
+        ],
+    )
+    summary = engine.run()
+
+    assert summary.deferred == 1 and summary.done == 0 and not summary.paused
+    task = engine.state.tasks["1-1-a"]
+    assert task.phase == Phase.DEFERRED
+    assert "review session" in task.defer_reason  # decide_review_session's DEFER reason
+    # rolled back, not committed — and the rescue commit never ran
+    assert (project.project / "src.txt").read_text() == "original\n"
+    assert rev_parse_head(project.project) == task.baseline_commit
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "story-deferred" in kinds and "review-budget-committed" not in kinds
+
+
 def test_defer_preserves_deferred_work_additions(project):
     """Review sessions append real knowledge to deferred-work.md; a plateau
     defer's git reset must not erase it."""

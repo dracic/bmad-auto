@@ -1204,8 +1204,13 @@ class Engine:
         if self._vetoed(self._emit("pre_review_phase", task), task):
             return
         clean = False
+        # Tracks whether the last *completed* review pass left the story finalized
+        # (status: done) while still recommending an independent follow-up — the
+        # only state the budget-exhaustion rescue below is allowed to commit.
+        refileable_followup = False
         while task.review_cycle < self.policy.limits.max_review_cycles:
             task.review_cycle += 1
+            refileable_followup = False  # only a completed pass this cycle can set it
             advance(task, Phase.REVIEW_RUNNING)
             self._save()
             result = self._run_session(
@@ -1247,6 +1252,7 @@ class Engine:
             status = str(rj.get("status", "")).strip()
             followup = bool(rj.get("followup_review_recommended", False))
             task.followup_review_recommended = followup  # latest pass wins
+            refileable_followup = status == "done" and followup
             self.journal.append(
                 "review-result",
                 story_key=task.story_key,
@@ -1280,23 +1286,26 @@ class Engine:
 
         if not clean:
             # Budget exhausted. Before discarding work, distinguish two modes:
-            #   (a) the tree is finalized + verify-green (spec/sprint done, verify
-            #       commands pass) and the loop only failed to converge because the
-            #       pass keeps recommending an independent follow-up (`clean` stays
-            #       False). That work is committable — commit it and re-file the
-            #       lingering follow-up as a fresh deferred-work entry instead of
-            #       rolling everything back (the failure mode that silently threw
-            #       away review-passing work).
-            #   (b) anything else (non-terminal status, verify failing): a genuine
-            #       failure → defer + roll back as before.
-            # _verify_review is the same authoritative gate the converged path uses
-            # (frontmatter status==done AND sprint==done AND verify commands pass),
-            # so this can never ship uncompleted work, and it is robust regardless
-            # of how the loop exited (e.g. a final-iteration RETRY). Only for the
-            # non-isolated path: in worktree isolation a defer already keeps the
+            #   (a) the last *completed* pass left the story finalized + verify-green
+            #       (status: done) but kept recommending an independent follow-up
+            #       (`refileable_followup`, `clean` stays False). That work is
+            #       committable — commit it and re-file the lingering follow-up as a
+            #       fresh deferred-work entry instead of rolling everything back (the
+            #       failure mode that silently threw away review-passing work).
+            #   (b) anything else (non-terminal status, no outstanding follow-up,
+            #       verify failing): a genuine failure → defer + roll back as before.
+            # A failed *final* review session never reaches here at all: with the
+            # budget spent, decide_review_session returns DEFER (not RETRY), so the
+            # loop above already deferred — a RETRY only ever loops again. The
+            # rescue therefore requires both `refileable_followup` (the last
+            # completed pass's own signal) AND _verify_review — the same authoritative
+            # gate the converged path uses (frontmatter status==done AND sprint==done
+            # AND verify commands pass) — so it can never ship uncompleted work, nor
+            # re-file a follow-up the last pass did not actually recommend. Only for
+            # the non-isolated path: in worktree isolation a defer already keeps the
             # unit's worktree + patch (no work is lost), so there is nothing to
             # rescue and committing into the main repo would be wrong.
-            if not self._isolated and self._verify_review(task).ok:
+            if refileable_followup and not self._isolated and self._verify_review(task).ok:
                 self._record_review_budget_followup(task)
                 self._commit(task)
                 return
