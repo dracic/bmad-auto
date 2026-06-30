@@ -128,7 +128,11 @@ class RunHeader(Static):
                 "\n✖ engine gone — run was interrupted · press e to resume",
                 style="bold red",
             )
-        if decision is not None and status not in (data.FINISHED, data.INTERRUPTED):
+        if decision is not None and status not in (
+            data.FINISHED,
+            data.INTERRUPTED,
+            data.CRASHED,
+        ):
             dw_id, question = decision
             text.append(f"\n⚑ decision needed: {dw_id}", style="bold yellow")
             if question:

@@ -166,6 +166,11 @@ class Engine:
             self.journal.append("plugins-active", plugins=self._bus.active_plugins())
         # stop-signal bookkeeping (see run())
         self._owns_signals = False
+        # True iff an outer engine already owned the stop handlers when this one
+        # started — i.e. this is a nested auto-sweep run. Distinct from
+        # _owns_signals, which is also False for a top-level engine that simply
+        # could not install handlers (e.g. off the main thread).
+        self._is_nested = False
         self._stopping = False
         self._prev_handlers: dict[int, object] = {}
 
@@ -204,7 +209,7 @@ class Engine:
                 # the loop was interrupted inside adapter.run(), so the agent
                 # window is still live — tear the whole run session down.
                 kill_session(self.state.run_id)
-                if not self._owns_signals:
+                if self._is_nested:
                     raise  # nested auto-sweep: let the owner record the stop
                 self.state.stopped = True
                 self.journal.append("run-stop")
@@ -214,6 +219,12 @@ class Engine:
                 # parked control pane: persist the traceback, tear down the
                 # orphaned agent session, and fall through to a crashed summary.
                 tb = traceback.format_exc()
+                # a crash is never also "finished": the loop may have set
+                # finished=True (line above) before a post-run step threw, and
+                # status classification checks finished first — so a recorded
+                # crash would otherwise read as FINISHED. Reset before the nested
+                # re-raise so the trailing _save() persists it on both paths.
+                self.state.finished = False
                 try:
                     (self.run_dir / "crash.txt").write_text(tb, encoding="utf-8")
                 except OSError:
@@ -224,12 +235,12 @@ class Engine:
                     Exception
                 ):  # noqa: BLE001  # nosec B110 - best-effort teardown; a crashing run must still record
                     pass
-                if not self._owns_signals:
+                if self._is_nested:
                     raise  # nested auto-sweep: let the owner record the failure
                 try:
                     message = str(exc)
                 except Exception:
-                    message = repr(type(exc).__name__)
+                    message = type(exc).__name__
                 self.state.crashed = True
                 self.state.crash_error = f"{type(exc).__name__}: {message}"
                 try:
@@ -258,6 +269,9 @@ class Engine:
         outermost engine in the process owns the handlers (nested auto-sweep
         runs let the exception propagate up to it); install is best-effort and
         silently skipped off the main thread (signal.signal raises there)."""
+        # capture nesting before the early return: a non-None owner here means an
+        # outer engine already installed the handlers, so we are nested.
+        self._is_nested = Engine._stop_signals_owner is not None
         if Engine._stop_signals_owner is not None:
             return
 
