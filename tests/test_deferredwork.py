@@ -4,9 +4,11 @@ from pathlib import Path
 
 from automator.deferredwork import (
     append_decision,
+    append_entry,
     field_severity,
     has_legacy,
     mark_done,
+    next_seq,
     open_ids,
     parse_ledger,
     parse_legacy,
@@ -380,3 +382,74 @@ def test_flat_appender_in_done_section_is_done():
     )
     (entry,) = parse_legacy(text)
     assert entry.done and entry.title == "Already handled upstream"
+
+
+# ------------------------------------------------------- append_entry / next_seq
+
+
+def test_next_seq_past_highest():
+    text = "### DW-3: a\nstatus: open\n\n### DW-7: b\nstatus: done 2026-01-01\n"
+    assert next_seq(text) == 8
+
+
+def test_next_seq_empty_starts_at_one():
+    assert next_seq("") == 1
+    assert next_seq("# Deferred Work\n") == 1
+
+
+def test_append_entry_numbers_and_writes(tmp_path):
+    p = tmp_path / "deferred-work.md"
+    p.write_text("# Deferred Work\n\n### DW-4: existing\norigin: test\nstatus: open\n")
+    new_id = append_entry(
+        p,
+        title="follow-up still recommended for dw-x",
+        origin="review-budget-followup",
+        source_spec="spec-foo.md",
+        reason="review budget exhausted, work committed",
+        severity="low",
+    )
+    assert new_id == "DW-5"
+    entries = {e.id: e for e in parse_ledger(p.read_text())}
+    assert "DW-5" in entries and entries["DW-5"].open
+    body = entries["DW-5"].body
+    assert "origin: review-budget-followup" in body
+    assert "source_spec: `spec-foo.md`" in body
+    assert "severity: low" in body
+    assert "follow-up still recommended for dw-x" in body
+
+
+def test_append_entry_idempotent_for_open_origin_and_spec(tmp_path):
+    p = tmp_path / "deferred-work.md"
+    p.write_text("# Deferred Work\n")
+    first = append_entry(
+        p, title="t", origin="review-budget-followup", source_spec="spec-foo.md", reason="r"
+    )
+    assert first == "DW-1"
+    again = append_entry(
+        p, title="t2", origin="review-budget-followup", source_spec="spec-foo.md", reason="r2"
+    )
+    assert again is None  # an open entry with the same origin+spec already exists
+    assert len(parse_ledger(p.read_text())) == 1
+    # a different source_spec is not blocked
+    other = append_entry(
+        p, title="t3", origin="review-budget-followup", source_spec="spec-bar.md", reason="r3"
+    )
+    assert other == "DW-2"
+
+
+def test_append_entry_not_blocked_when_prior_is_done(tmp_path):
+    p = tmp_path / "deferred-work.md"
+    p.write_text(
+        "### DW-1: t\norigin: review-budget-followup\n"
+        "source_spec: `spec-foo.md`\nstatus: done 2026-01-01\n"
+    )
+    new_id = append_entry(
+        p, title="t2", origin="review-budget-followup", source_spec="spec-foo.md", reason="r"
+    )
+    assert new_id == "DW-2"  # prior entry is done, not open → re-file allowed
+
+
+def test_append_entry_creates_missing_ledger(tmp_path):
+    p = tmp_path / "sub" / "deferred-work.md"
+    new_id = append_entry(p, title="t", origin="o", source_spec="s.md", reason="r")
+    assert new_id == "DW-1" and p.is_file()
