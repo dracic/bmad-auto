@@ -1537,3 +1537,65 @@ def test_nested_engine_reraises_runstopped(project, monkeypatch):
 
     assert load_state(engine.run_dir).stopped is False  # owner records it, not us
     assert killed == ["test-run"]
+
+
+# ----------------------------------------------------------- crash safety-net
+
+
+def test_run_crash_records_diagnostics(project, monkeypatch):
+    """An unexpected exception out of the loop is recorded (state flag, journal,
+    persisted traceback) instead of crashing the orchestrator: the orphaned
+    agent session is torn down and a crashed summary is returned."""
+    killed = []
+    monkeypatch.setattr("automator.engine.kill_session", lambda rid: killed.append(rid))
+    engine, _ = make_engine(project, [])
+
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(engine, "_loop", boom)
+
+    prev_term = signal.getsignal(signal.SIGTERM)
+    prev_int = signal.getsignal(signal.SIGINT)
+    summary = engine.run()  # does not raise
+
+    state = load_state(engine.run_dir)
+    assert state.crashed is True
+    assert state.crash_error.startswith("RuntimeError")
+    assert state.finished is False
+    assert killed == ["test-run"]
+    assert "run-crash" in (engine.run_dir / "journal.jsonl").read_text()
+    crash_txt = (engine.run_dir / "crash.txt").read_text()
+    assert "Traceback" in crash_txt
+    assert "boom" in crash_txt
+    assert summary.crashed is True
+    assert signal.getsignal(signal.SIGTERM) is prev_term
+    assert signal.getsignal(signal.SIGINT) is prev_int
+    assert Engine._stop_signals_owner is None
+
+
+def test_nested_engine_reraises_crash(project, monkeypatch):
+    """A nested auto-sweep engine does not own the handlers, so an unexpected
+    exception re-raises for the outer engine to record — it still persists its
+    own traceback and tears down its agent session, but records no run-crash."""
+    killed = []
+    monkeypatch.setattr("automator.engine.kill_session", lambda rid: killed.append(rid))
+    engine, _ = make_engine(project, [])
+
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(engine, "_loop", boom)
+    sentinel = object()
+    Engine._stop_signals_owner = sentinel  # pretend an outer engine owns signals
+    try:
+        with pytest.raises(RuntimeError):
+            engine.run()
+    finally:
+        Engine._stop_signals_owner = None
+
+    assert load_state(engine.run_dir).crashed is False  # owner records it, not us
+    assert killed == ["test-run"]
+    assert (engine.run_dir / "crash.txt").read_text()  # traceback still persisted
+    journal = engine.run_dir / "journal.jsonl"
+    assert not journal.exists() or "run-crash" not in journal.read_text()

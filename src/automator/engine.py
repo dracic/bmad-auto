@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shutil
 import signal
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -75,12 +76,16 @@ class RunSummary:
     paused: bool
     paused_reason: str
     total_tokens: int
+    crashed: bool = False
+    crash_error: str | None = None
 
     def render(self) -> str:
         lines = [
             f"run {self.run_id}: {self.done} done, {self.deferred} deferred, "
             f"{self.escalated} escalated, {self.total_tokens:,} tokens"
         ]
+        if self.crashed:
+            lines.append(f"CRASHED: {self.crash_error}")
         if self.paused:
             lines.append(f"PAUSED: {self.paused_reason}")
         return "\n".join(lines)
@@ -203,6 +208,41 @@ class Engine:
                     raise  # nested auto-sweep: let the owner record the stop
                 self.state.stopped = True
                 self.journal.append("run-stop")
+            except Exception as exc:
+                # an unexpected exception escaped the loop (e.g. a transport
+                # hang that leaked past the seam). Don't let it die to the lossy
+                # parked control pane: persist the traceback, tear down the
+                # orphaned agent session, and fall through to a crashed summary.
+                tb = traceback.format_exc()
+                try:
+                    (self.run_dir / "crash.txt").write_text(tb, encoding="utf-8")
+                except OSError:
+                    pass
+                try:
+                    kill_session(self.state.run_id)
+                except (
+                    Exception
+                ):  # noqa: BLE001  # nosec B110 - best-effort teardown; a crashing run must still record
+                    pass
+                if not self._owns_signals:
+                    raise  # nested auto-sweep: let the owner record the failure
+                try:
+                    message = str(exc)
+                except Exception:
+                    message = repr(type(exc).__name__)
+                self.state.crashed = True
+                self.state.crash_error = f"{type(exc).__name__}: {message}"
+                try:
+                    self.journal.append(
+                        "run-crash",
+                        error=type(exc).__name__,
+                        message=message,
+                        epic=self.state.current_epic,
+                    )
+                except (
+                    Exception
+                ):  # noqa: BLE001  # nosec B110 - journal write is best-effort; crash.txt + state flag already persisted
+                    pass
             finally:
                 self._save()
         finally:
@@ -598,6 +638,8 @@ class Engine:
             paused=self.state.paused,
             paused_reason=self.state.paused_reason or "",
             total_tokens=sum(t.tokens.total for t in tasks),
+            crashed=self.state.crashed,
+            crash_error=self.state.crash_error,
         )
 
     def _loop(self) -> None:
