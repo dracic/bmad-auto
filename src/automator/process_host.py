@@ -84,8 +84,10 @@ class ProcessHost(ABC):
             return False
         if identity is None:
             return self.is_alive(pid)
-        # identity(pid) is None when the pid is gone and a different value when it
-        # was reused — either way it != the recorded identity, so this is False.
+        # identity(pid) != the recorded value whenever the pid is gone, reused, or
+        # merely unreadable (a permission glitch, or no psutil off-Linux) — every
+        # case reads False (not-ours). An unreadable identity on a live pid thus
+        # reads as dead: the documented residual, deliberately biased safe.
         return self.identity(pid) == identity
 
     def shell_quote(self, arg: str) -> str:
