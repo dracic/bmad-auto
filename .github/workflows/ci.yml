@@ -54,6 +54,11 @@ jobs:
     # Real-Windows runner for the deterministic suite (live psmux e2e stays a manual gate).
     name: test (windows, py${{ matrix.python-version }})
     runs-on: windows-latest
+    # The suite reads/writes UTF-8 files; Windows' cp1252 default would break plain
+    # text I/O. UTF-8 mode (PEP 686's Python 3.15 default) makes the runner match the
+    # files under test; the conftest guard enforces the same for local win32 runs.
+    env:
+      PYTHONUTF8: '1'
     strategy:
       fail-fast: false
       matrix:
