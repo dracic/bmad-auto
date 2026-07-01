@@ -9,6 +9,7 @@ import pytest
 from conftest import (
     dev_effect,
     generic_dev_effect,
+    git,
     review_effect,
     spec_path,
     write_spec,
@@ -40,7 +41,7 @@ from automator.policy import (
     VerifyPolicy,
 )
 from automator.runs import rearm_escalation
-from automator.verify import read_frontmatter, rev_parse_head, worktree_clean
+from automator.verify import GitError, read_frontmatter, rev_parse_head, worktree_clean
 
 QUIET = NotifyPolicy(desktop=False, file=True)
 
@@ -1094,6 +1095,96 @@ def test_manual_recovery_wording_stopped(project):
     assert "attempt was stopped" in stopped.value.reason
 
 
+def test_rollback_preserves_committed_attempt_work(project):
+    """rollback_on_failure ON + an attempt that committed its work: the hard reset
+    parks those commits under a recovery ref instead of orphaning them."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    repo = project.project
+    task = StoryTask(story_key="1-1-a", epic=1)
+    task.baseline_commit = rev_parse_head(repo)
+    task.baseline_untracked = []
+    (repo / "impl.txt").write_text("committed implementation\n")  # attempt commits its work
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "attempt work")
+    attempt_head = rev_parse_head(repo)
+
+    engine._rollback_or_pause(task)  # rollback ON: resets to baseline
+
+    assert rev_parse_head(repo) == task.baseline_commit  # reset happened
+    entry = next(e for e in engine.journal.entries() if e["kind"] == "attempt-commits-preserved")
+    assert git(repo, "rev-parse", entry["ref"]).strip() == attempt_head  # reachable by name
+
+
+def test_rollback_pauses_when_preserve_fails(project, monkeypatch):
+    """Safety invariant: if the recovery ref can't be created while commits exist,
+    the engine pauses for manual recovery rather than resetting past the work — and
+    the notice names the at-risk commits instead of the misleading rollback-OFF
+    'just reset --hard' wording."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    repo = project.project
+    task = StoryTask(story_key="1-1-a", epic=1)
+    task.baseline_commit = rev_parse_head(repo)
+    task.baseline_untracked = []
+    (repo / "impl.txt").write_text("committed work\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "attempt work")
+    attempt_head = rev_parse_head(repo)
+
+    def _fail(*a, **k):
+        raise GitError("simulated branch failure")
+
+    monkeypatch.setattr("automator.verify.preserve_commits", _fail)
+
+    with pytest.raises(RunPaused) as paused:
+        engine._rollback_or_pause(task)
+
+    assert rev_parse_head(repo) == attempt_head  # NOT reset — work left intact
+    reason = paused.value.reason.lower()
+    assert "commit" in reason  # notice names the at-risk committed work
+    assert "auto-rollback is off" not in reason  # never the misleading OFF wording (rollback is ON)
+
+
+def test_resolved_redrive_never_pauses_when_preserve_fails(project, monkeypatch):
+    """A resolved re-drive is contractually pause-free. Even if the recovery ref
+    can't be created for the attempt's commits, it journals the failure and lets
+    the reset proceed — unlike the general rollback path, which pauses."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=False),  # OFF: only the resolved path resets here
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    repo = project.project
+    task = StoryTask(story_key="1-1-a", epic=1)
+    task.baseline_commit = rev_parse_head(repo)
+    task.baseline_untracked = []
+    (repo / "impl.txt").write_text("failed attempt work\n")  # committed, outside artifacts
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "failed attempt")
+
+    def _fail(*args, **kwargs):
+        raise GitError("simulated branch failure")
+
+    monkeypatch.setattr("automator.verify.preserve_commits", _fail)
+
+    engine._rollback_or_pause(task, cause="resolved")  # must NOT raise RunPaused
+
+    assert rev_parse_head(repo) == task.baseline_commit  # reset proceeded, not paused
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "attempt-preserve-failed" in kinds
+    assert "rollback-manual-required" not in kinds
+
+
 def test_rollback_or_pause_resolved_auto_recovers(project):
     """A resolved escalation re-drive (human-initiated) auto-recovers even with
     rollback_on_failure OFF: it reverts the failed attempt's source change but
@@ -1723,6 +1814,75 @@ def test_journal_log_position_covers_post_session_entries(project):
 
 
 # ----------------------------------------------------------- stop / SIGTERM
+
+
+@pytest.mark.parametrize(
+    ("signal_name", "fallback_signum"),
+    [("SIGINT", signal.SIGINT), ("SIGBREAK", 21)],
+)
+def test_windows_console_ctrl_signal_is_ignored(project, monkeypatch, signal_name, fallback_signum):
+    import automator.engine as engine_mod
+
+    signum = getattr(signal, signal_name, fallback_signum)
+    if signal_name == "SIGBREAK":
+        monkeypatch.setattr(signal, "SIGBREAK", signum, raising=False)
+
+    installed = {}
+    restored = {}
+    previous = {}
+
+    def fake_signal(sig, handler):
+        previous.setdefault(sig, object())
+        if callable(handler):
+            installed[sig] = handler
+        else:
+            restored[sig] = handler
+        return previous[sig]
+
+    monkeypatch.setattr(engine_mod.sys, "platform", "win32")
+    monkeypatch.setattr(signal, "signal", fake_signal)
+    monkeypatch.setattr(engine_mod, "kill_session", lambda rid: None)
+
+    engine, _ = make_engine(project, [])
+    monkeypatch.setattr(engine, "_loop", lambda: installed[signum](signum, None))
+
+    summary = engine.run()
+
+    assert summary is not None
+    assert load_state(engine.run_dir).stopped is False
+    assert "console-ctrl-ignored" in (engine.run_dir / "journal.jsonl").read_text()
+    assert restored[signal.SIGTERM] is previous[signal.SIGTERM]
+    assert restored[signal.SIGINT] is previous[signal.SIGINT]
+    assert restored[signum] is previous[signum]
+    assert Engine._stop_signals_owner is None
+
+
+def test_non_windows_sigint_still_stops_run(project, monkeypatch):
+    import automator.engine as engine_mod
+
+    installed = {}
+    previous = {}
+
+    def fake_signal(sig, handler):
+        previous.setdefault(sig, object())
+        if callable(handler):
+            installed[sig] = handler
+        return previous[sig]
+
+    killed = []
+    monkeypatch.setattr(engine_mod.sys, "platform", "linux")
+    monkeypatch.setattr(signal, "signal", fake_signal)
+    monkeypatch.setattr(engine_mod, "kill_session", lambda rid: killed.append(rid))
+
+    engine, _ = make_engine(project, [])
+    monkeypatch.setattr(engine, "_loop", lambda: installed[signal.SIGINT](signal.SIGINT, None))
+
+    engine.run()
+
+    assert load_state(engine.run_dir).stopped is True
+    assert killed == ["test-run"]
+    assert "run-stop" in (engine.run_dir / "journal.jsonl").read_text()
+    assert Engine._stop_signals_owner is None
 
 
 def test_run_stopped_via_real_signal(project, monkeypatch):

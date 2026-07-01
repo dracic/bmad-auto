@@ -762,3 +762,67 @@ def test_spec_within_roots(project, tmp_path):
     outside = tmp_path / "outside" / "spec.md"
     assert verify.spec_within_roots(outside, project) is False
     assert verify.spec_within_roots(Path("/etc/passwd"), project) is False
+
+
+def test_commits_above_empty_at_baseline(project):
+    """HEAD sitting at baseline has no attempt commits to preserve."""
+    repo = project.project
+    baseline = verify.rev_parse_head(repo)
+    assert verify.commits_above(repo, baseline) == []
+
+
+def test_commits_above_lists_attempt_commits_newest_first(project):
+    repo = project.project
+    baseline = verify.rev_parse_head(repo)
+    (repo / "impl.txt").write_text("work\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "attempt work")
+    head = verify.rev_parse_head(repo)
+    commits = verify.commits_above(repo, baseline)
+    assert commits == [head]
+
+
+def test_preserve_commits_survives_reset_and_gc(project):
+    """The parked ref keeps committed attempt work reachable through the exact
+    destructive sequence safe_rollback performs (reset --hard baseline) and a gc."""
+    repo = project.project
+    baseline = verify.rev_parse_head(repo)
+    (repo / "impl.txt").write_text("committed work\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "attempt work")
+    head = verify.rev_parse_head(repo)
+
+    ref = verify.preserve_commits(repo, baseline, "attempt-preserve/run-abc12345")
+    assert ref == "attempt-preserve/run-abc12345"
+
+    git(repo, "reset", "--hard", baseline)
+    git(repo, "gc", "--prune=now")
+
+    assert verify.rev_parse_head(repo) == baseline  # reset landed
+    assert git(repo, "rev-parse", ref).strip() == head  # work still reachable by name
+    assert (repo / "impl.txt").exists() is False  # gone from the working tree...
+    git(repo, "checkout", ref, "--", "impl.txt")  # ...but recoverable
+    assert (repo / "impl.txt").read_text() == "committed work\n"
+
+
+def test_preserve_commits_noop_without_commits(project):
+    """An uncommitted-only attempt (HEAD at baseline) creates no ref and returns
+    None — the caller then resets as before."""
+    repo = project.project
+    baseline = verify.rev_parse_head(repo)
+    (repo / "dirty.txt").write_text("uncommitted\n")  # dirty but never committed
+    assert verify.preserve_commits(repo, baseline, "attempt-preserve/run-none") is None
+    assert git(repo, "branch", "--list", "attempt-preserve/run-none").strip() == ""
+
+
+def test_preserve_commits_raises_on_branch_failure(project):
+    """When commits exist but the branch cannot be created (here, an illegal ref
+    name), raise GitError — never return None, so a caller can't mistake a
+    preservation failure for a harmless no-op and reset past committed work."""
+    repo = project.project
+    baseline = verify.rev_parse_head(repo)
+    (repo / "impl.txt").write_text("committed\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "attempt work")
+    with pytest.raises(verify.GitError):
+        verify.preserve_commits(repo, baseline, "bad..ref")  # ".." is an illegal git ref name

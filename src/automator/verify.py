@@ -192,6 +192,48 @@ def untracked_files(repo: Path) -> set[str]:
     return {line.strip() for line in out.splitlines() if line.strip()}
 
 
+def commits_above(repo: Path, baseline: str) -> list[str]:
+    """Commit shas reachable from HEAD but not from ``baseline`` — the commits an
+    attempt added on top of its pre-attempt baseline, in ``git rev-list`` order (do
+    not assume a strict newest-first / HEAD-first ordering across merges or clock
+    skew; callers that need the tip should read HEAD directly). Empty when HEAD is
+    at or behind baseline. Raises GitError on a git failure (a bad baseline is a
+    real error, never quietly "no commits")."""
+    rc, out = _git(repo, "rev-list", f"{baseline}..HEAD")
+    if rc != 0:
+        raise GitError(f"git rev-list {baseline}..HEAD failed in {repo}: {out}")
+    return [line for line in out.splitlines() if line]
+
+
+def preserve_commits(
+    repo: Path, baseline: str, ref_name: str, commits: list[str] | None = None
+) -> str | None:
+    """Park the commits an attempt made above ``baseline`` under a branch at HEAD
+    so a following ``git reset --hard baseline`` cannot orphan them — they survive
+    `git gc` and are recoverable by name, not just via the reflog. Returns
+    ``ref_name`` on success; ``None`` when there is nothing to preserve (HEAD at/
+    below baseline) or the branch could not be created (the caller must then refuse
+    to reset rather than silently destroy committed work). ``-f`` because a retry
+    within the same run may re-preserve the same head under the same name.
+
+    ``commits`` lets a caller that already ran :func:`commits_above` pass the result
+    in to skip a second ``git rev-list`` subprocess; ``None`` self-fetches (keeps the
+    helper standalone/testable).
+
+    ``None`` means *nothing to preserve* — never a failure. If commits exist but the
+    branch cannot be created this raises :class:`GitError` (consistent with the rest
+    of this module), so a caller can never mistake a preservation failure for a
+    harmless no-op and reset past committed work."""
+    if commits is None:
+        commits = commits_above(repo, baseline)
+    if not commits:
+        return None
+    rc, out = _git(repo, "branch", "-f", ref_name, "HEAD")
+    if rc != 0:
+        raise GitError(f"git branch -f {ref_name} HEAD failed in {repo}: {out}")
+    return ref_name
+
+
 def safe_rollback(
     repo: Path,
     baseline: str,
