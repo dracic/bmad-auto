@@ -41,7 +41,7 @@ from automator.policy import (
     VerifyPolicy,
 )
 from automator.runs import rearm_escalation
-from automator.verify import read_frontmatter, rev_parse_head, worktree_clean
+from automator.verify import GitError, read_frontmatter, rev_parse_head, worktree_clean
 
 QUIET = NotifyPolicy(desktop=False, file=True)
 
@@ -1112,7 +1112,9 @@ def test_rollback_preserves_committed_attempt_work(project):
 
 def test_rollback_pauses_when_preserve_fails(project, monkeypatch):
     """Safety invariant: if the recovery ref can't be created while commits exist,
-    the engine pauses for manual recovery rather than resetting past the work."""
+    the engine pauses for manual recovery rather than resetting past the work — and
+    the notice names the at-risk commits instead of the misleading rollback-OFF
+    'just reset --hard' wording."""
     policy = Policy(
         gates=GatesPolicy(mode="none"),
         notify=QUIET,
@@ -1127,12 +1129,19 @@ def test_rollback_pauses_when_preserve_fails(project, monkeypatch):
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "attempt work")
     attempt_head = rev_parse_head(repo)
-    monkeypatch.setattr("automator.verify.preserve_commits", lambda *a, **k: None)
 
-    with pytest.raises(RunPaused):
+    def _fail(*a, **k):
+        raise GitError("simulated branch failure")
+
+    monkeypatch.setattr("automator.verify.preserve_commits", _fail)
+
+    with pytest.raises(RunPaused) as paused:
         engine._rollback_or_pause(task)
 
     assert rev_parse_head(repo) == attempt_head  # NOT reset — work left intact
+    reason = paused.value.reason.lower()
+    assert "commit" in reason  # notice names the at-risk committed work
+    assert "auto-rollback is off" not in reason  # never the misleading OFF wording (rollback is ON)
 
 
 def test_resolved_redrive_never_pauses_when_preserve_fails(project, monkeypatch):
@@ -1152,7 +1161,11 @@ def test_resolved_redrive_never_pauses_when_preserve_fails(project, monkeypatch)
     (repo / "impl.txt").write_text("failed attempt work\n")  # committed, outside artifacts
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "failed attempt")
-    monkeypatch.setattr("automator.verify.preserve_commits", lambda *a, **k: None)
+
+    def _fail(*args, **kwargs):
+        raise GitError("simulated branch failure")
+
+    monkeypatch.setattr("automator.verify.preserve_commits", _fail)
 
     engine._rollback_or_pause(task, cause="resolved")  # must NOT raise RunPaused
 

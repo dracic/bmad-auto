@@ -193,10 +193,12 @@ def untracked_files(repo: Path) -> set[str]:
 
 
 def commits_above(repo: Path, baseline: str) -> list[str]:
-    """Commit shas (newest first) reachable from HEAD but not from ``baseline`` —
-    the commits an attempt added on top of its pre-attempt baseline. Empty when
-    HEAD is at or behind baseline. Raises GitError on a git failure (a bad
-    baseline is a real error, never quietly "no commits")."""
+    """Commit shas reachable from HEAD but not from ``baseline`` — the commits an
+    attempt added on top of its pre-attempt baseline, in ``git rev-list`` order (do
+    not assume a strict newest-first / HEAD-first ordering across merges or clock
+    skew; callers that need the tip should read HEAD directly). Empty when HEAD is
+    at or behind baseline. Raises GitError on a git failure (a bad baseline is a
+    real error, never quietly "no commits")."""
     rc, out = _git(repo, "rev-list", f"{baseline}..HEAD")
     if rc != 0:
         raise GitError(f"git rev-list {baseline}..HEAD failed in {repo}: {out}")
@@ -216,13 +218,20 @@ def preserve_commits(
 
     ``commits`` lets a caller that already ran :func:`commits_above` pass the result
     in to skip a second ``git rev-list`` subprocess; ``None`` self-fetches (keeps the
-    helper standalone/testable)."""
+    helper standalone/testable).
+
+    ``None`` means *nothing to preserve* — never a failure. If commits exist but the
+    branch cannot be created this raises :class:`GitError` (consistent with the rest
+    of this module), so a caller can never mistake a preservation failure for a
+    harmless no-op and reset past committed work."""
     if commits is None:
         commits = commits_above(repo, baseline)
     if not commits:
         return None
-    rc, _ = _git(repo, "branch", "-f", ref_name, "HEAD")
-    return ref_name if rc == 0 else None
+    rc, out = _git(repo, "branch", "-f", ref_name, "HEAD")
+    if rc != 0:
+        raise GitError(f"git branch -f {ref_name} HEAD failed in {repo}: {out}")
+    return ref_name
 
 
 def safe_rollback(

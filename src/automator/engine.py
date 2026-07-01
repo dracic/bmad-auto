@@ -800,50 +800,81 @@ class Engine:
         commits = verify.commits_above(self.workspace.root, baseline)
         if not commits:
             return
-        head = commits[0]
+        head = verify.rev_parse_head(self.workspace.root)  # the tip the recovery ref parks at
         # run_id can be an arbitrary user `--run-id`; keep the ref component git-safe
-        # so an exotic id can't fail `git branch` and turn a routine rollback into a
-        # false "couldn't preserve" pause.
-        slug = "".join(c if (c.isalnum() or c in "_-") else "-" for c in self.state.run_id)
-        ref = verify.preserve_commits(
-            self.workspace.root, baseline, f"attempt-preserve/{slug}-{head[:8]}", commits=commits
-        )
+        # and length-bounded so an exotic/overlong id can't blow the ref-name limit,
+        # fail `git branch`, and drop the recovery ref (which on a re-drive would then
+        # reset past the work anyway).
+        slug = "".join(c if (c.isalnum() or c in "_-") else "-" for c in self.state.run_id)[:64]
+        try:
+            ref = verify.preserve_commits(
+                self.workspace.root,
+                baseline,
+                f"attempt-preserve/{slug}-{head[:8]}",
+                commits=commits,
+            )
+        except verify.GitError:
+            ref = None  # branch creation failed — treat as a preservation failure
         if ref is None:
             # commits exist (just enumerated) but the ref did not take.
             self.journal.append("attempt-preserve-failed", story_key=task.story_key, head=head)
             if allow_pause:
-                self._pause_for_manual_recovery(task, baseline)  # raises RunPaused
+                # the commits at HEAD could not be parked — the notice must NOT tell
+                # the operator to blindly `reset --hard` (that would discard them).
+                self._pause_for_manual_recovery(task, baseline, preserve_failed=True)
             return  # re-drive: never pause — proceed to the (human-directed) reset
         self.journal.append(
             "attempt-commits-preserved", story_key=task.story_key, ref=ref, count=len(commits)
         )
 
-    def _pause_for_manual_recovery(self, task: StoryTask, baseline: str) -> None:
-        """OFF path for a stopped/abandoned in-place attempt: leave the tree
-        untouched, surface bold manual-recovery instructions, and pause the run.
-        Always raises RunPaused. A *resolved* escalation never reaches here —
-        `_rollback_or_pause` auto-recovers that human-initiated re-drive
+    def _pause_for_manual_recovery(
+        self, task: StoryTask, baseline: str, *, preserve_failed: bool = False
+    ) -> None:
+        """Leave the tree untouched, surface bold manual-recovery instructions, and
+        pause the run. Always raises RunPaused. Reached either (a, default) the OFF
+        path for a stopped/abandoned in-place attempt, or (b, ``preserve_failed``)
+        rollback is ON/resolved but the attempt's commits above baseline could not be
+        parked on a recovery ref, so an automatic ``reset --hard`` would silently
+        discard them — a distinct notice that names the at-risk commits and never
+        tells the operator to blindly reset. A *resolved* escalation never reaches
+        here — `_rollback_or_pause` auto-recovers that human-initiated re-drive
         regardless of `scm.rollback_on_failure`."""
         short = baseline[:12] or "<baseline_commit>"
-        why = (
-            f"Story **{task.story_key}**'s attempt was stopped and auto-rollback "
-            "is OFF, so the working tree was left exactly as-is for you to "
-            "inspect.\n"
-        )
-        notice = (
-            "**ACTION REQUIRED — manual rollback needed**\n"
-            f"{why}"
-            "To discard this attempt yourself:\n"
-            "  1. **BACK UP any untracked files you want to keep** — the reset "
-            "below deletes uncommitted work.\n"
-            f"  2. `git reset --hard {short}` then review/remove leftover "
-            "untracked files.\n"
-            "  3. **Restore the files you backed up in step 1.**\n"
-            f"Then run `bmad-auto resume {self.state.run_id}`. To let the "
-            "orchestrator do a safe automatic rollback next time, enable "
-            "`[scm] rollback_on_failure` (it discards the attempt's uncommitted "
-            "work but never deletes pre-existing untracked files)."
-        )
+        if preserve_failed:
+            notice = (
+                "**ACTION REQUIRED — commits could not be auto-preserved**\n"
+                f"Story **{task.story_key}**'s attempt committed work above its "
+                "baseline, but a recovery ref for those commits could not be created, "
+                "so the automatic rollback was refused rather than `reset --hard` "
+                "past (and discard) them. **Your commits are intact at the current "
+                "HEAD.**\n"
+                "  1. **Save them first** — e.g. `git branch my-rescue HEAD` (the "
+                f"commits are `{short}..HEAD`).\n"
+                "  2. Only once they are safe, discard the attempt if you want to: "
+                f"`git reset --hard {short}`, then review/remove leftover untracked "
+                "files.\n"
+                f"Then run `bmad-auto resume {self.state.run_id}`."
+            )
+        else:
+            why = (
+                f"Story **{task.story_key}**'s attempt was stopped and auto-rollback "
+                "is OFF, so the working tree was left exactly as-is for you to "
+                "inspect.\n"
+            )
+            notice = (
+                "**ACTION REQUIRED — manual rollback needed**\n"
+                f"{why}"
+                "To discard this attempt yourself:\n"
+                "  1. **BACK UP any untracked files you want to keep** — the reset "
+                "below deletes uncommitted work.\n"
+                f"  2. `git reset --hard {short}` then review/remove leftover "
+                "untracked files.\n"
+                "  3. **Restore the files you backed up in step 1.**\n"
+                f"Then run `bmad-auto resume {self.state.run_id}`. To let the "
+                "orchestrator do a safe automatic rollback next time, enable "
+                "`[scm] rollback_on_failure` (it discards the attempt's uncommitted "
+                "work but never deletes pre-existing untracked files)."
+            )
         self.journal.append("rollback-manual-required", story_key=task.story_key, baseline=baseline)
         gates.notify(
             self.policy,

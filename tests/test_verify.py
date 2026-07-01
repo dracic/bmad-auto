@@ -813,3 +813,16 @@ def test_preserve_commits_noop_without_commits(project):
     (repo / "dirty.txt").write_text("uncommitted\n")  # dirty but never committed
     assert verify.preserve_commits(repo, baseline, "attempt-preserve/run-none") is None
     assert git(repo, "branch", "--list", "attempt-preserve/run-none").strip() == ""
+
+
+def test_preserve_commits_raises_on_branch_failure(project):
+    """When commits exist but the branch cannot be created (here, an illegal ref
+    name), raise GitError — never return None, so a caller can't mistake a
+    preservation failure for a harmless no-op and reset past committed work."""
+    repo = project.project
+    baseline = verify.rev_parse_head(repo)
+    (repo / "impl.txt").write_text("committed\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "attempt work")
+    with pytest.raises(verify.GitError):
+        verify.preserve_commits(repo, baseline, "bad..ref")  # ".." is an illegal git ref name
