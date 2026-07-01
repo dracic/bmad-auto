@@ -1115,6 +1115,36 @@ def test_rollback_preserves_committed_attempt_work(project):
     assert git(repo, "rev-parse", entry["ref"]).strip() == attempt_head  # reachable by name
 
 
+def test_rollback_preserves_uncommitted_attempt_worktree(project):
+    """rollback_on_failure ON + an attempt that left work UNcommitted: before the
+    hard reset (and its untracked cleanup) the engine parks the uncommitted diff —
+    both the tracked edit and the run-created untracked file — under a recovery ref,
+    so a re-drive never restarts from zero and nothing is silently destroyed."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    repo = project.project
+    task = StoryTask(story_key="1-1-a", epic=1)
+    task.baseline_commit = rev_parse_head(repo)
+    task.baseline_untracked = []
+    (repo / "src.txt").write_text("uncommitted tracked edit\n")  # tracked, never committed
+    (repo / "new_test.txt").write_text("uncommitted new file\n")  # run-created untracked
+
+    engine._rollback_or_pause(task)  # rollback ON: resets to baseline
+
+    assert rev_parse_head(repo) == task.baseline_commit  # reset happened
+    assert (repo / "src.txt").read_text() == "original\n"  # tracked edit reverted...
+    assert (repo / "new_test.txt").exists() is False  # ...untracked cleanup removed the new file
+    entry = next(e for e in engine.journal.entries() if e["kind"] == "attempt-worktree-preserved")
+    ref = entry["ref"]  # ...but both are recoverable from the parked snapshot
+    # (conftest `git` strips, so compare against the newline-free blob content)
+    assert git(repo, "show", f"{ref}:src.txt") == "uncommitted tracked edit"
+    assert git(repo, "show", f"{ref}:new_test.txt") == "uncommitted new file"
+
+
 def test_rollback_pauses_when_preserve_fails(project, monkeypatch):
     """Safety invariant: if the recovery ref can't be created while commits exist,
     the engine pauses for manual recovery rather than resetting past the work — and
