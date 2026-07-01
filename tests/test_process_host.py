@@ -30,8 +30,9 @@ def host():
     return PosixProcessHost()
 
 
-def test_is_alive_true_for_self(host):
-    assert host.is_alive(os.getpid()) is True
+def test_is_alive_true_for_self():
+    # platform's active host, not hard-coded Posix: win32's os.kill(pid, 0) is CTRL_C.
+    assert get_process_host().is_alive(os.getpid()) is True
 
 
 def test_is_alive_rejects_non_positive(host, monkeypatch):
