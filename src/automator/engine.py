@@ -756,6 +756,10 @@ class Engine:
                 baseline=task.baseline_commit or "",
                 note="reverting tracked changes + run-created untracked files",
             )
+            # A re-drive (resolved / mid-re-drive) is contractually pause-free, so it
+            # preserves best-effort but never blocks; a plain rollback pauses rather
+            # than reset past work it could not park.
+            self._preserve_attempt_commits(task, allow_pause=not redrive)
             self._safe_reset(task, preserve=protected)
             return
         self._pause_for_manual_recovery(task, task.baseline_commit or "")
@@ -776,6 +780,42 @@ class Engine:
             baseline_untracked=task.baseline_untracked,
             keep=(".automator", *self._protected_relpaths()),
             preserve=preserve,
+        )
+
+    def _preserve_attempt_commits(self, task: StoryTask, *, allow_pause: bool) -> None:
+        """Before an auto-rollback's hard reset, park any commits the attempt made
+        above its baseline under a named recovery ref, so `reset --hard baseline`
+        can't silently orphan committed work (it survives `git gc` and is
+        recoverable by name, not just the reflog). No-op when the attempt added no
+        commits — an uncommitted-only revert is the intended, non-destructive case.
+
+        If commits exist but the ref cannot be created: with ``allow_pause`` (a
+        plain rollback) refuse to reset — pause for manual recovery rather than
+        destroy the work. On a re-drive (``allow_pause=False``) the caller's
+        contract forbids pausing, so journal the failure and let the reset proceed
+        (the re-drive is a human-directed discard of the failed attempt)."""
+        baseline = task.baseline_commit
+        if not baseline:
+            return
+        commits = verify.commits_above(self.workspace.root, baseline)
+        if not commits:
+            return
+        head = commits[0]
+        # run_id can be an arbitrary user `--run-id`; keep the ref component git-safe
+        # so an exotic id can't fail `git branch` and turn a routine rollback into a
+        # false "couldn't preserve" pause.
+        slug = "".join(c if (c.isalnum() or c in "_-") else "-" for c in self.state.run_id)
+        ref = verify.preserve_commits(
+            self.workspace.root, baseline, f"attempt-preserve/{slug}-{head[:8]}", commits=commits
+        )
+        if ref is None:
+            # commits exist (just enumerated) but the ref did not take.
+            self.journal.append("attempt-preserve-failed", story_key=task.story_key, head=head)
+            if allow_pause:
+                self._pause_for_manual_recovery(task, baseline)  # raises RunPaused
+            return  # re-drive: never pause — proceed to the (human-directed) reset
+        self.journal.append(
+            "attempt-commits-preserved", story_key=task.story_key, ref=ref, count=len(commits)
         )
 
     def _pause_for_manual_recovery(self, task: StoryTask, baseline: str) -> None:
