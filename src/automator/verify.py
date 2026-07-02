@@ -266,7 +266,10 @@ def snapshot_worktree(
     ``untracked_files(repo)`` minus ``baseline_untracked`` (the snapshot taken
     when the baseline was captured). This mirrors :func:`safe_rollback`'s scope
     exactly: the snapshot holds precisely what the reset would destroy and never
-    a pre-existing user untracked file. Ignored files are excluded throughout
+    a pre-existing user untracked file. When ``baseline_untracked`` is ``None`` (a
+    pre-upgrade/resumed run with no snapshot) no untracked file is staged — matching
+    :func:`safe_rollback`, which then deletes none — so tracked edits are still
+    parked but untracked files are left untouched. Ignored files are excluded throughout
     (``add -u`` only touches tracked paths; ``untracked_files`` honours
     ``.gitignore``). A tree is written and ``commit-tree``'d parented at HEAD
     under a synthetic ``bmad-auto`` identity so the snapshot commit succeeds even
@@ -289,7 +292,13 @@ def snapshot_worktree(
             rc, out = _git_env(repo, *args, env=env)
             if rc != 0:
                 raise GitError(f"git {args[0]} (snapshot) failed in {repo}: {out}")
-        new = sorted(untracked_files(repo) - set(baseline_untracked or []))
+        # None baseline (pre-upgrade/resumed run, no snapshot): safe_rollback deletes
+        # no untracked files, so park none either — coercing None to [] would instead
+        # stage every current untracked file, including the user's pre-existing ones.
+        if baseline_untracked is None:
+            new: list[str] = []
+        else:
+            new = sorted(untracked_files(repo) - set(baseline_untracked))
         if new:
             rc, out = _git_env(repo, "add", "--", *new, env=env)
             if rc != 0:

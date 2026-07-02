@@ -924,3 +924,22 @@ def test_snapshot_worktree_scopes_to_run_created_untracked(project):
     tree = git(repo, "ls-tree", "-r", "--name-only", ref)
     assert "run_created.txt" in tree  # what a rollback would destroy — captured
     assert "preexisting.txt" not in tree  # the user's own file — never captured
+
+
+def test_snapshot_worktree_unknown_baseline_skips_untracked(project):
+    """`baseline_untracked=None` (a pre-upgrade/resumed run with no snapshot) means the
+    baseline is *unknown*, not empty: safe_rollback deletes no untracked files in that
+    case, so the snapshot must park none either — coercing None to [] would bake every
+    current untracked file (incl. the user's own) into the recovery ref. Tracked edits
+    are still parked."""
+    repo = project.project
+    (repo / "src.txt").write_text("tracked edit\n")  # a real change so the tree isn't clean
+    (repo / "user_untracked.txt").write_text("user's own untracked file\n")  # unknown provenance
+
+    ref = verify.snapshot_worktree(
+        repo, "refs/attempt-preserve-dirty/run-unknown", baseline_untracked=None
+    )
+    assert ref is not None  # tracked edit still parked
+    tree = git(repo, "ls-tree", "-r", "--name-only", ref)
+    assert "src.txt" in tree  # tracked edit captured
+    assert "user_untracked.txt" not in tree  # unknown-baseline untracked left untouched
