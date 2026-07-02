@@ -83,3 +83,27 @@ def test_clear_pause_also_clears_crashed():
     assert state.crashed is False
     assert state.crash_error is None
     assert state.paused is False
+
+
+def test_cache_read_weight_from_snapshot():
+    state = _state(policy_snapshot={"limits": {"cache_read_weight": 0.5}})
+    assert state.cache_read_weight() == 0.5
+
+
+def test_cache_read_weight_defaults_when_snapshot_absent():
+    assert _state().cache_read_weight() == 0.1  # empty snapshot
+
+
+def test_cache_read_weight_defaults_when_limits_missing():
+    state = _state(policy_snapshot={"gates": {}})  # no limits section
+    assert state.cache_read_weight() == 0.1
+
+
+def test_cache_read_weight_defaults_when_limits_not_a_dict():
+    state = _state(policy_snapshot={"limits": "oops"})
+    assert state.cache_read_weight() == 0.1
+
+
+def test_cache_read_weight_defaults_when_value_not_a_number():
+    state = _state(policy_snapshot={"limits": {"cache_read_weight": "high"}})
+    assert state.cache_read_weight() == 0.1

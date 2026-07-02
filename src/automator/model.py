@@ -294,6 +294,19 @@ class RunState:
         self.crashed = False
         self.crash_error = None
 
+    def cache_read_weight(self) -> float:
+        """The run's cache-read weight from its persisted policy snapshot; the
+        product default (policy.LimitsPolicy.cache_read_weight = 0.1) when the
+        snapshot predates the field or is malformed. Lets the TUI show the same
+        weighted total the engine's budget uses without importing Policy."""
+        limits = self.policy_snapshot.get("limits")
+        if isinstance(limits, dict):
+            try:
+                return float(limits["cache_read_weight"])
+            except (KeyError, TypeError, ValueError):
+                pass
+        return 0.1
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
