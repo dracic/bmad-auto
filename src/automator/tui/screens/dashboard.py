@@ -553,11 +553,12 @@ class DashboardScreen(Screen[None]):
         weight = state.cache_read_weight()
         for key, task in state.tasks.items():
             weighted = task.tokens.weighted_total(weight)
+            has_tokens = bool(task.tokens.total)
             # Gate on total (any tokens?), not on `weighted`: with cache_read_weight=0
             # a cache-read-only task has weighted==0 but nonzero raw — show "0", not "-"
             # (which reads as missing data). "-" means the task has no tokens at all.
-            tokens = f"{weighted:,}" if task.tokens.total else "-"
-            raw = f"{task.tokens.total:,}" if task.tokens.total else "-"
+            tokens = f"{weighted:,}" if has_tokens else "-"
+            raw = f"{task.tokens.total:,}" if has_tokens else "-"
             info = task.defer_reason or (task.commit_sha or "")[:12]
             cells = {
                 "phase": str(task.phase),
