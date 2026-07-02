@@ -33,7 +33,11 @@ def test_exhausted_budget_reescalates_resolved_redrive():
 
 def test_budget_left_still_retries_even_when_resolved_redrive():
     task = _task(attempt=1, resolved_redrive=True)  # 1 < 2 -> budget remains
-    assert decide_dev(task, COMPLETED, FAILING, POLICY).action == Action.RETRY
+    decision = decide_dev(task, COMPLETED, FAILING, POLICY)
+    assert decision.action == Action.RETRY
+    # a plain retry must NOT carry the exhausted re-escalation wording — that reason
+    # is journaled/fed back, and "re-escalating instead of deferring" is a lie here.
+    assert "re-escalating" not in decision.reason
 
 
 def test_noncompleted_session_reescalates_resolved_redrive():

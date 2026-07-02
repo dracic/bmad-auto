@@ -22,6 +22,9 @@ breaking changes may land in a minor release.
   and its uncommitted working-tree diff — tracked edits and run-created untracked files alike — under
   `refs/attempt-preserve-dirty/`; both are recoverable by name and survive gc. A plain rollback that
   cannot create the ref refuses to reset and pauses for manual recovery rather than destroying work.
+  The uncommitted snapshot is scoped to this run's own changes (never a pre-existing untracked file),
+  commits under a synthetic identity so it works with no git user configured, and is keyed per retry
+  so repeated rollbacks against the same baseline no longer overwrite each other's recovery ref.
 - **Process liveness is now identity-aware, so a reused PID no longer reads as a live run.** A recycled
   pid (common on Windows) used to register as a false "alive" — blocking resume of a dead run,
   stranding worktree reclaim, leaking sessions, and showing dead runs as RUNNING. The pid file now

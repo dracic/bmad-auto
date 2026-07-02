@@ -878,9 +878,15 @@ class Engine:
         # Same git-safe, length-bounded slug as _preserve_attempt_commits so an
         # exotic/overlong --run-id can't blow the ref-name limit and drop the ref.
         slug = "".join(c if (c.isalnum() or c in "_-") else "-" for c in self.state.run_id)[:64]
-        ref = f"refs/attempt-preserve-dirty/{slug}-{baseline[:8]}"
+        # ``baseline_commit`` is fixed across the whole dev retry loop, so keying the
+        # ref on the baseline alone would make a 2nd dirty rollback reuse the name and
+        # orphan the 1st attempt's snapshot. ``task.attempt`` only ever increments
+        # (never resets), so it uniquely discriminates each retry's recovery ref.
+        ref = f"refs/attempt-preserve-dirty/{slug}-{baseline[:8]}-{task.attempt}"
         try:
-            parked = verify.snapshot_worktree(self.workspace.root, ref)
+            parked = verify.snapshot_worktree(
+                self.workspace.root, ref, baseline_untracked=task.baseline_untracked
+            )
         except verify.GitError:
             self.journal.append("attempt-worktree-preserve-failed", story_key=task.story_key)
             return

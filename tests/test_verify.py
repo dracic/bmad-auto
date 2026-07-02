@@ -840,7 +840,9 @@ def test_snapshot_worktree_survives_reset_and_gc(project):
     (repo / "src.txt").write_text("tracked edit\n")  # modify a tracked file
     (repo / "new_test.txt").write_text("untracked new file\n")  # run-created untracked
 
-    ref = verify.snapshot_worktree(repo, "refs/attempt-preserve-dirty/run-abc12345")
+    ref = verify.snapshot_worktree(
+        repo, "refs/attempt-preserve-dirty/run-abc12345", baseline_untracked=[]
+    )
     assert ref == "refs/attempt-preserve-dirty/run-abc12345"
     # parked at a commit whose parent is HEAD (recoverable via `git diff HEAD <ref>`)
     assert git(repo, "rev-parse", f"{ref}^").strip() == baseline
@@ -860,13 +862,14 @@ def test_snapshot_worktree_noop_clean_tree(project):
     None and creates no ref, so a plain reset proceeds unchanged."""
     repo = project.project
     ref_name = "refs/attempt-preserve-dirty/run-clean"
-    assert verify.snapshot_worktree(repo, ref_name) is None
+    assert verify.snapshot_worktree(repo, ref_name, baseline_untracked=[]) is None
     assert git(repo, "for-each-ref", ref_name).strip() == ""
 
 
 def test_snapshot_worktree_excludes_gitignored(project):
-    """`add -A` honours .gitignore, so ignored build output (e.g. a Unity Library/)
-    is never dragged into the recovery snapshot."""
+    """The snapshot honours .gitignore (`untracked_files` uses --exclude-standard),
+    so ignored build output (e.g. a Unity Library/) is never dragged into the
+    recovery snapshot."""
     repo = project.project
     (repo / ".gitignore").write_text("ignored.txt\n")
     git(repo, "add", "-A")
@@ -874,8 +877,50 @@ def test_snapshot_worktree_excludes_gitignored(project):
     (repo / "src.txt").write_text("tracked edit\n")  # a real change so the tree isn't clean
     (repo / "ignored.txt").write_text("build artifact\n")  # ignored — must not be snapshotted
 
-    ref = verify.snapshot_worktree(repo, "refs/attempt-preserve-dirty/run-ignore")
+    ref = verify.snapshot_worktree(
+        repo, "refs/attempt-preserve-dirty/run-ignore", baseline_untracked=[]
+    )
     assert ref is not None
     tree = git(repo, "ls-tree", "-r", "--name-only", ref)
     assert "src.txt" in tree
     assert "ignored.txt" not in tree
+
+
+def test_snapshot_worktree_succeeds_without_git_identity(project, monkeypatch, tmp_path):
+    """The snapshot commit uses a synthetic `bmad-auto` identity, so it succeeds even
+    with no git user.name/user.email configured — otherwise the best-effort caller
+    would catch the GitError and reset past the very work this ref preserves. Locks
+    the fix machine-independently by isolating ambient git config and unsetting the
+    repo's local identity."""
+    repo = project.project
+    # isolate from any global/system identity so the local unset actually bites
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-global-gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(tmp_path / "no-system-gitconfig"))
+    git(repo, "config", "--local", "--unset", "user.email")
+    git(repo, "config", "--local", "--unset", "user.name")
+    (repo / "src.txt").write_text("edit with no identity\n")  # a real change to capture
+
+    ref = verify.snapshot_worktree(
+        repo, "refs/attempt-preserve-dirty/run-noident", baseline_untracked=[]
+    )
+    assert ref == "refs/attempt-preserve-dirty/run-noident"
+    assert git(repo, "show", "-s", "--format=%an", ref) == "bmad-auto"  # synthetic author used
+    assert git(repo, "show", f"{ref}:src.txt") == "edit with no identity"  # work captured
+
+
+def test_snapshot_worktree_scopes_to_run_created_untracked(project):
+    """A pre-existing untracked file (present in `baseline_untracked`) is NOT baked
+    into the snapshot — safe_rollback never removes it, so capturing it would be a
+    scope mismatch and a privacy leak — while a run-created untracked file IS."""
+    repo = project.project
+    (repo / "preexisting.txt").write_text("user's own untracked file\n")  # present at baseline
+    baseline_untracked = ["preexisting.txt"]
+    (repo / "run_created.txt").write_text("this run's new file\n")  # appeared after baseline
+
+    ref = verify.snapshot_worktree(
+        repo, "refs/attempt-preserve-dirty/run-scope", baseline_untracked=baseline_untracked
+    )
+    assert ref is not None
+    tree = git(repo, "ls-tree", "-r", "--name-only", ref)
+    assert "run_created.txt" in tree  # what a rollback would destroy — captured
+    assert "preexisting.txt" not in tree  # the user's own file — never captured

@@ -1145,6 +1145,45 @@ def test_rollback_preserves_uncommitted_attempt_worktree(project):
     assert git(repo, "show", f"{ref}:new_test.txt") == "uncommitted new file"
 
 
+def test_rollback_preserves_distinct_refs_across_repeated_dirty_rollbacks(project):
+    """Two dirty rollbacks against the SAME baseline_commit (mimicking the dev retry
+    loop, where baseline_commit is fixed) must each park their uncommitted work under
+    a DISTINCT recovery ref — keyed on task.attempt — so the 2nd rollback cannot
+    orphan the 1st attempt's snapshot. Both parked snapshots stay recoverable by name
+    with their own attempt's edit."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    repo = project.project
+    task = StoryTask(story_key="1-1-a", epic=1)
+    task.baseline_commit = rev_parse_head(repo)
+    task.baseline_untracked = []
+
+    # cycle 1 (attempt 0): dirty the tree, roll back
+    task.attempt = 0
+    (repo / "src.txt").write_text("attempt 0 edit\n")
+    engine._rollback_or_pause(task)
+    assert rev_parse_head(repo) == task.baseline_commit  # reset happened
+    assert (repo / "src.txt").read_text() == "original\n"
+
+    # cycle 2 (attempt 1): SAME baseline, dirty again, roll back
+    task.attempt = 1
+    (repo / "src.txt").write_text("attempt 1 edit\n")
+    engine._rollback_or_pause(task)
+    assert rev_parse_head(repo) == task.baseline_commit
+    assert (repo / "src.txt").read_text() == "original\n"
+
+    refs = [e["ref"] for e in engine.journal.entries() if e["kind"] == "attempt-worktree-preserved"]
+    assert len(refs) == 2
+    assert len(set(refs)) == 2  # distinct — the 2nd rollback did not overwrite the 1st
+    # both snapshots remain reachable and carry their own attempt's uncommitted edit
+    assert git(repo, "show", f"{refs[0]}:src.txt") == "attempt 0 edit"
+    assert git(repo, "show", f"{refs[1]}:src.txt") == "attempt 1 edit"
+
+
 def test_rollback_pauses_when_preserve_fails(project, monkeypatch):
     """Safety invariant: if the recovery ref can't be created while commits exist,
     the engine pauses for manual recovery rather than resetting past the work — and

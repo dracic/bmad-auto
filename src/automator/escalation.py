@@ -70,16 +70,18 @@ def decide_dev(
 
     if result.status != "completed":
         reason = f"dev session {result.status}"
-        return Decision(Action.RETRY if budget_left else exhausted, _exhaust_reason(task, reason))
+        if budget_left:
+            return Decision(Action.RETRY, reason)
+        return Decision(exhausted, _exhaust_reason(task, reason))
 
     assert outcome is not None
     if outcome.ok:
         return Decision(Action.PROCEED)
     if outcome.severity == SEVERITY_CRITICAL:
         return Decision(Action.PAUSE, outcome.reason)
-    return Decision(
-        Action.RETRY if budget_left else exhausted, _exhaust_reason(task, outcome.reason)
-    )
+    if budget_left:
+        return Decision(Action.RETRY, outcome.reason)
+    return Decision(exhausted, _exhaust_reason(task, outcome.reason))
 
 
 def decide_review_session(task: StoryTask, result: SessionResult, policy: Policy) -> Decision:
@@ -92,10 +94,9 @@ def decide_review_session(task: StoryTask, result: SessionResult, policy: Policy
     budget_left = task.review_cycle < policy.limits.max_review_cycles
     if result.status != "completed":
         reason = f"review session {result.status}"
-        return Decision(
-            Action.RETRY if budget_left else _exhausted_action(task),
-            _exhaust_reason(task, reason),
-        )
+        if budget_left:
+            return Decision(Action.RETRY, reason)
+        return Decision(_exhausted_action(task), _exhaust_reason(task, reason))
     return Decision(Action.PROCEED)
 
 
