@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -93,6 +94,20 @@ def _git_raw(repo: Path, *args: str) -> tuple[int, str]:
         timeout=GIT_TIMEOUT_S,
     )
     return proc.returncode, proc.stdout
+
+
+def _git_env(repo: Path, *args: str, env: dict[str, str]) -> tuple[int, str]:
+    """Like `_git` but runs with an explicit environment — used to point git at a
+    throwaway `GIT_INDEX_FILE` so a snapshot can stage the tree without touching
+    the real index."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        timeout=GIT_TIMEOUT_S,
+        env=env,
+    )
+    return proc.returncode, (proc.stdout + proc.stderr).strip()
 
 
 def rev_parse_head(repo: Path) -> str:
@@ -231,6 +246,91 @@ def preserve_commits(
     rc, out = _git(repo, "branch", "-f", ref_name, "HEAD")
     if rc != 0:
         raise GitError(f"git branch -f {ref_name} HEAD failed in {repo}: {out}")
+    return ref_name
+
+
+def snapshot_worktree(
+    repo: Path, ref_name: str, *, baseline_untracked: list[str] | None
+) -> str | None:
+    """Park the current *uncommitted* working-tree state — tracked edits/deletions
+    AND run-created untracked files — under ``ref_name`` as a commit object, so a
+    following ``git reset --hard`` (whose post-reset cleanup in
+    :func:`safe_rollback` also deletes run-created untracked files) cannot
+    silently destroy an attempt's in-progress work. The snapshot survives
+    ``git gc`` and is recoverable by name (``git checkout <ref> -- .`` or
+    ``git diff HEAD <ref>``).
+
+    Captured through a throwaway temp index so the real index and working tree
+    are left untouched: seed the temp index from HEAD, ``add -u`` the tracked
+    edits/deletions, then stage only the untracked files *this run* created —
+    ``untracked_files(repo)`` minus ``baseline_untracked`` (the snapshot taken
+    when the baseline was captured). This mirrors :func:`safe_rollback`'s scope
+    exactly: the snapshot holds precisely what the reset would destroy and never
+    a pre-existing user untracked file. When ``baseline_untracked`` is ``None`` (a
+    pre-upgrade/resumed run with no snapshot) no untracked file is staged — matching
+    :func:`safe_rollback`, which then deletes none — so tracked edits are still
+    parked but untracked files are left untouched. Ignored files are excluded throughout
+    (``add -u`` only touches tracked paths; ``untracked_files`` honours
+    ``.gitignore``). A tree is written and ``commit-tree``'d parented at HEAD
+    under a synthetic ``bmad-auto`` identity so the snapshot commit succeeds even
+    when no local/global git ``user.name``/``user.email`` is configured, then
+    ``ref_name`` is pointed at the result. Compares only against HEAD — committed
+    work above baseline is already parked by :func:`preserve_commits`, so this
+    captures exactly what is not yet committed.
+
+    Returns ``ref_name`` on success, or ``None`` when the tree is clean relative
+    to HEAD (nothing to preserve — the intended non-destructive uncommitted-revert
+    case). Raises :class:`GitError` on any git failure — the raise *surfaces* the
+    capture failure so the caller can decide: the commit-preservation caller
+    refuses to reset past unpreserved work, while the best-effort worktree caller
+    journals the failure and proceeds (the recovery ref is a safety net, not a
+    gate)."""
+    head = rev_parse_head(repo)
+    with tempfile.TemporaryDirectory() as td:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(td) / "index")}
+        for args in (("read-tree", head), ("add", "-u")):
+            rc, out = _git_env(repo, *args, env=env)
+            if rc != 0:
+                raise GitError(f"git {args[0]} (snapshot) failed in {repo}: {out}")
+        # None baseline (pre-upgrade/resumed run, no snapshot): safe_rollback deletes
+        # no untracked files, so park none either — coercing None to [] would instead
+        # stage every current untracked file, including the user's pre-existing ones.
+        if baseline_untracked is None:
+            new: list[str] = []
+        else:
+            new = sorted(untracked_files(repo) - set(baseline_untracked))
+        if new:
+            rc, out = _git_env(repo, "add", "--", *new, env=env)
+            if rc != 0:
+                raise GitError(f"git add (snapshot untracked) failed in {repo}: {out}")
+        rc, tree = _git_env(repo, "write-tree", env=env)
+        if rc != 0:
+            raise GitError(f"git write-tree (snapshot) failed in {repo}: {tree}")
+    tree = tree.strip()
+    rc, head_tree = _git(repo, "rev-parse", f"{head}^{{tree}}")
+    if rc != 0:
+        raise GitError(f"git rev-parse {head}^{{tree}} failed in {repo}: {head_tree}")
+    if tree == head_tree.strip():
+        return None  # working tree identical to HEAD — nothing uncommitted to park
+    # A synthetic identity (merged over os.environ) so the snapshot commit succeeds
+    # with no git user.name/user.email configured — else the best-effort caller would
+    # catch the GitError and reset past the very work this ref exists to preserve.
+    ident = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "bmad-auto",
+        "GIT_AUTHOR_EMAIL": "bmad-auto@localhost",
+        "GIT_COMMITTER_NAME": "bmad-auto",
+        "GIT_COMMITTER_EMAIL": "bmad-auto@localhost",
+    }
+    rc, snap = _git_env(
+        repo, "commit-tree", tree, "-p", head, "-m", "attempt worktree snapshot", env=ident
+    )
+    if rc != 0:
+        raise GitError(f"git commit-tree (snapshot) failed in {repo}: {snap}")
+    snap = snap.strip()
+    rc, out = _git(repo, "update-ref", ref_name, snap)
+    if rc != 0:
+        raise GitError(f"git update-ref {ref_name} {snap[:12]} failed in {repo}: {out}")
     return ref_name
 
 

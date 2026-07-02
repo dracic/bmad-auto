@@ -194,6 +194,7 @@ class DashboardScreen(Screen[None]):
         tasks.add_column("review", key="review", width=6)
         tasks.add_column("tokens", key="tokens", width=12)
         tasks.add_column("info", key="info")
+        tasks.add_column("raw", key="raw", width=13)
         self.query_one("#runheader", RunHeader).show_empty(self.project)
         self.set_interval(1.0, self._tick)
         self._tick()
@@ -413,6 +414,14 @@ class DashboardScreen(Screen[None]):
     # ------------------------------------------------------------ applying
 
     def _apply(self, snap: _Snapshot) -> None:
+        # A thread-worker poll delivers its snapshot here via call_from_thread; that
+        # callback can land after the screen has been torn down (app shutdown, or
+        # another screen switched in), when the widgets below are already gone and
+        # query_one would raise NoMatches. is_running flips False on teardown but
+        # stays True while merely backgrounded under a pushed screen, so a stale
+        # apply is dropped while a live-but-background one still refreshes.
+        if not self.is_running:
+            return
         if snap.runs is not None:
             self._apply_runs(snap.runs)
         if snap.project_refreshed:
@@ -541,8 +550,15 @@ class DashboardScreen(Screen[None]):
 
     def _apply_tasks(self, state: RunState) -> None:
         table = self.query_one("#tasks", DataTable)
+        weight = state.cache_read_weight()
         for key, task in state.tasks.items():
-            tokens = f"{task.tokens.total:,}" if task.tokens.total else "-"
+            weighted = task.tokens.weighted_total(weight)
+            has_tokens = bool(task.tokens.total)
+            # Gate on total (any tokens?), not on `weighted`: with cache_read_weight=0
+            # a cache-read-only task has weighted==0 but nonzero raw — show "0", not "-"
+            # (which reads as missing data). "-" means the task has no tokens at all.
+            tokens = f"{weighted:,}" if has_tokens else "-"
+            raw = f"{task.tokens.total:,}" if has_tokens else "-"
             info = task.defer_reason or (task.commit_sha or "")[:12]
             cells = {
                 "phase": str(task.phase),
@@ -550,6 +566,7 @@ class DashboardScreen(Screen[None]):
                 "review": f"×{task.review_cycle}",
                 "tokens": tokens,
                 "info": info,
+                "raw": raw,  # must be last — matches add_column order
             }
             if key in self._task_rows:
                 for column, value in cells.items():

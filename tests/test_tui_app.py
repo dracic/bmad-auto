@@ -25,11 +25,11 @@ from textual.widgets import (
 )
 
 from automator.journal import Journal, save_state
-from automator.model import Phase, RunState, StoryTask
+from automator.model import Phase, RunState, StoryTask, TokenUsage
 from automator.runs import RUNS_DIR
 from automator.tui import data, launch
 from automator.tui.app import BmadAutoApp
-from automator.tui.screens.dashboard import DashboardScreen
+from automator.tui.screens.dashboard import DashboardScreen, _Snapshot
 from automator.tui.screens.modals import (
     ConfirmModal,
     ConfirmResumeModal,
@@ -54,6 +54,7 @@ def make_run(
     paused_reason: str | None = None,
     crashed: bool = False,
     crash_error: str | None = None,
+    policy_snapshot: dict | None = None,
 ) -> Path:
     run_dir = root / RUNS_DIR / run_id
     state = RunState(
@@ -67,6 +68,7 @@ def make_run(
         paused_reason=paused_reason,
         crashed=crashed,
         crash_error=crash_error,
+        policy_snapshot=policy_snapshot or {},
     )
     save_state(run_dir, state)
     if alive:
@@ -154,6 +156,99 @@ async def test_selection_switches_task_table(project):
         await until(pilot, lambda: screen.selected_run_id == "20260611-100000-aaaa")
         await until(pilot, lambda: tasks_table.row_count == 1)
         assert tasks_table.get_row_at(0)[0] == "1-1-login"
+
+
+async def test_task_table_shows_weighted_and_raw_tokens(project):
+    root = project.project
+    task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    # cache-read heavy: raw total is dominated by re-reads the budget discounts.
+    task.tokens = TokenUsage(
+        input_tokens=100, output_tokens=50, cache_creation_tokens=10, cache_read_tokens=1000
+    )
+    # a non-default weight proves the number comes from the persisted snapshot,
+    # not from the 0.1 fallback. weighted = 100+50+10+round(1000*0.5) = 660.
+    make_run(
+        root,
+        "20260611-100000-aaaa",
+        finished=True,
+        tasks={"1-1-login": task},
+        policy_snapshot={"limits": {"cache_read_weight": 0.5}},
+    )
+    app = BmadAutoApp(root)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        tasks_table = screen.query_one("#tasks", DataTable)
+        await until(pilot, lambda: screen.selected_run_id == "20260611-100000-aaaa")
+        await until(pilot, lambda: tasks_table.row_count == 1)
+        assert tasks_table.get_cell("1-1-login", "tokens") == "660"
+        assert tasks_table.get_cell("1-1-login", "raw") == "1,160"
+        header = str(screen.query_one("#runheader", RunHeader).content)
+        assert "660 tokens (1,160 raw)" in header
+
+
+async def test_zero_weighted_tokens_shows_zero_not_dash(project):
+    """With cache_read_weight=0 a cache-read-only task has weighted==0 but nonzero raw.
+    The tokens cell must render "0" (a real value), not "-" — which reads as missing
+    data. "-" is reserved for a task with no tokens at all."""
+    root = project.project
+    task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    task.tokens = TokenUsage(cache_read_tokens=1000)  # only cache reads
+    make_run(
+        root,
+        "20260611-100000-aaaa",
+        finished=True,
+        tasks={"1-1-login": task},
+        policy_snapshot={"limits": {"cache_read_weight": 0.0}},  # fully discount cache reads
+    )
+    app = BmadAutoApp(root)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        tasks_table = screen.query_one("#tasks", DataTable)
+        await until(pilot, lambda: screen.selected_run_id == "20260611-100000-aaaa")
+        await until(pilot, lambda: tasks_table.row_count == 1)
+        assert tasks_table.get_cell("1-1-login", "tokens") == "0"  # weighted 0, shown not hidden
+        assert tasks_table.get_cell("1-1-login", "raw") == "1,000"
+
+
+async def test_apply_snapshot_after_unmount_is_noop(project):
+    """A poll worker hands its snapshot to `_apply` via `call_from_thread`; that call
+    can land after the screen is unmounted (app shutdown / another screen popped at
+    teardown), when the widgets it queries are gone. Applying to an unmounted screen
+    must be a no-op, not a `NoMatches` crash on '#runs' — the flake seen when a
+    settings screen is open as the app tears down."""
+    root = project.project
+    make_run(root, "20260611-100000-aaaa", finished=True, tasks={})
+    app = BmadAutoApp(root)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        await until(pilot, lambda: len(screen.query("#runs")) == 1)  # fully mounted
+    # the app has shut down: the screen is no longer running and its widgets are gone
+    assert not screen.is_running
+    # a late poll delivering runs would query '#runs'; the guard makes it a no-op
+    screen._apply(_Snapshot(generation=screen._generation, runs=[]))
+
+
+async def test_token_weight_falls_back_to_default(project):
+    root = project.project
+    task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    task.tokens = TokenUsage(
+        input_tokens=100, output_tokens=50, cache_creation_tokens=10, cache_read_tokens=1000
+    )
+    # empty snapshot (e.g. a pre-feature run) -> default weight 0.1.
+    # weighted = 100+50+10+round(1000*0.1) = 260.
+    make_run(root, "20260611-100000-aaaa", finished=True, tasks={"1-1-login": task})
+    app = BmadAutoApp(root)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        tasks_table = screen.query_one("#tasks", DataTable)
+        await until(pilot, lambda: screen.selected_run_id == "20260611-100000-aaaa")
+        await until(pilot, lambda: tasks_table.row_count == 1)
+        assert tasks_table.get_cell("1-1-login", "tokens") == "260"
+        assert tasks_table.get_cell("1-1-login", "raw") == "1,160"
 
 
 def journal_rows(journal: OptionList) -> list[str]:
