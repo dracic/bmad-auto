@@ -1184,6 +1184,36 @@ def test_rollback_preserves_distinct_refs_across_repeated_dirty_rollbacks(projec
     assert git(repo, "show", f"{refs[1]}:src.txt") == "attempt 1 edit"
 
 
+def test_rollback_worktree_preserve_failure_journals_git_error(project, monkeypatch):
+    """When the uncommitted-work snapshot can't be captured, the best-effort path still
+    resets (rollback ON, no commits above baseline -> no pause) but journals the underlying
+    git error, so a post-mortem can see WHY preservation failed — not just that it did."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    repo = project.project
+    task = StoryTask(story_key="1-1-a", epic=1)
+    task.baseline_commit = rev_parse_head(repo)
+    task.baseline_untracked = []
+    (repo / "src.txt").write_text("uncommitted edit\n")  # dirty but uncommitted; no commits
+
+    def _fail(*a, **k):
+        raise GitError("simulated commit-tree failure")
+
+    monkeypatch.setattr("automator.verify.snapshot_worktree", _fail)
+
+    engine._rollback_or_pause(task)  # best-effort: journals + proceeds, never raises
+
+    assert rev_parse_head(repo) == task.baseline_commit  # reset still happened
+    entry = next(
+        e for e in engine.journal.entries() if e["kind"] == "attempt-worktree-preserve-failed"
+    )
+    assert "simulated commit-tree failure" in entry["error"]  # underlying git detail preserved
+
+
 def test_rollback_pauses_when_preserve_fails(project, monkeypatch):
     """Safety invariant: if the recovery ref can't be created while commits exist,
     the engine pauses for manual recovery rather than resetting past the work — and

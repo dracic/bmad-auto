@@ -887,8 +887,13 @@ class Engine:
             parked = verify.snapshot_worktree(
                 self.workspace.root, ref, baseline_untracked=task.baseline_untracked
             )
-        except verify.GitError:
-            self.journal.append("attempt-worktree-preserve-failed", story_key=task.story_key)
+        except verify.GitError as exc:
+            # Keep the git failure detail (commit-tree/update-ref stderr): if the
+            # following reset destroys work, this is the only breadcrumb explaining
+            # why the safety-net snapshot couldn't be captured.
+            self.journal.append(
+                "attempt-worktree-preserve-failed", story_key=task.story_key, error=str(exc)
+            )
             return
         if parked:
             self.journal.append("attempt-worktree-preserved", story_key=task.story_key, ref=parked)

@@ -187,6 +187,31 @@ async def test_task_table_shows_weighted_and_raw_tokens(project):
         assert "660 tokens (1,160 raw)" in header
 
 
+async def test_zero_weighted_tokens_shows_zero_not_dash(project):
+    """With cache_read_weight=0 a cache-read-only task has weighted==0 but nonzero raw.
+    The tokens cell must render "0" (a real value), not "-" — which reads as missing
+    data. "-" is reserved for a task with no tokens at all."""
+    root = project.project
+    task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    task.tokens = TokenUsage(cache_read_tokens=1000)  # only cache reads
+    make_run(
+        root,
+        "20260611-100000-aaaa",
+        finished=True,
+        tasks={"1-1-login": task},
+        policy_snapshot={"limits": {"cache_read_weight": 0.0}},  # fully discount cache reads
+    )
+    app = BmadAutoApp(root)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        tasks_table = screen.query_one("#tasks", DataTable)
+        await until(pilot, lambda: screen.selected_run_id == "20260611-100000-aaaa")
+        await until(pilot, lambda: tasks_table.row_count == 1)
+        assert tasks_table.get_cell("1-1-login", "tokens") == "0"  # weighted 0, shown not hidden
+        assert tasks_table.get_cell("1-1-login", "raw") == "1,000"
+
+
 async def test_token_weight_falls_back_to_default(project):
     root = project.project
     task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
