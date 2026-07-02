@@ -11,14 +11,16 @@ from conftest import (
     triage_effect,
     write_ledger,
     write_legacy_ledger,
+    write_spec,
 )
 
 from automator import deferredwork
 from automator.adapters.base import SessionResult
 from automator.adapters.mock import MockAdapter
 from automator.journal import Journal, load_state
-from automator.model import Phase, RunState, TokenUsage
+from automator.model import Phase, RunState, StoryTask, TokenUsage
 from automator.policy import (
+    DevPolicy,
     GatesPolicy,
     LimitsPolicy,
     NotifyPolicy,
@@ -430,8 +432,6 @@ def test_generic_skill_bundle_orchestrator_closes_ledger(project):
     """B4: on the generic bmad-dev-auto path the bundle session never edits the
     ledger; the orchestrator marks each owned dw id done (in _post_dev_state_sync)
     and verify_review_bundle confirms its own write. The invocation is freeform."""
-    from automator.policy import DevPolicy
-
     write_ledger(project, {"DW-1": "open", "DW-2": "open"})
     plan = triage_result(
         ["DW-1", "DW-2"],
@@ -469,14 +469,46 @@ def test_generic_skill_bundle_orchestrator_closes_ledger(project):
     assert "sweep-bundle-closed" in kinds
 
 
+def test_generic_bundle_review_verify_recloses_ledger_after_review_rewrites_it(project):
+    """A follow-up review can rewrite deferred-work.md from its own snapshot and
+    re-open entries the orchestrator already closed after dev. The review gate
+    should re-apply the orchestrator-owned ledger closure before verification,
+    otherwise the sweep launches a spurious repair/dev pass for complete work."""
+    write_ledger(project, {"DW-1": "open", "DW-2": "open"})
+    baseline = git(project.project, "rev-parse", "HEAD")
+    spec = project.implementation_artifacts / "spec-dw-fix-things.md"
+    write_spec(spec, "done", baseline)
+    pol = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        review=ReviewPolicy(enabled=True, trigger="always"),
+        dev=DevPolicy(skill="bmad-dev-auto"),
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_sweep(project, [], policy=pol)
+    task = StoryTask(
+        story_key="dw-fix-things",
+        epic=0,
+        dw_ids=["DW-1", "DW-2"],
+        spec_file=str(spec),
+    )
+
+    out = engine._verify_review(task)
+
+    assert out.ok
+    entries = ledger_entries(project)
+    assert entries["DW-1"].status.startswith("done")
+    assert entries["DW-2"].status.startswith("done")
+    assert "resolved by sweep bundle dw-fix-things" in entries["DW-1"].body
+    assert "sweep-bundle-reclosed" in {e["kind"] for e in engine.journal.entries()}
+
+
 def test_generic_bundle_reconcile_closes_ledger_on_stale_frontmatter(project):
     """Regression for the DW-159/160/162 false-defer: the bundle session finalized
     in prose (## Auto Run Result: Status done) but left the bundle spec frontmatter
     at the template default `draft`. The orchestrator reconciles the frontmatter
     before the ledger sync, so the bundle CLOSES — its dw ids are marked done and
     not stranded in failed_ids — instead of falsely deferring completed work."""
-    from automator.policy import DevPolicy
-
     write_ledger(project, {"DW-1": "open", "DW-2": "open"})
     plan = triage_result(
         ["DW-1", "DW-2"],
@@ -525,8 +557,6 @@ def test_generic_bundle_reconcile_closes_ledger_on_in_review_frontmatter(project
     the generic path (the legacy review-handoff fork is retired), so the
     orchestrator reconciles it to done before the ledger sync — the bundle CLOSES
     instead of false-deferring + rolling back into an endless re-sweep loop."""
-    from automator.policy import DevPolicy
-
     write_ledger(project, {"DW-1": "open", "DW-2": "open"})
     plan = triage_result(
         ["DW-1", "DW-2"],
