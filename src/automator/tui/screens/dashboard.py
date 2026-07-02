@@ -414,6 +414,14 @@ class DashboardScreen(Screen[None]):
     # ------------------------------------------------------------ applying
 
     def _apply(self, snap: _Snapshot) -> None:
+        # A thread-worker poll delivers its snapshot here via call_from_thread; that
+        # callback can land after the screen has been torn down (app shutdown, or
+        # another screen switched in), when the widgets below are already gone and
+        # query_one would raise NoMatches. is_running flips False on teardown but
+        # stays True while merely backgrounded under a pushed screen, so a stale
+        # apply is dropped while a live-but-background one still refreshes.
+        if not self.is_running:
+            return
         if snap.runs is not None:
             self._apply_runs(snap.runs)
         if snap.project_refreshed:

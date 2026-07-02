@@ -29,7 +29,7 @@ from automator.model import Phase, RunState, StoryTask, TokenUsage
 from automator.runs import RUNS_DIR
 from automator.tui import data, launch
 from automator.tui.app import BmadAutoApp
-from automator.tui.screens.dashboard import DashboardScreen
+from automator.tui.screens.dashboard import DashboardScreen, _Snapshot
 from automator.tui.screens.modals import (
     ConfirmModal,
     ConfirmResumeModal,
@@ -210,6 +210,25 @@ async def test_zero_weighted_tokens_shows_zero_not_dash(project):
         await until(pilot, lambda: tasks_table.row_count == 1)
         assert tasks_table.get_cell("1-1-login", "tokens") == "0"  # weighted 0, shown not hidden
         assert tasks_table.get_cell("1-1-login", "raw") == "1,000"
+
+
+async def test_apply_snapshot_after_unmount_is_noop(project):
+    """A poll worker hands its snapshot to `_apply` via `call_from_thread`; that call
+    can land after the screen is unmounted (app shutdown / another screen popped at
+    teardown), when the widgets it queries are gone. Applying to an unmounted screen
+    must be a no-op, not a `NoMatches` crash on '#runs' — the flake seen when a
+    settings screen is open as the app tears down."""
+    root = project.project
+    make_run(root, "20260611-100000-aaaa", finished=True, tasks={})
+    app = BmadAutoApp(root)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        await until(pilot, lambda: len(screen.query("#runs")) == 1)  # fully mounted
+    # the app has shut down: the screen is no longer running and its widgets are gone
+    assert not screen.is_running
+    # a late poll delivering runs would query '#runs'; the guard makes it a no-op
+    screen._apply(_Snapshot(generation=screen._generation, runs=[]))
 
 
 async def test_token_weight_falls_back_to_default(project):

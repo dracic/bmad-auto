@@ -16,6 +16,11 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **The dashboard no longer crashes when a background poll lands as the screen is torn down or
+  switched away.** A poll worker delivers its refresh on the UI thread; if that arrived just as the
+  app quit or another screen opened, the query for the run table raised `NoMatches`. The apply now
+  drops stale refreshes for a screen that is no longer running (while still updating one merely
+  backgrounded under a modal).
 - **A failed attempt's work is preserved before an auto-rollback hard reset instead of being silently
   discarded.** With `scm.rollback_on_failure` on (or on a resolved re-drive), a deferred or stopped
   attempt's commits above baseline are now parked under an `attempt-preserve/<run_id>-<head8>` branch,
