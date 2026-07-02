@@ -7,8 +7,26 @@ breaking changes may land in a minor release.
 
 ## [0.7.12] — 2026-07-01
 
+### Added
+
+- **The TUI dashboard now shows the cost-proportional weighted token total, with the raw total in a new
+  column.** The `tokens` column and the run-header summary discount cache-read tokens by the run's
+  `cache_read_weight` — the same weighting the per-story budget enforces — so the headline number
+  tracks spend rather than context re-reads; the previous unweighted total moves to a new `raw` column.
+
 ### Fixed
 
+- **A failed attempt's work is preserved before an auto-rollback hard reset instead of being silently
+  discarded.** With `scm.rollback_on_failure` on (or on a resolved re-drive), a deferred or stopped
+  attempt's commits above baseline are now parked under an `attempt-preserve/<run_id>-<head8>` branch,
+  and its uncommitted working-tree diff — tracked edits and run-created untracked files alike — under
+  `refs/attempt-preserve-dirty/`; both are recoverable by name and survive gc. A plain rollback that
+  cannot create the ref refuses to reset and pauses for manual recovery rather than destroying work.
+- **Process liveness is now identity-aware, so a reused PID no longer reads as a live run.** A recycled
+  pid (common on Windows) used to register as a false "alive" — blocking resume of a dead run,
+  stranding worktree reclaim, leaking sessions, and showing dead runs as RUNNING. The pid file now
+  carries a process-identity token that resume, stop, and the TUI verify against; on win32 the engine
+  also ignores console SIGINT/SIGBREAK during a run so a ConPTY Ctrl+C broadcast can't kill it.
 - **A story from a resolved escalation that still can't finish now re-escalates instead of being
   silently deferred.** When a human-resolved CRITICAL `blocked` escalation was re-driven and the
   re-drive couldn't reach `status: done` (e.g. the environment was still broken), the story used to
@@ -856,6 +874,7 @@ enforced in CI.
   implementation phase, driven by a Python control loop with hook-based session transport and
   resumable on-disk run state.
 
+[0.7.12]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.12
 [0.7.11]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.11
 [0.7.9]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.9
 [0.7.7]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.7
