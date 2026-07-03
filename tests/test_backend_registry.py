@@ -19,6 +19,7 @@ import pytest
 
 from bmad_loop.adapters import multiplexer as m
 from bmad_loop.adapters.multiplexer import MultiplexerError
+from bmad_loop.adapters.psmux_backend import PsmuxMultiplexer
 from bmad_loop.adapters.tmux_backend import TmuxMultiplexer
 
 
@@ -79,11 +80,15 @@ def fresh_registry(monkeypatch):
     m.get_multiplexer.cache_clear()
 
 
-def test_default_is_tmux(fresh_registry, monkeypatch):
-    """No override, POSIX host → tmux, selected via the loop's platform match (the
-    builtin registers ``matches=p != 'win32'``). Pin a POSIX platform anyway: an
-    installed external backend may match win32 (the herdr adapter does), so only
-    the POSIX default is a stable claim — this test is specifically about it."""
+def test_default_matches_platform(fresh_registry, monkeypatch):
+    """No override → the loop's platform match picks the right builtin (tmux
+    registers ``p != 'win32'``, psmux ``p == 'win32'``), not just the bottom
+    fallback. Both legs are pinned regardless of the host OS; the lru_cache is
+    cleared between them so the second selection actually re-runs."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert isinstance(fresh_registry.get_multiplexer(), PsmuxMultiplexer)
+
+    fresh_registry.get_multiplexer.cache_clear()
     monkeypatch.setattr(sys, "platform", "linux")
     assert isinstance(fresh_registry.get_multiplexer(), TmuxMultiplexer)
 
@@ -358,22 +363,21 @@ def _which_only(*available: str):
     absent. Patches the shared stdlib module, so every backend's available()
     probe sees it."""
     names = set(available)
-    return lambda name, *a, **k: (f"/usr/bin/{name}" if name in names else None)
+    return lambda name, *a, **k: f"/usr/bin/{name}" if name in names else None
 
 
-def test_win32_bottoms_out_at_tmux_with_no_externals(fresh_registry, monkeypatch):
-    """On native Windows nothing bundled matches (tmux's `matches` is
-    `p != 'win32'`, psmux is out-of-tree), so with no external backend installed
-    `_select` bottoms out at the documented historical fallback: tmux, reported
-    unavailable by validate. Pins the post-extraction win32 semantics — while
-    herdr was bundled, its `matches=True` made it the win32 first-match/fallback
-    instead (that behavior now ships with the adapter, and the
-    `force_tmux_backend` fixture keeps guarding tmux-argv tests against any
-    installed external that matches win32)."""
+def test_win32_bottoms_out_at_psmux_with_no_externals(fresh_registry, monkeypatch):
+    """On native Windows the bundled psmux backend matches (`p == 'win32'`), so
+    even with nothing available `_select` bottoms out at psmux — not the tmux
+    bottom fallback. psmux is the win32 platform default, but that step needs
+    availability; an unavailable psmux is instead reached through the historical
+    fallback (first platform match regardless of availability) and reported
+    unavailable by validate. tmux never matches win32, so it stays out of the
+    running here."""
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(shutil, "which", _which_only())  # nothing available
     backend, name, reason = fresh_registry._select()
-    assert isinstance(backend, TmuxMultiplexer)
-    assert (name, reason) == ("tmux", "fallback")
-    # sanity: _PLATFORM_DEFAULTS still names the out-of-tree psmux for win32
+    assert isinstance(backend, PsmuxMultiplexer)
+    assert (name, reason) == ("psmux", "fallback")
+    # psmux is both the win32 platform default and the sole bundled win32 match
     assert fresh_registry._PLATFORM_DEFAULTS.get("win32") == "psmux"

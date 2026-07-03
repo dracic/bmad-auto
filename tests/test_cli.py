@@ -9,6 +9,7 @@ from conftest import escalated_run, install_bmad_config, write_sprint
 
 from bmad_loop import cli
 from bmad_loop import policy as policy_mod
+from bmad_loop.adapters import multiplexer as mux_mod
 
 STORIES_SPEC_FOLDER = "_bmad-output/epic-1"
 
@@ -612,12 +613,13 @@ def test_sweep_dry_run_no_ledger(project, capsys):
     assert "no deferred-work ledger" in capsys.readouterr().out
 
 
-def test_make_adapters_review_synthesizes_from_spec(project):
+def test_make_adapters_review_synthesizes_from_spec(project, monkeypatch):
     """Both dev AND review are bmad-dev-auto runs that write no result.json, so
     both roles must get the spec-synthesizing GenericDevAdapter; triage (a real
     result.json skill) stays a plain GenericAdapter."""
     from bmad_loop.adapters.generic import GenericAdapter, GenericDevAdapter
 
+    monkeypatch.setattr(mux_mod, "_usable", lambda mux: True)
     install_bmad_config(project)
     adapters = cli._make_adapters(
         project.project, project.project / ".bmad-loop" / "runs" / "r", policy_mod.load(None)
@@ -628,13 +630,19 @@ def test_make_adapters_review_synthesizes_from_spec(project):
     assert not isinstance(adapters["triage"], GenericDevAdapter)
 
 
-def test_make_adapters_hookless_synthesizing_roles_get_dev_adapter(project):
+def test_make_adapters_hookless_synthesizing_roles_get_dev_adapter(project, monkeypatch):
     """Hookless dev/review (bmad-dev-auto roles) dispatch to OpencodeDevAdapter —
     the _DevSynthesisMixin composed over the HTTP transport — sharing one
     instance via the (cfg, synthesizes) key, while triage on the same config
     gets a separate plain OpencodeHttpAdapter (it reads a real result.json)."""
+    from bmad_loop.adapters import opencode_http
     from bmad_loop.adapters.opencode_http import OpencodeDevAdapter, OpencodeHttpAdapter
 
+    def no_mux():
+        raise AssertionError("hookless adapters must not resolve a multiplexer")
+
+    monkeypatch.setattr(opencode_http, "_require_httpx", lambda: object())
+    monkeypatch.setattr(mux_mod, "get_multiplexer", no_mux)
     install_bmad_config(project)
     _write_policy(project.project, '[adapter]\nname = "opencode"\n')
     pol = policy_mod.load(project.project / ".bmad-loop" / "policy.toml")
@@ -649,14 +657,17 @@ def test_make_adapters_hookless_synthesizing_roles_get_dev_adapter(project):
     assert adapters["triage"] is not adapters["dev"]
 
 
-def test_make_adapters_hookless_triage_dispatches_http_adapter(project):
+def test_make_adapters_hookless_triage_dispatches_http_adapter(project, monkeypatch):
     """A hookless profile on a non-synthesizing role (triage) dispatches to the
     HTTP adapter — resolved via the `opencode` alias — while dev/review keep the
     shared spec-synthesizing tmux adapter. The HTTP adapter exposes `profile`
     (worktree provisioning keys off it) and never constructs a multiplexer."""
+    from bmad_loop.adapters import opencode_http
     from bmad_loop.adapters.generic import GenericDevAdapter
     from bmad_loop.adapters.opencode_http import OpencodeHttpAdapter
 
+    monkeypatch.setattr(opencode_http, "_require_httpx", lambda: object())
+    monkeypatch.setattr(mux_mod, "_usable", lambda mux: True)
     install_bmad_config(project)
     _write_policy(project.project, '[adapter.triage]\nname = "opencode"\n')
     pol = policy_mod.load(project.project / ".bmad-loop" / "policy.toml")
@@ -667,6 +678,37 @@ def test_make_adapters_hookless_triage_dispatches_http_adapter(project):
     assert adapters["triage"].profile.name == "opencode-http"
     assert isinstance(adapters["dev"], GenericDevAdapter)
     assert adapters["dev"] is adapters["review"]  # (cfg, synthesizes) sharing intact
+
+
+def test_make_adapters_refuses_unusable_mux(project, monkeypatch):
+    """Selection's fallback rung returns a platform-matched backend even when it
+    is unusable; the run bootstrap must refuse it so a run never drives a
+    missing or version-gated multiplexer."""
+    install_bmad_config(project)
+    monkeypatch.setattr(mux_mod, "_usable", lambda mux: False)
+    with pytest.raises(SystemExit, match="not usable"):
+        cli._make_adapters(
+            project.project, project.project / ".bmad-loop" / "runs" / "r", policy_mod.load(None)
+        )
+
+
+def test_make_adapters_trusts_forced_backend(project, monkeypatch):
+    """A forced name bypasses available() in selection; the run-bootstrap
+    preflight must stand down for it the same way (the backend fails loudly
+    at first use instead)."""
+    from bmad_loop.adapters.multiplexer import get_multiplexer
+
+    install_bmad_config(project)
+    monkeypatch.setattr(mux_mod, "_usable", lambda mux: False)
+    monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "tmux")
+    get_multiplexer.cache_clear()
+    try:
+        adapters = cli._make_adapters(
+            project.project, project.project / ".bmad-loop" / "runs" / "r", policy_mod.load(None)
+        )
+    finally:
+        get_multiplexer.cache_clear()  # don't leak the forced pick to other tests
+    assert set(adapters) == set(cli.ROLES)
 
 
 class _StubEngine:

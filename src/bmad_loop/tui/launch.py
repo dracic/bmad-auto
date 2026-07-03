@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 from .. import runs
-from ..adapters.multiplexer import MultiplexerError, get_multiplexer
+from ..adapters.multiplexer import MultiplexerError, backend_forced, get_multiplexer
 from ..journal import Journal
 
 CTL_SESSION = "bmad-loop-ctl"
@@ -275,8 +275,8 @@ def start_detached(project: Path, argv_tail: list[str], run_id: str, kind: str) 
     unambiguously (window names collide when several kinds share a run_id).
     """
     mux = get_multiplexer()
-    if not mux.available():
-        raise LaunchError("multiplexer backend unavailable (binary not on PATH)")
+    if not backend_forced() and not mux.available():
+        raise LaunchError("multiplexer backend unavailable (binary missing or unsupported version)")
     _ensure_ctl_session(project)
     try:
         win_id = (

@@ -345,6 +345,7 @@ def test_run_posix_default_passes_no_encoding_and_no_env(monkeypatch):
     # inherit the parent env (env=None).
     assert rec.kwargs["text"] is True
     assert rec.kwargs["encoding"] is None
+    assert rec.kwargs["errors"] is None
     assert rec.kwargs["env"] is None
 
 

@@ -36,11 +36,12 @@ Windows host.
 
 The remaining work is the native-Windows backend itself. Three candidates now exist, and
 they are **not stages of one plan**. Two are **sibling tmux-family backends** still in
-flight: `psmux` (drives psmux's tmux-compatible shim via pwsh) and `tmux-windows` (#85;
-drives the tmux-windows port) — both subclass `BaseTmuxBackend`, both register for `win32`,
-and both invoke a binary literally named `tmux`, which is exactly why selection is
+flight: `psmux` (drives psmux's tmux-compatible CLI through its own `psmux` binary, via
+pwsh) and `tmux-windows` (#85; drives the tmux-windows port) — both subclass
+`BaseTmuxBackend` and both register for `win32`, which is exactly why selection is
 availability-aware with discriminating `available()` probes (psmux →
-`which("psmux") and which("tmux") and which("pwsh")`; tmux-windows →
+`which("psmux") and which("pwsh")` plus a version gate excluding releases ≤ 3.3.6, whose
+teardown can force-kill a recycled PID; tmux-windows →
 `which("tmux") and not which("psmux")`) and an explicit `bmad-loop mux set <name>` tie-break.
 
 The third — **herdr** — has **shipped** end-to-end on POSIX (engine run path +

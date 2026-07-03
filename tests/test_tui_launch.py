@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from bmad_loop.adapters import tmux_base
+from bmad_loop.adapters.multiplexer import get_multiplexer
 from bmad_loop.tui import launch
 
 # Every test here asserts tmux-specific argv/behaviour through the multiplexer
@@ -48,7 +49,12 @@ def fake_run(monkeypatch) -> FakeRun:
     fake = FakeRun()
     monkeypatch.setattr(tmux_base.subprocess, "run", fake)
     monkeypatch.setattr(tmux_base.shutil, "which", lambda name: f"/usr/bin/{name}")
-    return fake
+    # These tests pin the POSIX tmux argv shapes; force that backend so they
+    # hold on hosts where platform selection would pick another (win32 → psmux).
+    monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "tmux")
+    get_multiplexer.cache_clear()
+    yield fake
+    get_multiplexer.cache_clear()
 
 
 def expected_cli(*tail: str) -> str:
@@ -186,10 +192,18 @@ def test_existing_ctl_session_reused(monkeypatch, tmp_path: Path):
 
 
 def test_launch_without_mux_raises(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("BMAD_LOOP_MUX_BACKEND")
+    get_multiplexer.cache_clear()
     monkeypatch.setattr(tmux_base.shutil, "which", lambda name: None)
     assert not launch.mux_available()
     with pytest.raises(launch.LaunchError, match="multiplexer backend unavailable"):
         launch.start_run_detached(tmp_path, "RID")
+
+
+def test_forced_launch_bypasses_availability(fake_run, monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(tmux_base.shutil, "which", lambda name: None)
+    launch.start_run_detached(tmp_path, "RID")
+    assert fake_run.by_verb("new-window")
 
 
 def test_new_window_failure_raises(monkeypatch, tmp_path: Path):

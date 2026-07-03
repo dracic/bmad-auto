@@ -100,7 +100,7 @@ ROLES = ("dev", "review", "triage")
 
 def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIAdapter]:
     from .adapters.generic import GenericAdapter, GenericDevAdapter
-    from .adapters.multiplexer import get_multiplexer
+    from .adapters.multiplexer import _usable, backend_forced, get_multiplexer
     from .adapters.profile import ProfileError, get_profile
 
     # The dev skill (bmad-dev-auto) writes no result.json: its adapter
@@ -108,9 +108,7 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
     # find that spec — rebasing onto the active worktree's implementation-
     # artifacts dir under isolation, not just the main checkout's.
     paths = bmadconfig.load_paths(project)
-    # One shared terminal-multiplexer backend for every role's adapter.
-    mux = get_multiplexer()
-
+    mux = None
     adapters: dict[str, CodingCLIAdapter] = {}
     by_cfg: dict = {}
     for role in ROLES:
@@ -153,6 +151,16 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
                 except OpencodeServerError as e:
                     raise SystemExit(f"error: {e}") from e
             else:
+                # Resolve and probe the shared multiplexer only when a profile
+                # actually uses it; hookless HTTP/SSE runs need no transport.
+                if mux is None:
+                    mux = get_multiplexer()
+                    if not backend_forced() and not _usable(mux):
+                        raise SystemExit(
+                            f"error: multiplexer backend {type(mux).__name__} is not usable on "
+                            "this host (its transport binary is missing or an unsupported "
+                            "version); see `bmad-loop diagnose`"
+                        )
                 common = dict(
                     run_dir=run_dir,
                     policy=policy,
@@ -201,7 +209,8 @@ def _platform_preflight() -> tuple[list[str], list[str]]:
             notes.append(f"multiplexer {label} available" + (f" ({version})" if version else ""))
         else:
             problems.append(
-                f"multiplexer {label} unavailable — its transport binary is not on PATH; "
+                f"multiplexer {label} unavailable — its transport binary is missing or "
+                f"an unsupported version; "
                 f"see `bmad-loop diagnose`"
             )
     except Exception as e:  # noqa: BLE001 — selection or readiness must not abort validate
@@ -477,8 +486,8 @@ def _mux_set(project: Path, args: argparse.Namespace) -> int:
         # say so: the run will fail loudly if the binary never appears.
         print(
             f"warning: backend {args.name!r} is not available on this host (its "
-            "transport binary is not on PATH); persisted anyway — `bmad-loop validate` "
-            "will report it",
+            "transport binary is missing or an unsupported version); persisted anyway "
+            "— `bmad-loop validate` will report it",
             file=sys.stderr,
         )
     if os.environ.get("BMAD_LOOP_MUX_BACKEND"):
