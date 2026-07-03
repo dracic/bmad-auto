@@ -166,6 +166,28 @@ def engine_alive(run_dir: Path) -> bool:
     return get_process_host().alive_and_ours(pid, identity)
 
 
+def engine_liveness(run_dir: Path) -> str:
+    """Tri-state read of the local engine: ``'alive'`` | ``'dead'`` | ``'unknown'``.
+    Wraps :meth:`ProcessHost.liveness_of` so a live-but-unreadable pid (win32
+    ``ERROR_ACCESS_DENIED``) reads ``'unknown'``, not a false ``'dead'``. No pid →
+    ``'dead'`` (the session fallback lives in the TUI layer)."""
+    pid, identity = read_pid_identity(run_dir)
+    if pid is None:
+        return "dead"
+    return probe_liveness(pid, identity)
+
+
+def probe_liveness(pid: int, identity: float | None) -> str:
+    """Tri-state probe of an already-read ``(pid, identity)`` — the shared body of
+    :func:`engine_liveness` and ``tui.data.liveness``, so both read the pid file once.
+    A probe failure degrades to ``'unknown'``, never a false ``'dead'``."""
+    host = get_process_host()  # ProcessHostError (misconfig) propagates, not masked as unknown
+    try:
+        return host.liveness_of(pid, identity)
+    except Exception:
+        return "unknown"
+
+
 # ----------------------------------------------------------- stop / delete / archive
 
 
@@ -204,15 +226,18 @@ def session_project_tags() -> dict[str, str]:
     return get_multiplexer().session_options(PROJECT_OPTION)
 
 
-def prunable_sessions(project: Path) -> tuple[list[str], list[str]]:
-    """Partition the bmad-auto-<id> agent sessions into (prunable, live) run ids.
+def prunable_sessions(project: Path) -> tuple[list[str], list[str], set[str]]:
+    """Partition the bmad-auto-<id> agent sessions into (prunable, live) run ids,
+    plus the subset of prunable ids whose engine liveness read 'unknown'
+    (unverifiable pid). Unknown never blocks cleanup — those sessions stay
+    prunable — but frontends surface a warning for them.
 
     The control session (bmad-auto-ctl) is never a candidate. Pruning is scoped
     to `project` via the PROJECT_OPTION tag set at session creation:
 
     - tag == this project: ours — prunable unless a provably-alive engine pid is
       running (covers finished/stopped/crashed *and* orphans whose run dir was
-      deleted, since engine_alive is False with no pid).
+      deleted, since engine_liveness reads 'dead' with no pid).
     - tag is another project: skipped — never touched.
     - tag empty (pre-upgrade, untagged session): can't prove ownership, so fall
       back to the run dir — prunable only when the dir exists under this project
@@ -222,6 +247,7 @@ def prunable_sessions(project: Path) -> tuple[list[str], list[str]]:
     mine = project_tag(project)
     prunable: list[str] = []
     live: list[str] = []
+    unknown: set[str] = set()
     for name in tmux_sessions():
         if name == CTL_SESSION or not name.startswith(_SESSION_PREFIX):
             continue
@@ -233,21 +259,29 @@ def prunable_sessions(project: Path) -> tuple[list[str], list[str]]:
                 continue  # another project's session
         elif not is_run(run_dir):
             continue  # untagged and no run dir here — ownership unprovable
-        if engine_alive(run_dir):
+        liveness = engine_liveness(run_dir)
+        if liveness == "alive":
             live.append(run_id)
-        else:
-            prunable.append(run_id)
-    return prunable, live
+            continue
+        prunable.append(run_id)
+        if liveness == "unknown":
+            unknown.add(run_id)
+    return prunable, live, unknown
 
 
-def prune_sessions(project: Path, *, dry_run: bool = False) -> list[str]:
+def prune_sessions(
+    project: Path, *, dry_run: bool = False
+) -> tuple[list[str], list[str], set[str]]:
     """Kill every prunable bmad-auto-<id> session (see prunable_sessions);
-    returns the run ids that were (or, with dry_run, would be) killed."""
-    prunable, _ = prunable_sessions(project)
+    returns (killed, live, unknown): the run ids that were (or, with dry_run,
+    would be) killed, the live ids skipped, and the killed subset whose engine
+    liveness read 'unknown'. All three come from the same partition sample, so
+    frontend messaging built from them always describes the performed actions."""
+    prunable, live, unknown = prunable_sessions(project)
     if not dry_run:
         for run_id in prunable:
             kill_session(run_id)
-    return prunable
+    return prunable, live, unknown
 
 
 def stop_run(run_dir: Path) -> bool:

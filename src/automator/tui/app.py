@@ -555,8 +555,17 @@ class BmadAutoApp(App[None]):
 
     @work(thread=True, group="lifecycle")
     def _cleanup_sessions_worker(self) -> None:
-        killed = runs.prune_sessions(self.project)
+        # killed and unknown come from prune_sessions' single partition sample,
+        # so the warning below only ever names sessions that were actually pruned
+        killed, _live, unknown = runs.prune_sessions(self.project)
         windows = launch.prune_ctl_windows(self.project)
+        if unknown:
+            self.call_from_thread(
+                self.notify,
+                f"{len(unknown)} pruned session(s) had an unverifiable engine pid "
+                f"(may still be live): {', '.join(sorted(unknown))}",
+                severity="warning",
+            )
         self.call_from_thread(
             self.notify,
             f"removed {len(killed)} session(s), {len(windows)} window(s)",

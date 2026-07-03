@@ -12,6 +12,7 @@ from automator import runs
 from automator.adapters import tmux_base
 from automator.journal import load_state, save_state
 from automator.model import RunState
+from automator.process_host import ProcessHost
 
 
 def _make_run(project, run_id, with_state=True):
@@ -44,11 +45,13 @@ def _dead_pid() -> int:
     return proc.pid
 
 
-class _FakeHost:
-    """A ProcessHost stand-in for driving stop_run's escalation deterministically
-    without spawning real processes. ``alive`` / ``identity`` may be a value or a
-    zero-arg callable (so they can change between the stop-time read and the
-    post-grace check)."""
+class _FakeHost(ProcessHost):
+    """A ProcessHost for driving stop_run's escalation deterministically without
+    spawning real processes. ``alive`` / ``identity`` may be a value or a zero-arg
+    callable (so they can change between the stop-time read and the post-grace
+    check). A real subclass on purpose: ``alive_and_ours`` and ``liveness_of``
+    are inherited, so these tests exercise the production decision table instead
+    of a hand-copied mirror that could silently drift."""
 
     def __init__(self, *, alive, identity=1.0, on_terminate=None):
         self._alive = alive
@@ -71,14 +74,8 @@ class _FakeHost:
     def identity(self, pid):
         return self._identity() if callable(self._identity) else self._identity
 
-    def alive_and_ours(self, pid, identity):
-        # Mirrors ProcessHost.alive_and_ours (strict): pid<=0 short-circuits, identity
-        # None degrades to is_alive, else the recorded identity must still match.
-        if pid <= 0:
-            return False
-        if identity is None:
-            return self.is_alive(pid)
-        return self.identity(pid) == identity
+    def hook_interpreter(self):
+        return "python3"
 
 
 def test_list_run_dirs_sorted_and_filtered(tmp_path):
@@ -201,6 +198,44 @@ def test_read_pid_identity_forms(tmp_path):
     assert runs.read_pid_identity(run_dir) == (4242, 678.5)
     (run_dir / "engine.pid").write_text("not-a-pid 1.0")  # unparseable pid
     assert runs.read_pid_identity(run_dir) == (None, None)
+
+
+def test_engine_liveness(tmp_path, monkeypatch):
+    run_dir = _make_run(tmp_path, "r1")
+    assert runs.engine_liveness(run_dir) == "dead"  # no pid file → nothing to gate on
+
+    (run_dir / "engine.pid").write_text("4242 100.0")
+
+    def use(host):
+        monkeypatch.setattr(runs, "get_process_host", lambda: host)
+
+    use(_FakeHost(alive=True, identity=100.0))
+    assert runs.engine_liveness(run_dir) == "alive"  # identity matches
+
+    use(_FakeHost(alive=True, identity=999.0))
+    assert runs.engine_liveness(run_dir) == "dead"  # reused pid: identity differs
+
+    # live pid whose identity is unreadable (win32 ERROR_ACCESS_DENIED) → unknown, not dead
+    use(_FakeHost(alive=True, identity=None))
+    assert runs.engine_liveness(run_dir) == "unknown"
+
+    class _Boom:  # an unexpected probe failure degrades to unknown, never a false dead
+        def liveness_of(self, pid, identity):
+            raise RuntimeError("probe blew up")
+
+    use(_Boom())
+    assert runs.engine_liveness(run_dir) == "unknown"
+
+    # A misconfigured host (get_process_host itself raising) is a hard error, not a
+    # flaky per-pid probe — it must propagate, never mask as 'unknown'.
+    from automator.process_host import ProcessHostError
+
+    def _boom_host():
+        raise ProcessHostError("BMAD_AUTO_PROCESS_HOST matches no registered host")
+
+    monkeypatch.setattr(runs, "get_process_host", _boom_host)
+    with pytest.raises(ProcessHostError):
+        runs.engine_liveness(run_dir)
 
 
 @pytest.mark.parametrize("identity_token", ["garbage", "nan", "inf", "-inf"])
@@ -437,10 +472,26 @@ def test_prunable_sessions_partitions(tmp_path, monkeypatch):
             # untag-* and unrelated intentionally absent (no tag)
         },
     )
-    prunable, alive = runs.prunable_sessions(tmp_path)
+    prunable, alive, unknown = runs.prunable_sessions(tmp_path)
     # other-1 (foreign tag) and untag-orphan (unprovable) are skipped entirely
     assert sorted(prunable) == ["fin-1", "orphan-1", "untag-fin"]
     assert alive == ["live-1"]
+    assert unknown == set()
+
+
+def test_prunable_sessions_flags_unknown(tmp_path, monkeypatch):
+    # live pid, unreadable identity (win32 ERROR_ACCESS_DENIED) → prunable anyway
+    # (unknown never blocks cleanup) but flagged so frontends can warn.
+    mine = runs.project_tag(tmp_path)
+    odd = _make_state_run(tmp_path, "odd-1")
+    (odd / "engine.pid").write_text("4242 123.0")
+    monkeypatch.setattr(runs, "tmux_sessions", lambda: ["bmad-auto-odd-1"])
+    monkeypatch.setattr(runs, "session_project_tags", lambda: {"bmad-auto-odd-1": mine})
+    monkeypatch.setattr(runs, "get_process_host", lambda: _FakeHost(alive=True, identity=None))
+    prunable, live, unknown = runs.prunable_sessions(tmp_path)
+    assert prunable == ["odd-1"]
+    assert live == []
+    assert unknown == {"odd-1"}
 
 
 def test_prune_sessions_dry_run_kills_nothing(tmp_path, monkeypatch):
@@ -452,10 +503,25 @@ def test_prune_sessions_dry_run_kills_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(
         runs, "session_project_tags", lambda: {"bmad-auto-fin-1": runs.project_tag(tmp_path)}
     )
-    assert runs.prune_sessions(tmp_path, dry_run=True) == ["fin-1"]
+    assert runs.prune_sessions(tmp_path, dry_run=True) == (["fin-1"], [], set())
     assert killed == []
-    assert runs.prune_sessions(tmp_path) == ["fin-1"]
+    assert runs.prune_sessions(tmp_path) == (["fin-1"], [], set())
     assert killed == ["fin-1"]
+
+
+def test_prune_sessions_returns_unknown_from_same_sample(tmp_path, monkeypatch):
+    # the unknown subset must come from the partition prune_sessions itself
+    # killed, so a frontend warning built from it never names an unpruned session
+    mine = runs.project_tag(tmp_path)
+    odd = _make_state_run(tmp_path, "odd-1")
+    (odd / "engine.pid").write_text("4242 123.0")
+    killed: list[str] = []
+    monkeypatch.setattr(runs, "kill_session", lambda rid: killed.append(rid))
+    monkeypatch.setattr(runs, "tmux_sessions", lambda: ["bmad-auto-odd-1"])
+    monkeypatch.setattr(runs, "session_project_tags", lambda: {"bmad-auto-odd-1": mine})
+    monkeypatch.setattr(runs, "get_process_host", lambda: _FakeHost(alive=True, identity=None))
+    assert runs.prune_sessions(tmp_path) == (["odd-1"], [], {"odd-1"})
+    assert killed == ["odd-1"]
 
 
 def test_delete_run(tmp_path):

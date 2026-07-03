@@ -571,6 +571,25 @@ def cmd_resume(args: argparse.Namespace) -> int:
     except runs.RunRefError as e:
         print(str(e), file=sys.stderr)
         return 1
+    args.run_id = run_dir.name  # normalize so messages show the full id
+    # Gate here, NOT in _resume_paused_run: that helper is also resolve's re-arm
+    # path, which is already gated at resolve entry. A provably-live engine blocks
+    # outright (the TUI warns in its confirm modal instead; the CLI has no confirm
+    # step). 'unknown' warns but proceeds: resume is the recovery path that
+    # rewrites engine.pid, so it must stay usable when liveness is unverifiable.
+    live = runs.engine_liveness(run_dir)
+    if live == "alive":
+        print(
+            f"run {args.run_id} is still live — resuming would double-drive it; stop it first",
+            file=sys.stderr,
+        )
+        return 1
+    if live == "unknown":
+        print(
+            f"run {args.run_id}: engine may still be live (unverifiable pid) — "
+            "resuming could double-drive this run",
+            file=sys.stderr,
+        )
     return _resume_paused_run(project, run_dir)
 
 
@@ -600,9 +619,29 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    if runs.engine_alive(run_dir):
+    # Not a cleanup path, so the "unknown must not block" invariant does not apply:
+    # an unverifiable-but-live pid must not be re-driven. A provably-live engine
+    # always blocks (--force never bypasses it); unknown blocks unless the operator
+    # vouches with --force — `stop` cannot verify or clear an unverifiable pid, so
+    # without an escape hatch a squatted pid would lock resolve out forever.
+    live = runs.engine_liveness(run_dir)
+    if live == "alive":
         print(f"run {args.run_id} is still live — stop it first", file=sys.stderr)
         return 1
+    if live == "unknown":
+        if not args.force:
+            print(
+                f"run {args.run_id}: engine may still be live (unverifiable pid) — "
+                "refusing to re-arm. Confirm the engine process is gone, then re-run "
+                "with --force (`stop` cannot verify or clear an unverifiable pid).",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"run {args.run_id}: engine may still be live (unverifiable pid) — "
+            "proceeding anyway (--force)",
+            file=sys.stderr,
+        )
     story_key = args.story or state.paused_story_key
     task = state.tasks.get(story_key) if story_key else None
     if story_key is None or task is None or task.phase != Phase.ESCALATED:
@@ -815,6 +854,27 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def _stop_or_block_live_engine(run_dir: Path, run_id: str, force: bool) -> int | None:
+    """Shared delete/archive guard. One liveness sample drives both the warning and the
+    block, so a mid-check identity flip can't fire one without the other. An unverifiable
+    pid (``unknown``) warns but never blocks cleanup; only a provably-live engine blocks,
+    or is stopped first under ``force``. Returns an exit code to propagate, or None to
+    proceed with cleanup."""
+    live = runs.engine_liveness(run_dir)
+    if live == "unknown":
+        print(f"run {run_id}: engine may still be live (unverifiable pid)", file=sys.stderr)
+    if live == "alive":
+        if not force:
+            print(f"run {run_id} is still live — stop it first (or pass --force)", file=sys.stderr)
+            return 1
+        try:
+            runs.stop_run(run_dir)
+        except (runs.StopRunError, ProcessHostError) as e:
+            print(str(e), file=sys.stderr)
+            return 1
+    return None
+
+
 def cmd_delete(args: argparse.Namespace) -> int:
     project = _project(args)
     try:
@@ -823,18 +883,9 @@ def cmd_delete(args: argparse.Namespace) -> int:
         print(str(e), file=sys.stderr)
         return 1
     args.run_id = run_dir.name
-    if runs.engine_alive(run_dir):
-        if not args.force:
-            print(
-                f"run {args.run_id} is still live — stop it first (or pass --force)",
-                file=sys.stderr,
-            )
-            return 1
-        try:
-            runs.stop_run(run_dir)
-        except (runs.StopRunError, ProcessHostError) as e:
-            print(str(e), file=sys.stderr)
-            return 1
+    rc = _stop_or_block_live_engine(run_dir, args.run_id, args.force)
+    if rc is not None:
+        return rc
     runs.delete_run(run_dir)
     print(f"run {args.run_id} deleted")
     return 0
@@ -848,18 +899,9 @@ def cmd_archive(args: argparse.Namespace) -> int:
         print(str(e), file=sys.stderr)
         return 1
     args.run_id = run_dir.name
-    if runs.engine_alive(run_dir):
-        if not args.force:
-            print(
-                f"run {args.run_id} is still live — stop it first (or pass --force)",
-                file=sys.stderr,
-            )
-            return 1
-        try:
-            runs.stop_run(run_dir)
-        except (runs.StopRunError, ProcessHostError) as e:
-            print(str(e), file=sys.stderr)
-            return 1
+    rc = _stop_or_block_live_engine(run_dir, args.run_id, args.force)
+    if rc is not None:
+        return rc
     dest = runs.archive_run(project, run_dir)
     print(f"run {args.run_id} archived to {dest}")
     return 0
@@ -869,20 +911,26 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     from .tui import launch  # pure stdlib; no textual import
 
     project = _project(args)
-    prunable, live = runs.prunable_sessions(project)
+    # one partition sample drives the prune and every message below, so the
+    # warnings and live count always match what was actually killed/skipped
+    killed, live, unknown = runs.prune_sessions(project, dry_run=args.dry_run)
+    for run_id in sorted(unknown):
+        # warn-only: unknown never blocks cleanup (same wording as delete/archive).
+        # Pruning kills the tmux session, never the engine pid, so the warning
+        # holds after the fact too.
+        print(f"run {run_id}: engine may still be live (unverifiable pid)", file=sys.stderr)
     if args.dry_run:
         windows = launch.prunable_ctl_windows(project)
-        if not prunable and not windows:
+        if not killed and not windows:
             print("nothing to clean up")
         else:
-            for run_id in prunable:
+            for run_id in killed:
                 print(f"would kill session bmad-auto-{run_id}")
             for name in windows:
                 print(f"would close ctl window {name}")
         if live:
             print(f"leaving {len(live)} live session(s) untouched")
         return 0
-    killed = runs.prune_sessions(project)
     windows = launch.prune_ctl_windows(project)
     print(f"removed {len(killed)} session(s), {len(windows)} ctl window(s)")
     if live:
@@ -948,6 +996,12 @@ def cmd_clean(args: argparse.Namespace) -> int:
     archived: list[str] = []
     deleted: list[str] = []
     for run_dir in reclaimable:
+        if runs.engine_liveness(run_dir) == "unknown":
+            # warn-only: unknown never blocks cleanup, but say so before removal
+            print(
+                f"run {run_dir.name}: engine may still be live (unverifiable pid)",
+                file=sys.stderr,
+            )
         # measure before mutating so the reclaim estimate holds for --dry-run too
         wt_dir = run_dir / "worktrees"
         wt_bytes = _dir_size(wt_dir) if wt_dir.is_dir() else 0
@@ -1250,6 +1304,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="--resume: re-arm + resume without prompting; --no-resume: re-arm only "
         "(default: prompt to confirm, then resume)",
+    )
+    resolve_p.add_argument(
+        "--force",
+        action="store_true",
+        help="proceed when engine liveness is unverifiable (unknown); "
+        "a provably-live engine still blocks",
     )
 
     decisions_p = add(
