@@ -83,21 +83,70 @@ class AutoRunResult:
     detail: str  # the prose body after the heading, trimmed (human-readable)
 
 
+# A fence line: up to three spaces of indent, then a maximal run of >= 3 backticks
+# or tildes (its char AND length both matter per CommonMark), then the rest of the
+# line — an info string on an opener; on a close, only whitespace is allowed.
+_FENCE_LINE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\n]*)$", re.MULTILINE)
+
+
+def _fenced(text: str, offset: int) -> bool:
+    """True when `offset` falls inside a ``` / ~~~ fenced code block.
+
+    A fence opens on a line of three-or-more backticks or tildes (indentable up
+    to three spaces; a tab would make an indented code block instead). Per
+    CommonMark it closes only on a later line using the SAME character, at least
+    as long as the opener, with no trailing non-whitespace — so a shorter run, a
+    different fence char, or an info-bearing line inside the block is content,
+    not a close. Tracking the open fence's char+length (not a bare line-parity
+    count) is what stops a nested-or-mismatched inner fence from flipping state
+    early and exposing a quoted `## Auto Run Result` as a real heading — a
+    destructive misread on the strip path."""
+    open_marker: str | None = None
+    for m in _FENCE_LINE_RE.finditer(text):
+        if m.start() >= offset:
+            break
+        marker, rest = m.group(1), m.group(2)
+        if open_marker is None:
+            open_marker = marker  # opening fence — an info string is allowed
+        elif marker[0] == open_marker[0] and len(marker) >= len(open_marker) and not rest.strip():
+            open_marker = None  # valid closing fence
+        # else: a shorter / mismatched / info-bearing fence line — literal content
+    return open_marker is not None
+
+
+def _section_headings(text: str) -> list[re.Match[str]]:
+    """`AUTO_RUN_HEADING_RE` matches that are real section headings. A heading
+    quoted inside a fenced code block (a frozen intent showing an example of the
+    terminal section, a log excerpt) is documentation, not structure — treating
+    it as terminal would let such a spec read as a result artifact from the
+    agent's first save (#52)."""
+    return [m for m in AUTO_RUN_HEADING_RE.finditer(text) if not _fenced(text, m.start())]
+
+
+def _next_heading_start(text: str, offset: int) -> int:
+    """Offset of the first non-fenced same-level (`## `) heading at/after
+    `offset`, or end-of-text — the shared section boundary. Fenced `## ` lines
+    inside the section (quoted shell comments, log output) are content, not
+    boundaries."""
+    for nxt in re.finditer(r"^##\s", text, re.MULTILINE):
+        if nxt.start() >= offset and not _fenced(text, nxt.start()):
+            return nxt.start()
+    return len(text)
+
+
 def parse_auto_run_result(text: str) -> AutoRunResult:
     """Tolerantly extract the trailing `## Auto Run Result` section from a spec.
 
-    Reads the LAST such heading (the finalize step appends; a re-derivation loop
-    could in principle append more than one — the last is the live outcome) and
-    pulls its `Status:` value plus the remaining prose as detail.
+    Reads the LAST real (non-fenced) such heading (the finalize step appends; a
+    re-derivation loop could in principle append more than one — the last is the
+    live outcome) and pulls its `Status:` value plus the remaining prose as
+    detail, spanning to the next real same-level heading.
     """
-    matches = list(AUTO_RUN_HEADING_RE.finditer(text))
+    matches = _section_headings(text)
     if not matches:
         return AutoRunResult(present=False, status="", detail="")
-    body = text[matches[-1].end() :]
-    # stop at the next top-level heading if the skill ever appends past it
-    nxt = re.search(r"^##\s+", body, re.MULTILINE)
-    if nxt:
-        body = body[: nxt.start()]
+    last = matches[-1]
+    body = text[last.end() : _next_heading_start(text, last.end())]
     status_m = STATUS_LINE_RE.search(body)
     status = status_m.group(1).strip().lower() if status_m else ""
     return AutoRunResult(present=True, status=status, detail=body.strip())
@@ -198,13 +247,14 @@ def find_result_artifact(impl_artifacts: Path, *, since_ns: int) -> Path | None:
         if mtime_ns < since_ns:
             continue
         # The no-spec fallback is recognized by name (it has no Auto Run Result
-        # heading); every other artifact must carry the terminal section.
+        # heading); every other artifact must carry a real (non-fenced) terminal
+        # section — a fence-quoted example must not qualify the spec (#52).
         if not path.name.startswith(FALLBACK_RESULT_PREFIX):
             try:
                 text = path.read_text(encoding="utf-8")
             except OSError:
                 continue
-            if not AUTO_RUN_HEADING_RE.search(text):
+            if not _section_headings(text):
                 continue
         if best is None or mtime_ns > best[0]:
             best = (mtime_ns, path)
@@ -223,8 +273,10 @@ def reset_spec_status(spec_path: Path, new_status: str) -> bool:
     prose body (e.g. the ``## Auto Run Result`` section). A present-but-empty status
     is filled, and a frontmatter block with NO ``status:`` line at all gets one
     inserted before the closing fence (the skill's template can leave it blank or
-    absent). Returns True on a real change, False when the spec has no frontmatter
-    block or is already at ``new_status``."""
+    absent). Returns True on a real change, False when the spec is absent, has no
+    frontmatter block, or is already at ``new_status``."""
+    if not spec_path.is_file():
+        return False
     text = spec_path.read_text(encoding="utf-8")
     fm = _FRONTMATTER_RE.match(text)
     if not fm:
@@ -262,4 +314,40 @@ def reset_spec_status(spec_path: Path, new_status: str) -> bool:
     if not changed:
         return False
     spec_path.write_text(head + new_body + tail + text[fm.end() :], encoding="utf-8")
+    return True
+
+
+def strip_auto_run_result(spec_path: Path) -> bool:
+    """Remove every ``## Auto Run Result`` section from a spec, in place.
+
+    Companion to `reset_spec_status` on the re-drive path: re-opening a spec by
+    flipping only its frontmatter would leave the stale terminal section behind,
+    and `find_result_artifact` keys on that heading — the re-driven session's
+    very first save of the spec would then qualify as a terminal result. Each
+    section spans its heading to the next same-level heading (the shared
+    `parse_auto_run_result` boundary) or end-of-file; headings quoted inside
+    fenced code blocks are ignored on both ends. Returns True when a section was
+    removed, False when the spec is absent or no section was present.
+
+    Only an absent spec is guarded (a clean no-op, mirroring
+    `verify.set_frontmatter_status`); a present-but-unreadable spec or a failing
+    write is left to raise. Silently skipping the strip after the caller has
+    already flipped the frontmatter status would leave the re-opened spec carrying
+    its stale terminal section — the exact state that makes the re-driven session's
+    first save read as a result — so that failure must surface, not be swallowed."""
+    if not spec_path.is_file():
+        return False
+    text = spec_path.read_text(encoding="utf-8")
+    matches = _section_headings(text)
+    if not matches:
+        return False
+    kept: list[str] = []
+    pos = 0
+    for m in matches:
+        if m.start() < pos:
+            continue  # heading inside a section already being removed
+        kept.append(text[pos : m.start()])
+        pos = _next_heading_start(text, m.end())
+    kept.append(text[pos:])
+    spec_path.write_text("".join(kept), encoding="utf-8")
     return True

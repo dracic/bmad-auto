@@ -64,6 +64,81 @@ def test_parse_stops_at_next_heading():
     assert arr.status == "done" and "blocked" not in arr.detail
 
 
+def test_parse_stops_at_bare_empty_heading():
+    """Reviewer guard (#53, comment 3522512350): a bare `##` line is a valid empty
+    CommonMark ATX heading, so `_next_heading_start` (`^##\\s`) bounding the section
+    there is correct, not a premature truncation. Locks that intent: the `Status:`
+    gate is parsed above the boundary and is unaffected, and tightening `\\s` to a
+    space/tab delimiter would stop recognizing empty headings — a false-negative
+    boundary that, on the destructive strip path, deletes MORE, not less."""
+    text = "## Auto Run Result\n\nStatus: done\n\n##\n\nlater section body\n"
+    arr = devcontract.parse_auto_run_result(text)
+    assert arr.status == "done"
+    assert "later section body" not in arr.detail
+
+
+def test_parse_ignores_fence_quoted_heading():
+    """A heading quoted inside a fenced example (a frozen intent showing the
+    section format) is documentation, not a terminal section (#52)."""
+    text = "## Intent\n\n```md\n## Auto Run Result\n\nStatus: done\n```\n\nbody\n"
+    arr = devcontract.parse_auto_run_result(text)
+    assert not arr.present and arr.status == ""
+
+
+def test_parse_real_section_wins_over_later_fenced_example():
+    """A fenced copy of the heading inside the real section's detail must not
+    displace it as the 'last' section — the real outcome stays authoritative."""
+    text = (
+        "## Auto Run Result\n\nStatus: done\n\n"
+        "the format appended was:\n\n```md\n## Auto Run Result\n\nStatus: blocked\n```\n"
+    )
+    arr = devcontract.parse_auto_run_result(text)
+    assert arr.status == "done"
+
+
+def test_parse_detail_spans_fenced_heading_line():
+    """Column-0 `## ` lines inside a fenced block within the section (quoted
+    shell comments, log output) are content, not the next-section boundary —
+    the detail must not truncate there (#52)."""
+    text = "## Auto Run Result\n\nStatus: done\n\n```sh\n## run tests\npytest -q\n```\n\ntrailing\n"
+    arr = devcontract.parse_auto_run_result(text)
+    assert arr.status == "done"
+    assert "pytest -q" in arr.detail and "trailing" in arr.detail
+
+
+def test_parse_ignores_heading_in_longer_outer_fence():
+    """A shorter ``` line inside a longer ```` fence does NOT close it
+    (CommonMark), so a `## Auto Run Result` after that inner line is still fenced
+    documentation. A bare line-parity count would flip on the inner ``` and wrongly
+    expose the heading as a real, terminal section."""
+    text = (
+        "## Intent\n\n"
+        "````\n"  # open a 4-backtick fence
+        "```\n"  # lone 3-backtick line — literal content, not a close
+        "## Auto Run Result\n\nStatus: done\n"
+        "````\n\nbody\n"  # the real close
+    )
+    arr = devcontract.parse_auto_run_result(text)
+    assert not arr.present and arr.status == ""
+
+
+def test_parse_ignores_heading_in_mismatched_fence_char():
+    """A ``` line inside a ~~~ fence is content (a different fence char cannot
+    close), so a `## Auto Run Result` after it stays fenced."""
+    text = "## Intent\n\n" "~~~\n" "```\n" "## Auto Run Result\n\nStatus: done\n" "~~~\n\nbody\n"
+    arr = devcontract.parse_auto_run_result(text)
+    assert not arr.present and arr.status == ""
+
+
+def test_parse_recognizes_real_heading_after_closed_longer_fence():
+    """Positive control: after a properly-closed 4-backtick fence, a real
+    `## Auto Run Result` IS recognized — the tracker must actually close, not
+    over-correct into a fence that never ends."""
+    text = "## Intent\n\n````\ncode\n````\n\n## Auto Run Result\n\nStatus: done\n"
+    arr = devcontract.parse_auto_run_result(text)
+    assert arr.present and arr.status == "done"
+
+
 # ------------------------------------------------------------- synthesize_result
 
 
@@ -184,6 +259,32 @@ def test_find_artifact_accepts_no_spec_fallback_prefix(tmp_path):
     assert devcontract.find_result_artifact(tmp_path, since_ns=0) == fallback
 
 
+def test_find_artifact_ignores_fence_quoted_heading(tmp_path):
+    """A spec whose only `## Auto Run Result` is a fenced example must not
+    qualify as a terminal artifact, even with a fresh mtime — otherwise the
+    agent's first save of such a spec reads as this session's result (#52)."""
+    sp = tmp_path / "spec-1-1-a.md"
+    sp.write_text(
+        "---\nstatus: in-progress\n---\n\n## Intent\n\n"
+        "```md\n## Auto Run Result\n\nStatus: done\n```\n\nbody\n",
+        encoding="utf-8",
+    )
+    assert devcontract.find_result_artifact(tmp_path, since_ns=0) is None
+
+
+def test_find_artifact_ignores_heading_in_longer_outer_fence(tmp_path):
+    """A `## Auto Run Result` fenced inside a 4-backtick block (past a lone inner
+    ``` line) must not qualify the spec as a terminal artifact — the char+length
+    tracker keeps the outer fence open where line-parity would not."""
+    sp = tmp_path / "spec-1-1-a.md"
+    sp.write_text(
+        "---\nstatus: in-progress\n---\n\n## Intent\n\n"
+        "````\n```\n## Auto Run Result\n\nStatus: done\n````\n\nbody\n",
+        encoding="utf-8",
+    )
+    assert devcontract.find_result_artifact(tmp_path, since_ns=0) is None
+
+
 # ----------------------------------------------------------- reset_spec_status
 
 
@@ -230,6 +331,14 @@ def test_reset_status_no_frontmatter(tmp_path):
     sp.write_text("# just a heading\n\nstatus: done\n", encoding="utf-8")
     assert devcontract.reset_spec_status(sp, "in-progress") is False
     assert "status: done\n" in sp.read_text()  # body status not touched
+
+
+def test_reset_spec_status_noop_when_spec_absent(tmp_path):
+    """A re-drive against a spec that no longer exists on disk no-ops cleanly
+    rather than raising (mirrors verify.set_frontmatter_status)."""
+    sp = tmp_path / "missing.md"
+    assert not sp.exists()
+    assert devcontract.reset_spec_status(sp, "in-progress") is False
 
 
 # ----------------------------------------------------------- RECONCILABLE_FROM
@@ -319,3 +428,163 @@ def test_reset_status_inserts_missing_line(tmp_path):
     assert "status: done\n" in text  # inserted
     assert "title: 'x'\n" in text and "baseline_revision: 'abc'\n" in text  # kept
     assert "## Intent\n\nbody\n" in text  # body untouched
+
+
+# ------------------------------------------------------- strip_auto_run_result
+
+
+def test_strip_auto_run_result_removes_trailing_section(tmp_path):
+    """The stale terminal section goes; frontmatter and body above it survive.
+    The stripped spec must no longer qualify as a result artifact even with a
+    fresh mtime — that is the whole point of stripping on re-arm."""
+    sp = tmp_path / "spec.md"
+    sp.write_text(
+        "---\nstatus: in-progress\n---\n\n## Intent\n\nbody\n\n"
+        "## Auto Run Result\n\nStatus: done\nAll done.\n",
+        encoding="utf-8",
+    )
+    assert devcontract.strip_auto_run_result(sp) is True
+    text = sp.read_text()
+    assert "Auto Run Result" not in text and "All done." not in text
+    assert "status: in-progress\n" in text and "## Intent\n\nbody\n" in text
+    assert devcontract.find_result_artifact(tmp_path, since_ns=0) is None
+
+
+def test_strip_auto_run_result_stops_at_next_heading(tmp_path):
+    """A section wedged mid-document is excised up to the next same-level
+    heading; sub-headings inside the section are removed with it."""
+    sp = tmp_path / "spec.md"
+    sp.write_text(
+        "---\nstatus: done\n---\n\n## Auto Run Result\n\nStatus: done\n"
+        "### Detail\n\nstale\n\n## Change Log\n\nkept\n",
+        encoding="utf-8",
+    )
+    assert devcontract.strip_auto_run_result(sp) is True
+    text = sp.read_text()
+    assert "Auto Run Result" not in text and "stale" not in text
+    assert "## Change Log\n\nkept\n" in text
+
+
+def test_strip_auto_run_result_stops_at_bare_empty_heading(tmp_path):
+    """Reviewer guard (#53, comment 3522512350): a bare `##` line is a valid empty
+    CommonMark heading, so the strip bounds the removed section there and keeps the
+    empty-heading region after it. This is the safe direction on a destructive strip
+    (truncate early -> delete less); requiring a space/tab delimiter instead of `\\s`
+    would run the strip PAST the empty heading and over-delete."""
+    sp = tmp_path / "spec.md"
+    sp.write_text(
+        "---\nstatus: done\n---\n\n## Auto Run Result\n\nStatus: done\n\n"
+        "##\n\nkept after empty heading\n",
+        encoding="utf-8",
+    )
+    assert devcontract.strip_auto_run_result(sp) is True
+    text = sp.read_text()
+    assert "Auto Run Result" not in text
+    assert "##\n\nkept after empty heading\n" in text
+
+
+def test_strip_auto_run_result_noop_without_section(tmp_path):
+    sp = tmp_path / "spec.md"
+    original = "---\nstatus: draft\n---\n\n## Intent\n\nbody\n"
+    sp.write_text(original, encoding="utf-8")
+    assert devcontract.strip_auto_run_result(sp) is False
+    assert sp.read_text() == original
+
+
+def test_strip_auto_run_result_noop_when_spec_absent(tmp_path):
+    """The re-arm path calls strip after flipping frontmatter status; if the spec
+    was removed out from under the run the strip no-ops cleanly rather than crashing
+    the re-drive (only an absent file is guarded — a present-but-unreadable spec
+    still raises so the stale section can't silently survive the re-open)."""
+    sp = tmp_path / "missing.md"
+    assert not sp.exists()
+    assert devcontract.strip_auto_run_result(sp) is False
+
+
+def test_strip_auto_run_result_ignores_heading_quoted_in_code_fence(tmp_path):
+    """A spec whose frozen intent quotes the heading inside a fenced example must
+    not lose that content — stripping is destructive, so fenced pseudo-headings
+    are not sections."""
+    sp = tmp_path / "spec.md"
+    original = (
+        "---\nstatus: draft\n---\n\n## Intent\n\n"
+        "```md\n## Auto Run Result\n\nStatus: done\n```\n\nmore body\n"
+    )
+    sp.write_text(original, encoding="utf-8")
+    assert devcontract.strip_auto_run_result(sp) is False
+    assert sp.read_text() == original
+
+
+def test_strip_auto_run_result_ignores_heading_in_indented_fence(tmp_path):
+    """Fences may be indented up to three spaces (CommonMark) — a heading quoted
+    inside one is still fenced content, not a section."""
+    sp = tmp_path / "spec.md"
+    original = (
+        "---\nstatus: draft\n---\n\n## Intent\n\n"
+        "  ```md\n## Auto Run Result\n\nStatus: done\n  ```\n\nmore body\n"
+    )
+    sp.write_text(original, encoding="utf-8")
+    assert devcontract.strip_auto_run_result(sp) is False
+    assert sp.read_text() == original
+
+
+def test_strip_auto_run_result_ignores_list_indented_fence(tmp_path):
+    """Reviewer guard (#53): a `## Auto Run Result` quoted inside a fence nested
+    under list indentation (4+ absolute leading spaces) is co-indented with the
+    fence. `_FENCE_LINE_RE` only recognizes 0-3-space fences, so this fence is not
+    tracked — but the heading is likewise indented and can never match the
+    column-0-anchored `AUTO_RUN_HEADING_RE`, so there is nothing to strip. Locks
+    that symmetry: giving the heading regex any leading-space tolerance would
+    reopen this as a destructive false-positive on quoted spec prose."""
+    sp = tmp_path / "spec.md"
+    original = (
+        "---\nstatus: draft\n---\n\n## Intent\n\n"
+        "- outer bullet\n  - inner bullet, fenced example:\n"
+        "    ```md\n    ## Auto Run Result\n\n    Status: done\n    ```\n\nmore body\n"
+    )
+    sp.write_text(original, encoding="utf-8")
+    assert devcontract.strip_auto_run_result(sp) is False
+    assert sp.read_text() == original
+
+
+def test_strip_auto_run_result_skips_fenced_boundary_lines(tmp_path):
+    """Column-0 `## `/`# ` lines inside a fenced block within the section (quoted
+    shell comments, log output) are not boundaries — the whole stale section goes."""
+    sp = tmp_path / "spec.md"
+    sp.write_text(
+        "---\nstatus: done\n---\n\n## Intent\n\nbody\n\n"
+        "## Auto Run Result\n\nStatus: done\n\n"
+        "```sh\n## run tests\npytest -q\n```\n\ntrailing stale prose\n",
+        encoding="utf-8",
+    )
+    assert devcontract.strip_auto_run_result(sp) is True
+    text = sp.read_text()
+    assert "Auto Run Result" not in text and "trailing stale prose" not in text
+    assert "## Intent\n\nbody\n" in text
+
+
+def test_strip_auto_run_result_ignores_heading_in_longer_outer_fence(tmp_path):
+    """Destructive-op guard: a `## Auto Run Result` fenced inside a 4-backtick
+    block that contains a lone inner ``` line must be preserved (no-op). Line
+    parity would flip on the inner ``` and strip the fenced documentation."""
+    sp = tmp_path / "spec.md"
+    original = (
+        "---\nstatus: draft\n---\n\n## Intent\n\n"
+        "````\n```\n## Auto Run Result\n\nStatus: done\n````\n\nmore body\n"
+    )
+    sp.write_text(original, encoding="utf-8")
+    assert devcontract.strip_auto_run_result(sp) is False
+    assert sp.read_text() == original
+
+
+def test_strip_auto_run_result_ignores_heading_in_mismatched_fence_char(tmp_path):
+    """A ``` line inside a ~~~ fence is content, not a close — the fenced
+    `## Auto Run Result` after it is documentation and must survive."""
+    sp = tmp_path / "spec.md"
+    original = (
+        "---\nstatus: draft\n---\n\n## Intent\n\n"
+        "~~~\n```\n## Auto Run Result\n\nStatus: done\n~~~\n\nmore body\n"
+    )
+    sp.write_text(original, encoding="utf-8")
+    assert devcontract.strip_auto_run_result(sp) is False
+    assert sp.read_text() == original
