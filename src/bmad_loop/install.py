@@ -146,8 +146,18 @@ def merge_hooks(config: dict, registrations: dict[str, str], dialect: str) -> tu
         # wrapper); register every handler under one ANTIGRAVITY_HOOK_GROUP group.
         # Other named groups (user/plugin hooks) sit alongside and are preserved.
         group = config.setdefault(ANTIGRAVITY_HOOK_GROUP, {})
+        if not isinstance(group, dict):
+            raise ProfileError(
+                f"{ANTIGRAVITY_HOOK_GROUP!r} in the hooks file is not a table; "
+                "fix or remove it before registering the Stop hook"
+            )
         for native_event, command in registrations.items():
             handlers = group.setdefault(native_event, [])
+            if not isinstance(handlers, list):
+                raise ProfileError(
+                    f"hook event {native_event!r} under {ANTIGRAVITY_HOOK_GROUP!r} "
+                    "is not a list; fix the hooks file before re-running init"
+                )
             already = any(
                 isinstance(cmd := handler.get("command"), str) and HOOK_MARKER in cmd
                 for entry in handlers

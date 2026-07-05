@@ -132,6 +132,20 @@ def test_merge_hooks_antigravity_appends_beside_existing_stop():
     assert len(settings["bmad-loop"]["Stop"]) == 2
 
 
+def test_merge_hooks_antigravity_rejects_malformed_shape():
+    # a malformed pre-existing hooks.json yields a clear ProfileError, not an
+    # opaque AttributeError during init.
+    import pytest
+
+    from bmad_loop.adapters.profile import ProfileError
+
+    profile = get_profile("antigravity")
+    with pytest.raises(ProfileError):
+        merge_hooks({"bmad-loop": "oops"}, _registrations(profile), profile.hooks.dialect)
+    with pytest.raises(ProfileError):
+        merge_hooks({"bmad-loop": {"Stop": "oops"}}, _registrations(profile), profile.hooks.dialect)
+
+
 def test_merge_hooks_antigravity_tolerates_non_string_command():
     # a pre-existing handler whose "command" is a non-string (e.g. None) must not
     # crash the idempotency dedupe (guarded at both merge walks).
