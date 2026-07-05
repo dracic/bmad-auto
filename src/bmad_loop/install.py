@@ -149,7 +149,7 @@ def merge_hooks(config: dict, registrations: dict[str, str], dialect: str) -> tu
         for native_event, command in registrations.items():
             handlers = group.setdefault(native_event, [])
             already = any(
-                HOOK_MARKER in handler.get("command", "")
+                isinstance(cmd := handler.get("command"), str) and HOOK_MARKER in cmd
                 for entry in handlers
                 if isinstance(entry, dict)
                 for handler in (entry, *entry.get("hooks", []))
@@ -168,7 +168,7 @@ def merge_hooks(config: dict, registrations: dict[str, str], dialect: str) -> tu
         # handler dict directly in the event list — check both shapes so a re-run
         # stays idempotent for every dialect.
         already = any(
-            HOOK_MARKER in handler.get("command", "")
+            isinstance(cmd := handler.get("command"), str) and HOOK_MARKER in cmd
             for entry in matchers
             if isinstance(entry, dict)
             for handler in (entry, *entry.get("hooks", []))

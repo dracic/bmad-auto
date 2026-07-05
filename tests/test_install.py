@@ -132,6 +132,16 @@ def test_merge_hooks_antigravity_appends_beside_existing_stop():
     assert len(settings["bmad-loop"]["Stop"]) == 2
 
 
+def test_merge_hooks_antigravity_tolerates_non_string_command():
+    # a pre-existing handler whose "command" is a non-string (e.g. None) must not
+    # crash the idempotency dedupe (guarded at both merge walks).
+    profile = get_profile("antigravity")
+    existing = {"bmad-loop": {"Stop": [{"type": "command", "command": None}]}}
+    settings, changed = merge_hooks(existing, _registrations(profile), profile.hooks.dialect)
+    assert changed
+    assert any("bmad_loop_hook" in (h.get("command") or "") for h in settings["bmad-loop"]["Stop"])
+
+
 def test_merge_hooks_antigravity_preserves_other_groups():
     # user/plugin hook groups sit alongside "bmad-loop" and must survive.
     profile = get_profile("antigravity")
