@@ -26,6 +26,7 @@ HOOK_DIALECTS = {
     "codex-hooks-json",
     "gemini-settings-json",
     "copilot-settings-json",
+    "antigravity-hooks-json",
 }
 CANONICAL_EVENTS = {"SessionStart", "Stop", "SessionEnd", "PreCompact"}
 USER_PROFILES_REL = Path(".bmad-loop") / "profiles"

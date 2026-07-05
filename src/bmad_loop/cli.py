@@ -1206,7 +1206,7 @@ def main(argv: list[str] | None = None) -> int:
         "--cli",
         action="append",
         metavar="PROFILE",
-        help="CLI profile(s) to register hooks for (claude | codex | gemini | custom; "
+        help="CLI profile(s) to register hooks for (claude | codex | gemini | antigravity | custom; "
         "repeatable; default: profiles referenced by .bmad-loop/policy.toml, or claude)",
     )
     init_p.add_argument(
@@ -1229,7 +1229,7 @@ def main(argv: list[str] | None = None) -> int:
         aliases=["collect-adapter-data"],
     )
     probe_p.add_argument(
-        "cli", help="CLI profile name (claude | codex | gemini | copilot | custom)"
+        "cli", help="CLI profile name (claude | codex | gemini | copilot | antigravity | custom)"
     )
     probe_p.add_argument(
         "--probe",

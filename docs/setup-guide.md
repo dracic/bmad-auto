@@ -90,8 +90,9 @@ invokes inline — are present before a run starts.
 
 ## Choosing which CLIs to drive
 
-The three supported adapters are `claude` (the default), `codex`, and `gemini`. You can
-pick more than one — register every CLI you intend to use for dev, review, or sweep triage.
+The supported adapters are `claude` (the default), `codex`, `gemini`, `copilot`, and
+`antigravity` (Google's `agy`). You can pick more than
+one — register every CLI you intend to use for dev, review, or sweep triage.
 
 There are **two layers** here, and confusing them is the usual stumbling block:
 

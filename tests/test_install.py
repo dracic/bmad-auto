@@ -98,6 +98,50 @@ def test_merge_hooks_copilot_idempotent():
         assert len(again["hooks"][event]) == 1
 
 
+def test_merge_hooks_antigravity_entry_shape():
+    # agy keys hooks.json by hook NAME at the top level ("bmad-loop"), and its Stop
+    # event is FLAT (handler dict directly, no matcher/hooks wrapper).
+    profile = get_profile("antigravity")
+    settings, _ = merge_hooks({}, _registrations(profile), profile.hooks.dialect)
+    assert "hooks" not in settings  # not a "hooks"-wrapped dialect
+    handler = settings["bmad-loop"]["Stop"][0]
+    assert handler["type"] == "command"
+    assert handler["timeout"] == 60  # agy hook timeouts are seconds
+    assert handler["command"].endswith("bmad_loop_hook.py Stop")
+
+
+def test_merge_hooks_antigravity_idempotent():
+    profile = get_profile("antigravity")
+    settings, _ = merge_hooks({}, _registrations(profile), profile.hooks.dialect)
+    again, changed = merge_hooks(settings, _registrations(profile), profile.hooks.dialect)
+    assert not changed
+    for event in profile.hooks.events:
+        assert len(again["bmad-loop"][event]) == 1
+
+
+def test_merge_hooks_antigravity_appends_beside_existing_stop():
+    # agy stores each event as a LIST of handlers; a hooks.json that already has a
+    # bmad-loop group with the user's own Stop handler must keep it and gain ours.
+    profile = get_profile("antigravity")
+    existing = {"bmad-loop": {"Stop": [{"type": "command", "command": "echo mine", "timeout": 5}]}}
+    settings, changed = merge_hooks(existing, _registrations(profile), profile.hooks.dialect)
+    assert changed
+    commands = [h["command"] for h in settings["bmad-loop"]["Stop"]]
+    assert "echo mine" in commands
+    assert any("bmad_loop_hook" in c for c in commands)
+    assert len(settings["bmad-loop"]["Stop"]) == 2
+
+
+def test_merge_hooks_antigravity_preserves_other_groups():
+    # user/plugin hook groups sit alongside "bmad-loop" and must survive.
+    profile = get_profile("antigravity")
+    existing = {"lint-checker": {"PostToolUse": [{"matcher": "run_command", "hooks": []}]}}
+    settings, changed = merge_hooks(existing, _registrations(profile), profile.hooks.dialect)
+    assert changed
+    assert settings["lint-checker"] == {"PostToolUse": [{"matcher": "run_command", "hooks": []}]}
+    assert settings["bmad-loop"]["Stop"][0]["command"].endswith("bmad_loop_hook.py Stop")
+
+
 # ----------------------------------------------------------------- legacy migration (rename)
 
 LEGACY_CMD = "python3 /x/.automator/bmad_auto_hook.py Stop"
