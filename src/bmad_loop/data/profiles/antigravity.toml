@@ -1,0 +1,24 @@
+# Google Antigravity CLI (`agy`). `-i` runs the slash command as the initial prompt
+# and stays interactive (a bare `-p` would run headless and exit). `Stop` is agy's
+# turn-complete event, mapped to canonical Stop — agy fires no SessionStart/SessionEnd
+# hooks, so only Stop is registered. Skills live in .agents/skills/, hooks in
+# .agents/hooks.json. usage_parser is "none": the per-workspace transcript.jsonl schema
+# isn't captured yet, so a token parser is deferred. Verified against agy 1.0.16.
+name = "antigravity"
+binary = "agy"
+prompt_template = "{prompt}"
+launch_args = ["-i"]
+bypass_args = ["--dangerously-skip-permissions"]
+model_flag = "--model"
+usage_parser = "none"
+first_run_note = "run `agy` once in the project and authenticate + trust the workspace (settings.json trustedWorkspaces) before `bmad-loop run` — spawned sessions can't answer first-run dialogs; requires Antigravity CLI (agy >= 1.0.16). NOTE: worktree runs use a different path than the trusted one — verify during probe whether that re-triggers a trust prompt."
+skill_tree = ".agents/skills"
+# .agents/hooks.json is agy's lifecycle-hook config. Seeded first, then the Stop
+# relay is merged in, so a worktree checkout keeps any user/plugin hook groups
+# already present instead of starting from an empty file.
+seed_files = [".agents/hooks.json"]
+
+[hooks]
+dialect = "antigravity-hooks-json"
+config_path = ".agents/hooks.json"
+events = { Stop = "Stop" }

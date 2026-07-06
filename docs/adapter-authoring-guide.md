@@ -166,8 +166,9 @@ Drop a TOML file in `<project>/.bmad-loop/profiles/<name>.toml` with the fields
 from the [Profile field reference](#profile-field-reference) below. The minimum is
 a `binary`, a `prompt_template`, bypass flags, a `[hooks]` block picking one of the
 config dialects (`claude-settings-json` / `codex-hooks-json` /
-`gemini-settings-json` / `copilot-settings-json`) and a native→canonical event
-map, and a `usage_parser` (start with `"none"` until you've written one).
+`gemini-settings-json` / `copilot-settings-json` / `antigravity-hooks-json`) and
+a native→canonical event map, and a `usage_parser` (start with `"none"` until
+you've written one).
 
 ### 2. Scan
 
@@ -291,7 +292,7 @@ resolves to `claude`.
 
 | Field         | Required | Meaning                                                                                                                                                                                                                                   |
 | ------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dialect`     | ✅       | The CLI's hook-config format — one of `claude-settings-json`, `codex-hooks-json`, `gemini-settings-json`, `copilot-settings-json`.                                                                                                        |
+| `dialect`     | ✅       | The CLI's hook-config format — one of `claude-settings-json`, `codex-hooks-json`, `gemini-settings-json`, `copilot-settings-json`, `antigravity-hooks-json`.                                                                              |
 | `config_path` | ✅       | Project-relative path the hook config is written to (e.g. `.claude/settings.json`). Absolute paths are rejected.                                                                                                                          |
 | `events`      | ✅       | Map of **native** event name → **canonical** event name. The canonical side must be one of `SessionStart`, `Stop`, `SessionEnd`, `PreCompact`; the native side is whatever the CLI emits (e.g. `agentStop = "Stop"`). At least one entry. |
 

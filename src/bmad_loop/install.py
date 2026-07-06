@@ -39,6 +39,10 @@ HOOK_MARKER = "bmad_loop"
 LEGACY_HOOK_MARKER = "bmad_auto"
 GEMINI_HOOK_TIMEOUT_MS = 60_000
 COPILOT_HOOK_TIMEOUT_SEC = 60
+ANTIGRAVITY_HOOK_TIMEOUT_SEC = 60  # agy hook timeouts are seconds (default 30)
+# agy's .agents/hooks.json keys by hook NAME at the top level (not a "hooks"
+# wrapper); bmad-loop registers all its handlers under this single group.
+ANTIGRAVITY_HOOK_GROUP = "bmad-loop"
 
 # The bmad-loop-* skills bundled in the wheel (bmad_loop/data/skills/) that
 # `bmad-loop init` lays down. The inner dev primitive `bmad-dev-auto` is upstream
@@ -124,6 +128,12 @@ def _hook_entry(dialect: str, command: str) -> dict:
     if dialect == "copilot-settings-json":
         handler["timeoutSec"] = COPILOT_HOOK_TIMEOUT_SEC  # Copilot timeouts are seconds
         return handler  # Copilot stores the handler directly in the event list
+    if dialect == "antigravity-hooks-json":
+        handler["timeout"] = ANTIGRAVITY_HOOK_TIMEOUT_SEC  # agy timeouts are seconds
+        # agy's Stop event value is a flat list of handler objects — the handler
+        # sits directly in the event list, with no matcher/hooks wrapper (unlike
+        # gemini's grouped shape).
+        return handler
     # claude-settings-json and codex-hooks-json share the schema
     return {"hooks": [handler]}
 
@@ -131,6 +141,34 @@ def _hook_entry(dialect: str, command: str) -> dict:
 def merge_hooks(config: dict, registrations: dict[str, str], dialect: str) -> tuple[dict, bool]:
     """Add relay registrations (native event -> command) to a hook config dict."""
     changed = False
+    if dialect == "antigravity-hooks-json":
+        # agy keys .agents/hooks.json by hook NAME at the top level (no "hooks"
+        # wrapper); register every handler under one ANTIGRAVITY_HOOK_GROUP group.
+        # Other named groups (user/plugin hooks) sit alongside and are preserved.
+        group = config.setdefault(ANTIGRAVITY_HOOK_GROUP, {})
+        if not isinstance(group, dict):
+            raise ProfileError(
+                f"{ANTIGRAVITY_HOOK_GROUP!r} in the hooks file is not a table; "
+                "fix or remove it before registering the Stop hook"
+            )
+        for native_event, command in registrations.items():
+            handlers = group.setdefault(native_event, [])
+            if not isinstance(handlers, list):
+                raise ProfileError(
+                    f"hook event {native_event!r} under {ANTIGRAVITY_HOOK_GROUP!r} "
+                    "is not a list; fix the hooks file before re-running init"
+                )
+            already = any(
+                isinstance(cmd := handler.get("command"), str) and HOOK_MARKER in cmd
+                for entry in handlers
+                if isinstance(entry, dict)
+                for handler in (entry, *entry.get("hooks", []))
+                if isinstance(handler, dict)
+            )
+            if not already:
+                handlers.append(_hook_entry(dialect, command))
+                changed = True
+        return config, changed
     if dialect == "copilot-settings-json":
         config.setdefault("version", 1)  # Copilot hook configs are versioned
     hooks = config.setdefault("hooks", {})
@@ -140,7 +178,7 @@ def merge_hooks(config: dict, registrations: dict[str, str], dialect: str) -> tu
         # handler dict directly in the event list — check both shapes so a re-run
         # stays idempotent for every dialect.
         already = any(
-            HOOK_MARKER in handler.get("command", "")
+            isinstance(cmd := handler.get("command"), str) and HOOK_MARKER in cmd
             for entry in matchers
             if isinstance(entry, dict)
             for handler in (entry, *entry.get("hooks", []))

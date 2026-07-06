@@ -150,9 +150,9 @@ def test_discover_location_redacts_username(tmp_path, monkeypatch):
 # ----------------------------------------------------------- registration
 
 
-@pytest.mark.parametrize("dialect_cli", ["claude", "codex", "gemini", "copilot"])
+@pytest.mark.parametrize("dialect_cli", ["claude", "codex", "gemini", "copilot", "antigravity"])
 def test_probe_hook_registers_under_native_events(dialect_cli):
-    from bmad_loop.install import merge_hooks
+    from bmad_loop.install import ANTIGRAVITY_HOOK_GROUP, merge_hooks
 
     profile = get_profile(dialect_cli)
     registrations = {
@@ -161,8 +161,14 @@ def test_probe_hook_registers_under_native_events(dialect_cli):
     }
     config, changed = merge_hooks({}, registrations, profile.hooks.dialect)
     assert changed
+    # agy keys by hook-group name at the top level; the others wrap in "hooks".
+    container = (
+        config[ANTIGRAVITY_HOOK_GROUP]
+        if profile.hooks.dialect == "antigravity-hooks-json"
+        else config["hooks"]
+    )
     for native in profile.hooks.events:
-        assert native in config["hooks"]
+        assert native in container
     # idempotent re-run
     again, changed2 = merge_hooks(config, registrations, profile.hooks.dialect)
     assert not changed2
