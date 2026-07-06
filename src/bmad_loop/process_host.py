@@ -219,17 +219,17 @@ def _proc_starttime(pid: int) -> float | None:
 
 
 def _psutil():
-    """Lazily import psutil (the optional ``non-linux`` extra), used only for the
-    non-destructive Windows/macOS liveness + identity probes. The dep-free core
-    never imports it on Linux; raise a clear, actionable error if it's missing where
-    it's needed."""
+    """Lazily import psutil — a core dep on Windows, the ``non-linux`` extra on
+    macOS — used only for the non-destructive Windows/macOS liveness + identity
+    probes. The dep-free core never imports it on Linux; raise a clear, actionable
+    error if it's missing where it's needed."""
     try:
         import psutil  # noqa: PLC0415  (intentional lazy import — keeps the core dep-free)
     except ImportError as exc:  # pragma: no cover - exercised only off Linux
         raise ProcessHostError(
             f"process_host: pid operations on {sys.platform!r} need psutil; "
-            "install the optional extra (pip install 'bmad-loop[non-linux]') or run "
-            "under Linux/WSL"
+            "on Windows reinstall bmad-loop (psutil is a required dependency there), "
+            "on macOS run `pip install 'bmad-loop[non-linux]'`"
         ) from exc
     return psutil
 
