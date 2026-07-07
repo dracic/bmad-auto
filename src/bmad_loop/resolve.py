@@ -22,12 +22,13 @@ from typing import Any
 
 from .adapters.base import SessionSpec
 from .model import RunState
+from .platform_util import safe_segment
 
 RESOLVE_DIR = "resolve"
 
 
 def _story_dir(run_dir: Path, story_key: str) -> Path:
-    return run_dir / RESOLVE_DIR / story_key
+    return run_dir / RESOLVE_DIR / safe_segment(story_key)
 
 
 def context_path(run_dir: Path, story_key: str) -> Path:
@@ -173,7 +174,7 @@ def run_session(adapter, project: Path, run_dir: Path, story_key: str, *, model:
     resolution marker. The context file must already be written (build_context).
     """
     spec = SessionSpec(
-        task_id=f"{story_key}-resolve-1",
+        task_id=f"{safe_segment(story_key)}-resolve-1",
         role="dev",
         prompt=f"/bmad-loop-resolve {story_key}",
         cwd=project,

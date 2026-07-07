@@ -16,6 +16,7 @@ from conftest import (
     write_sprint,
 )
 
+from bmad_loop import platform_util
 from bmad_loop.adapters.base import SessionResult
 from bmad_loop.adapters.mock import MockAdapter
 from bmad_loop.engine import Engine, RunPaused, RunStopped
@@ -485,6 +486,22 @@ def test_run_session_persists_result_json_only_for_resumable_roles(project):
     assert by_id["1-1-a-review-1"] == {"role": "review"}  # resumable → persisted
     assert by_id["1-1-a-triage-1"] is None  # role not resumable → None
     assert by_id["1-1-a-tea-trace-1"] is None  # labeled → None
+
+
+def test_run_session_labeled_task_id_capped_as_a_whole(project):
+    """Two individually legal parts (story_key, plugin label) can compose past
+    the Windows filename segment cap; the task_id is sanitized as one segment."""
+    long_key = "k" * 110
+    write_sprint(project, {long_key: "ready-for-dev"})
+    engine, _ = make_engine(project, [SessionResult(status="completed")])
+    task = StoryTask(story_key=long_key, epic=1)
+    engine.state.tasks[task.story_key] = task
+    engine._save()
+
+    engine._run_session(task, role="dev", prompt="p", seq=1, label="l" * 110)
+
+    (record,) = task.sessions
+    assert len(record.task_id) <= platform_util._MAX_SEGMENT
 
 
 def test_token_budget_discounts_cache_reads(project):

@@ -9,13 +9,13 @@ POLICY_TEMPLATE so the first save carries the full inline documentation.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
 import tomlkit
 
 from .. import policy as policy_mod
+from ..platform_util import atomic_replace
 
 STAGES = ("dev", "review", "triage")
 
@@ -98,4 +98,4 @@ class PolicyDoc:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".toml.tmp")
         tmp.write_text(self.dumps(), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_replace(tmp, path)

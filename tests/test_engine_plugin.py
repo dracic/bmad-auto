@@ -421,7 +421,7 @@ def test_unity_teardown_sweep_skips_force_kill_when_terminate_suffices(tmp_path,
     assert host.force_killed == []
 
 
-def test_unity_teardown_sweep_skips_force_kill_on_identity_mismatch(tmp_path, monkeypatch):
+def test_unity_teardown_sweep_skips_force_kill_on_identity_mismatch(tmp_path, monkeypatch, capsys):
     """A survivor whose identity changed between snapshot and escalation (pid reused)
     is never force-killed — guarding against SIGKILL landing on an unrelated process."""
     mod = _load_unity_teardown()
@@ -433,6 +433,7 @@ def test_unity_teardown_sweep_skips_force_kill_on_identity_mismatch(tmp_path, mo
     assert mod._force_kill_lingering(tmp_path) == 1
     assert host.terminated == [_FAKE_PID]
     assert host.force_killed == []  # identity no longer matches → refused
+    assert "skipping force-kill" in capsys.readouterr().err
 
 
 def test_unity_ready_grace_explicit_override(monkeypatch):

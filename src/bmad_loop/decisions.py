@@ -27,6 +27,7 @@ import re
 from pathlib import Path
 
 from . import bmadconfig, deferredwork, runs, verify
+from .platform_util import atomic_replace
 from .sweep import Decision, DecisionOption, validate_triage
 
 STORE_REL = Path(".bmad-loop") / "decisions.json"
@@ -58,7 +59,7 @@ def _write_store(project: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
+    atomic_replace(tmp, path)
 
 
 def record_pre_answer(project: Path, dw_id: str, option: DecisionOption, *, date: str) -> None:
