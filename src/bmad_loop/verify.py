@@ -1002,6 +1002,53 @@ def resolve_spec_path(spec_file: str, paths: ProjectPaths) -> Path:
     return paths.implementation_artifacts / p
 
 
+def _verify_shared_gates(
+    spec_path: Path,
+    rj: dict[str, Any],
+    task: StoryTask,
+    paths: ProjectPaths,
+    *,
+    expected_status: str,
+    proof_exclude: tuple[str, ...] | None,
+) -> VerifyOutcome | None:
+    """The workflow-tag, expected-status, baseline-match, and proof-of-work gates
+    shared verbatim by :func:`verify_dev`, :func:`verify_dev_bundle`, and
+    :func:`verify_dev_stories` — factored out so the sprint-mode and stories-mode
+    gates can't silently drift. Reads frontmatter once (callers must not re-read
+    it). Returns a failing :class:`VerifyOutcome`, or ``None`` when every gate
+    passes and the caller may run its mode-specific tail. ``proof_exclude=None``
+    skips the proof-of-work gate (a plan-halt leg produced only its own spec)."""
+    workflow = rj.get("workflow")
+    if workflow != DEV_WORKFLOW:
+        return VerifyOutcome.retry(
+            f"dev result.json workflow is {workflow!r}, expected {DEV_WORKFLOW!r}"
+        )
+
+    fm = read_frontmatter(spec_path)
+    status = status_of(fm)
+    if status != expected_status:
+        return VerifyOutcome.retry(
+            f"spec status is {status!r}, expected {expected_status!r}: {spec_path}"
+        )
+
+    claimed_baseline = str(fm.get("baseline_commit", "")).strip()
+    if task.baseline_commit and claimed_baseline not in ("", "NO_VCS"):
+        if not same_commit(claimed_baseline, task.baseline_commit):
+            return VerifyOutcome.retry(
+                f"spec baseline_commit {claimed_baseline[:12]} does not match "
+                f"orchestrator-recorded baseline {task.baseline_commit[:12]}"
+            )
+
+    if proof_exclude is not None and task.baseline_commit:
+        try:
+            if not has_changes_since(paths.project, task.baseline_commit, exclude=proof_exclude):
+                return VerifyOutcome.retry("no changes in worktree since baseline commit")
+        except GitError as e:
+            return VerifyOutcome.escalate(str(e))
+
+    return None
+
+
 def verify_dev(
     task: StoryTask,
     paths: ProjectPaths,
@@ -1025,38 +1072,18 @@ def verify_dev(
     if not spec_path.is_file():
         return VerifyOutcome.retry(f"claimed spec file does not exist: {spec_path}")
 
-    workflow = rj.get("workflow")
-    if workflow != DEV_WORKFLOW:
-        return VerifyOutcome.retry(
-            f"dev result.json workflow is {workflow!r}, expected {DEV_WORKFLOW!r}"
-        )
-
     # With review disabled, the dev session runs its own internal review and
     # finalizes straight to done; otherwise it hands off at in-review.
-    expected = "in-review" if review_enabled else "done"
-    fm = read_frontmatter(spec_path)
-    status = status_of(fm)
-    if status != expected:
-        return VerifyOutcome.retry(f"spec status is {status!r}, expected {expected!r}: {spec_path}")
-
-    claimed_baseline = str(fm.get("baseline_commit", "")).strip()
-    if task.baseline_commit and claimed_baseline not in ("", "NO_VCS"):
-        if not same_commit(claimed_baseline, task.baseline_commit):
-            return VerifyOutcome.retry(
-                f"spec baseline_commit {claimed_baseline[:12]} does not match "
-                f"orchestrator-recorded baseline {task.baseline_commit[:12]}"
-            )
-
-    if task.baseline_commit:
-        try:
-            if not has_changes_since(
-                paths.project,
-                task.baseline_commit,
-                exclude=verify_dev_exclude_relpaths(paths, spec_path),
-            ):
-                return VerifyOutcome.retry("no changes in worktree since baseline commit")
-        except GitError as e:
-            return VerifyOutcome.escalate(str(e))
+    gate = _verify_shared_gates(
+        spec_path,
+        rj,
+        task,
+        paths,
+        expected_status="in-review" if review_enabled else "done",
+        proof_exclude=verify_dev_exclude_relpaths(paths, spec_path),
+    )
+    if gate is not None:
+        return gate
 
     expected_sprint = "review" if review_enabled else "done"
     sprint = story_status(paths.sprint_status, task.story_key)
@@ -1089,37 +1116,17 @@ def verify_dev_bundle(
     if not spec_path.is_file():
         return VerifyOutcome.retry(f"claimed spec file does not exist: {spec_path}")
 
-    workflow = rj.get("workflow")
-    if workflow != DEV_WORKFLOW:
-        return VerifyOutcome.retry(
-            f"dev result.json workflow is {workflow!r}, expected {DEV_WORKFLOW!r}"
-        )
-
     # With review disabled, the dev session finalizes the bundle straight to done.
-    expected = "in-review" if review_enabled else "done"
-    fm = read_frontmatter(spec_path)
-    status = status_of(fm)
-    if status != expected:
-        return VerifyOutcome.retry(f"spec status is {status!r}, expected {expected!r}: {spec_path}")
-
-    claimed_baseline = str(fm.get("baseline_commit", "")).strip()
-    if task.baseline_commit and claimed_baseline not in ("", "NO_VCS"):
-        if not same_commit(claimed_baseline, task.baseline_commit):
-            return VerifyOutcome.retry(
-                f"spec baseline_commit {claimed_baseline[:12]} does not match "
-                f"orchestrator-recorded baseline {task.baseline_commit[:12]}"
-            )
-
-    if task.baseline_commit:
-        try:
-            if not has_changes_since(
-                paths.project,
-                task.baseline_commit,
-                exclude=verify_dev_exclude_relpaths(paths, spec_path),
-            ):
-                return VerifyOutcome.retry("no changes in worktree since baseline commit")
-        except GitError as e:
-            return VerifyOutcome.escalate(str(e))
+    gate = _verify_shared_gates(
+        spec_path,
+        rj,
+        task,
+        paths,
+        expected_status="in-review" if review_enabled else "done",
+        proof_exclude=verify_dev_exclude_relpaths(paths, spec_path),
+    )
+    if gate is not None:
+        return gate
 
     claimed_ids = {str(i) for i in (rj.get("dw_ids") or [])}
     if claimed_ids and claimed_ids != set(task.dw_ids):
@@ -1127,6 +1134,104 @@ def verify_dev_bundle(
             f"result.json dw_ids {sorted(claimed_ids)} do not match the bundle's "
             f"{sorted(task.dw_ids)}"
         )
+
+    task.spec_file = str(spec_path)
+    return VerifyOutcome.passed()
+
+
+# A spec_checkpoint story's plan-halt leg leaves the spec at this status (the
+# skill HALTs after the Ready-for-Development gate); mirrors
+# devcontract.PLAN_HALT_STATUS, kept literal here to avoid a verify<-devcontract
+# import cycle (devcontract imports verify).
+PLAN_HALT_STATUS = "ready-for-dev"
+
+
+def verify_dev_stories(
+    task: StoryTask,
+    paths: ProjectPaths,
+    result_json: dict[str, Any] | None,
+    *,
+    spec_folder: Path,
+    review_enabled: bool = True,
+    plan_halt: bool = False,
+) -> VerifyOutcome:
+    """verify_dev for stories mode: the story spec lives at the id-keyed path
+    ``<spec-folder>/stories/<id>-<slug>.md`` and there is no sprint-status entry.
+
+    Same gates as :func:`verify_dev` — workflow tag, expected frontmatter status,
+    baseline match, proof-of-work since baseline — with two differences: the spec
+    is resolved **deterministically by id** (``task.story_key``) via
+    ``stories.resolve_story_spec`` rather than trusting the session-claimed path,
+    and the sprint-status gate is dropped (stories mode has no sprint board).
+    A resolution that is pending / ambiguous / a sentinel is a retryable failure,
+    and the resolved filename's id prefix is asserted to equal the task id.
+
+    ``plan_halt`` verifies a spec_checkpoint story's plan-halt leg instead of an
+    implementation: the expected status is ``ready-for-dev`` (the plan is done,
+    not the code) and the proof-of-work gate is skipped — a plan writes only its
+    own spec, so requiring code changes would spuriously fail every plan leg. The
+    spec-resolution, id-prefix, workflow, and baseline gates still run, and
+    ``task.spec_file`` is still recorded. A ``plan_halt`` leg also requires the
+    ``result_json`` to carry the ``plan_halt`` marker ``devcontract`` emits on a
+    clean plan-halt, so a died-mid-flight ``ready-for-dev`` can't be mistaken for
+    a successful plan.
+    """
+    # Deferred to avoid a verify<->stories import cycle: stories imports
+    # read_frontmatter/status_of from this module at top level, so verify must not
+    # import stories at module scope (keep this local on any future refactor).
+    from . import stories
+
+    rj = result_json or {}
+    story_id = str(task.story_key).strip()
+    state = stories.resolve_story_spec(spec_folder, story_id)
+    if state.kind == stories.KIND_PENDING:
+        return VerifyOutcome.retry(f"no story spec found for id {story_id!r} under {spec_folder}")
+    if state.kind == stories.KIND_AMBIGUOUS:
+        names = ", ".join(p.name for p in state.paths)
+        return VerifyOutcome.retry(f"ambiguous story file match for id {story_id!r}: {names}")
+    if state.kind == stories.KIND_SENTINEL:
+        return VerifyOutcome.retry(
+            f"story {story_id!r} resolved to a {state.sentinel_kind} sentinel: {state.path}"
+        )
+    spec_path = state.path
+    # The glob is `<id>-*.md`, so this holds by construction — assert it anyway as
+    # a defensive gate against a future resolver change silently widening the match.
+    if spec_path is None or not spec_path.name.startswith(f"{story_id}-"):
+        return VerifyOutcome.retry(
+            f"resolved story spec {spec_path} does not match id {story_id!r}"
+        )
+    if not spec_path.is_file():
+        return VerifyOutcome.retry(f"claimed spec file does not exist: {spec_path}")
+
+    # Generic path always self-finalizes to done (no in-review handoff); the
+    # review_enabled arm mirrors verify_dev for symmetry. A plan-halt leg instead
+    # expects the ready-for-dev plan gate (the plan is done, not the code).
+    if plan_halt:
+        # A clean plan-halt also carries devcontract's plan_halt marker; a
+        # died-mid-flight ready-for-dev (synthesized without plan_halt) never
+        # does. Cross-check the verify-side flag against the synth-side result so
+        # a caller can't unilaterally promote a mid-flight spec to a "successful
+        # plan" — mirrors the defensive id-prefix gate above.
+        if rj.get("plan_halt") is not True:
+            return VerifyOutcome.retry(
+                "plan_halt verification requested but result.json carries no plan_halt marker"
+            )
+        expected = PLAN_HALT_STATUS
+    else:
+        expected = "in-review" if review_enabled else "done"
+
+    # A plan-halt leg produced only its own spec (the plan), so proof-of-work
+    # would spuriously fail; skip it (proof_exclude=None) and record the plan spec.
+    gate = _verify_shared_gates(
+        spec_path,
+        rj,
+        task,
+        paths,
+        expected_status=expected,
+        proof_exclude=None if plan_halt else artifact_relpaths(paths),
+    )
+    if gate is not None:
+        return gate
 
     task.spec_file = str(spec_path)
     return VerifyOutcome.passed()
