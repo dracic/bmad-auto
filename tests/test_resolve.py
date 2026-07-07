@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from conftest import git
 
 from bmad_loop import devcontract, resolve, runs, verify
 from bmad_loop.journal import load_state, save_state
@@ -172,6 +173,54 @@ def test_rearm_journals_event(tmp_path):
     runs.rearm_escalation(run_dir)
     journal = (run_dir / "journal.jsonl").read_text(encoding="utf-8")
     assert "story-escalation-resolved" in journal
+
+
+def test_rearm_advances_baseline_to_resolved_head(project):
+    # The resolve session committed work on the project branch (e.g. a fixture
+    # the human authorized). Re-arm must adopt that state as the new attempt
+    # baseline, or the redrive's reset-to-baseline parks the resolution commit
+    # on an attempt-preserve ref and re-drives against the unresolved tree.
+    root = project.project
+    old_head = git(root, "rev-parse", "HEAD")
+    run_dir, _, _ = _escalated_run(root)
+    (root / "fixture.txt").write_text("captured baseline\n", encoding="utf-8")
+    git(root, "add", "fixture.txt")
+    git(root, "commit", "-q", "-m", "resolution: capture fixture")
+    # a file the resolve session (or the user) left untracked must enter the
+    # snapshot, so the redrive reset treats it as pre-existing, not run-created
+    (root / "leftover.txt").write_text("keep me\n", encoding="utf-8")
+    runs.rearm_escalation(run_dir)
+    task = load_state(run_dir).tasks["6-4-cli-list-command"]
+    assert task.baseline_commit == git(root, "rev-parse", "HEAD")
+    assert task.baseline_commit != old_head
+    assert "leftover.txt" in task.baseline_untracked
+
+
+def test_rearm_baseline_all_or_nothing_on_partial_git_failure(monkeypatch, project):
+    """rev_parse_head succeeding but untracked_files failing must not advance
+    baseline_commit while leaving baseline_untracked stale: both locals are
+    computed before either field is assigned, so a failure on the second call
+    leaves the pair exactly as it was, same as a failure on the first."""
+    root = project.project
+    run_dir, _, _ = _escalated_run(root)
+
+    def boom(repo):
+        raise verify.GitError("simulated failure")
+
+    monkeypatch.setattr(runs.verify, "untracked_files", boom)
+    runs.rearm_escalation(run_dir)
+    task = load_state(run_dir).tasks["6-4-cli-list-command"]
+    assert task.baseline_commit == "abc123"
+    assert task.baseline_untracked is None
+
+
+def test_rearm_keeps_stale_baseline_outside_a_repo(tmp_path):
+    # best-effort contract: a project dir that is not a git repo (or a broken
+    # one) must not make re-arm fail — the old baseline simply stands
+    run_dir, _, _ = _escalated_run(tmp_path)
+    runs.rearm_escalation(run_dir)
+    task = load_state(run_dir).tasks["6-4-cli-list-command"]
+    assert task.baseline_commit == "abc123"
 
 
 def test_rearm_rejects_non_escalation_stage(tmp_path):
