@@ -45,6 +45,34 @@ These environment variables are set:
 }
 ```
 
+In **stories mode** (folder+id dispatch) the context also carries a `stories`
+block — the manifest intent for this story, so you can see WHAT it is meant to do
+without hunting for it:
+
+```json
+{
+  "stories": {
+    "spec_folder": "_bmad-output/epic-1",
+    "story": {
+      "id": "6-4-cli-list-command",
+      "title": "CLI list command",
+      "description": "…",
+      "spec_checkpoint": false,
+      "done_checkpoint": false,
+      "invoke_dev_with": "…free-text planner→dev note, or ''…"
+    },
+    "sentinel": {
+      "kind": "unresolved",
+      "path": ".../stories/6-4-cli-list-command-unresolved.md",
+      "blocking_condition": "…the reason planning halted…"
+    }
+  }
+}
+```
+
+The `sentinel` sub-block is present ONLY when the escalated story is a **sentinel**
+(see the stories-mode section below); an ordinary escalation omits it.
+
 Your **output marker** is the file at `resolution_path`. Writing it is the LAST
 action of a successful resolution. Schema:
 
@@ -90,6 +118,49 @@ action of a successful resolution. Schema:
   job ends at a corrected spec + the resolution marker.
 - **Do NOT** widen scope. Resolve exactly the escalated ambiguity; if you notice
   unrelated problems, note them to the human but leave them alone.
+
+## Stories mode: sentinels and the preserved copy
+
+In stories mode a story that could not even be **planned** — the dev session hit
+a contradiction or gap before it could write a real spec — leaves a fixed-slug
+**sentinel** file instead of a frozen spec: `<id>-unresolved.md` (the intent was
+too ambiguous to plan) or `<id>-ambiguous.md` (more than one story spec matched
+the id). The context's `stories.sentinel` block names it and carries the
+`blocking_condition` the session recorded.
+
+A sentinel is **not a spec you edit** — there is no plan or `<frozen-after-approval>`
+block inside it. So for a sentinel:
+
+- **Do not try to amend a frozen spec** (step 4's "edit the frozen spec" does not
+  apply — there isn't one). Instead resolve the _upstream_ ambiguity so a fresh
+  planning pass can succeed: usually that means clarifying `SPEC.md` (the epic
+  spec) or this story's entry in `stories.yaml` — the `title` / `description` /
+  `invoke_dev_with` the planner reads — with the human.
+- On **re-arm** the orchestrator does NOT flip the sentinel to `ready-for-dev`
+  (there is no plan to route to). It **preserves a copy** of the sentinel under
+  `{run}/sentinels/<id>-<kind>.md` as a breadcrumb, **deletes** the sentinel, and
+  the next dispatch re-plans the story from scratch (leg 1 again for a
+  `spec_checkpoint` story). You do not touch the sentinel file yourself.
+- Write the resolution marker as usual once the human has decided how to
+  disambiguate; set `spec_file` to whatever you edited (e.g. `SPEC.md`), or omit
+  it if the fix was entirely in `stories.yaml`.
+
+### Not a sentinel: more than one file matches the id
+
+Distinct from the single-file `<id>-ambiguous.md` sentinel above: when **more
+than one** file in `stories/` matches `<id>-*.md` (say `3-login.md` AND
+`3-signup.md`), the id itself is ambiguous _on disk_ and the orchestrator wedges
+the story without picking either file. You can recognize this state by the
+escalation reason (`ambiguous story file match: <names>`) and by what the
+context does NOT have: no `stories.sentinel` block and no single spec path.
+
+The auto-clear above does **not** apply — there is no sentinel to preserve and
+delete, and re-arming alone just re-wedges on the same duplicates. The
+resolution IS the cleanup: with the human, decide which file is the story's real
+spec and remove or rename the other (merge content first if both carry real
+work; renaming must move it out of the `<id>-*` pattern or to another id).
+Exactly one match re-dispatches that spec; zero matches re-plans from scratch.
+Then write the resolution marker as usual — re-arm + resume takes it from there.
 
 ## If you cannot resolve it
 

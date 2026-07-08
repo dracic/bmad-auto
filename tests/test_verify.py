@@ -486,6 +486,47 @@ def test_verify_dev_stories_whitespace_story_key(project):
     assert out.ok and task.spec_file == str(sp)
 
 
+def test_verify_dev_stories_ledger_only_counts_as_real_work(project):
+    """T3 regression: a stories-mode story whose entire authorized diff is
+    ledger/spec reconciliation under implementation_artifacts (e.g. deferred-work.md)
+    must pass proof-of-work, not false-negative "no changes". Guards the file-granular
+    exclude port off #79 — the old whole-folder `artifact_relpaths` exclusion
+    swallowed the ledger, re-introducing KNOWN-BUG-ledger-only-story-false-no-
+    changes.md in stories mode (verify_dev_exclude_relpaths excludes only the
+    session's own spec + sprint-status, so sibling ledger content counts)."""
+    spec_folder = project.planning_artifacts / "epic-a"
+    task = make_stories_task(project, "1")
+    sp = write_story(spec_folder, "1", "x", "done", task.baseline_commit)
+    # The ONLY real change since baseline is the ledger under implementation_artifacts;
+    # the story's own spec (under the spec folder's stories/) is excluded either way.
+    project.deferred_work.parent.mkdir(parents=True, exist_ok=True)
+    project.deferred_work.write_text("### DW-1: reconciled\n\nstatus: done\n")
+    out = verify.verify_dev_stories(
+        task, project, dev_result(sp), spec_folder=spec_folder, review_enabled=False
+    )
+    assert out.ok
+
+
+def test_verify_dev_stories_spec_only_change_outside_artifacts_is_not_work(project):
+    # spec folder OUTSIDE the artifact dirs: the story record + stories.yaml must
+    # still not count as implementation work (the _stories_relpaths exclusion),
+    # so a story that only wrote its spec fails proof-of-work.
+    spec_folder = project.project / "docs" / "epic-a"
+    task = make_stories_task(project, "1")
+    sp = write_story(spec_folder, "1", "x", "done", task.baseline_commit)
+    (spec_folder / "stories.yaml").write_text("- id: '1'\n  title: t\n  description: d\n")
+    out = verify.verify_dev_stories(
+        task, project, dev_result(sp), spec_folder=spec_folder, review_enabled=False
+    )
+    assert not out.ok and "no changes" in out.reason
+    # real code alongside the spec -> proof-of-work passes
+    (project.project / "src.txt").write_text("real work\n")
+    out2 = verify.verify_dev_stories(
+        task, project, dev_result(sp), spec_folder=spec_folder, review_enabled=False
+    )
+    assert out2.ok
+
+
 def test_verify_dev_stories_plan_halt_expects_ready_for_dev(project):
     # plan-halt leg: the spec is at ready-for-dev (the plan), not done, and there
     # is NO code change — proof-of-work is skipped and the plan spec is recorded.
@@ -543,6 +584,37 @@ def test_plan_halt_status_matches_devcontract():
     from bmad_loop import devcontract
 
     assert verify.PLAN_HALT_STATUS == devcontract.PLAN_HALT_STATUS
+
+
+def test_verify_review_stories_no_sprint_gate(project):
+    # verify_review_stories checks spec == done + verify commands, no sprint gate.
+    assert not project.sprint_status.is_file()
+    spec_folder = project.planning_artifacts / "epic-a"
+    task = make_stories_task(project, "1")
+    sp = write_story(spec_folder, "1", "x", "done", task.baseline_commit)
+    task.spec_file = str(sp)
+    assert verify.verify_review_stories(task, project, Policy()).ok
+
+
+def test_verify_review_stories_non_done_retries(project):
+    spec_folder = project.planning_artifacts / "epic-a"
+    task = make_stories_task(project, "1")
+    sp = write_story(spec_folder, "1", "x", "in-review", task.baseline_commit)
+    task.spec_file = str(sp)
+    out = verify.verify_review_stories(task, project, Policy())
+    assert not out.ok and "expected 'done'" in out.reason
+
+
+def test_verify_review_stories_non_utf8_spec_retries(project):
+    """A spec that became undecodable mid-run must produce a clean retry (status
+    reads as ""), not a UnicodeDecodeError crash of review verification."""
+    spec_folder = project.planning_artifacts / "epic-a"
+    task = make_stories_task(project, "1")
+    sp = write_story(spec_folder, "1", "x", "done", task.baseline_commit)
+    sp.write_bytes(b"\xff\xfe\x00\x01 not utf-8 \x80\x81")
+    task.spec_file = str(sp)
+    out = verify.verify_review_stories(task, project, Policy())
+    assert not out.ok and "expected 'done'" in out.reason
 
 
 def test_verify_review_bundle_ledger_gate(project):
@@ -921,6 +993,17 @@ def test_read_frontmatter_tolerates_garbage(project):
     p.write_text("no frontmatter here")
     assert verify.read_frontmatter(p) == {}
     p.write_text("---\n: : :\nbroken yaml [\n---\nbody")
+    assert verify.read_frontmatter(p) == {}
+
+
+def test_read_frontmatter_tolerates_non_utf8(project):
+    """UnicodeDecodeError is a ValueError, so it slipped past every caller's
+    except-OSError guard. An undecodable file now degrades exactly like
+    unparseable YAML — {} → status "" → the status gates return a clean retry
+    instead of crashing verify (stories dev/review gates and the pre-existing
+    sprint/bundle paths alike)."""
+    p = project.project / "x.md"
+    p.write_bytes(b"\xff\xfe\x00\x01 not utf-8 \x80\x81")
     assert verify.read_frontmatter(p) == {}
 
 
