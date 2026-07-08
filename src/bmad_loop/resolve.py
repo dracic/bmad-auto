@@ -38,6 +38,35 @@ def resolution_path(run_dir: Path, story_key: str) -> Path:
     return _story_dir(run_dir, story_key) / "resolution.json"
 
 
+class ResolutionError(Exception):
+    """resolution.json exists but cannot be used (unreadable / not a JSON object)."""
+
+
+def read_resolution(run_dir: Path, story_key: str) -> dict[str, Any] | None:
+    """Parse the resolve agent's ``resolution.json`` marker. Returns None ONLY
+    when the marker is absent; a present-but-unusable marker (unreadable, bad
+    JSON, non-object top level) raises ResolutionError instead. The file is the
+    agent's recorded decision — possibly including a ``restore_patch`` (the
+    intent-gap patch-restore path, BMAD-METHOD #2564) — and a re-arm consumes
+    the escalation, so collapsing corruption into "nothing recorded" would
+    silently downgrade a confirmed restore to an unrecoverable from-scratch
+    re-drive. The caller validates the ``restore_patch`` path itself before
+    acting on it."""
+    path = resolution_path(run_dir, story_key)
+    if not path.is_file():
+        return None
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        # UnicodeDecodeError is a ValueError, not an OSError — a non-UTF-8 marker
+        # must raise the clean ResolutionError, not crash (same class as the
+        # read_frontmatter / stories read-path hardening).
+        raise ResolutionError(f"resolution marker {path} is unreadable ({e})") from e
+    if not isinstance(doc, dict):
+        raise ResolutionError(f"resolution marker {path} is not a JSON object")
+    return doc
+
+
 def _gather_escalations(run_dir: Path, state: RunState, story_key: str) -> list[dict[str, Any]]:
     """The CRITICAL escalations recorded by this story's sessions, newest first.
 
@@ -63,7 +92,7 @@ def _gather_escalations(run_dir: Path, state: RunState, story_key: str) -> list[
     return found
 
 
-def build_context(state: RunState, run_dir: Path, story_key: str) -> Path:
+def build_context(state: RunState, run_dir: Path, story_key: str, *, isolation: str = "") -> Path:
     """Write resolve/<story_key>/context.json for the resolve skill to read."""
     task = state.tasks.get(story_key)
     context = {
@@ -76,6 +105,11 @@ def build_context(state: RunState, run_dir: Path, story_key: str) -> Path:
         # as_posix so the context contract is the same string on every OS (the
         # path is consumed by the agent, and Python/tools accept '/' on Windows).
         "resolution_path": resolution_path(run_dir, story_key).as_posix(),
+        # Patch-restore availability (#2564): a worktree-isolation re-drive
+        # discards and re-mounts the unit's worktree, so an in-place restore can
+        # never land — the orchestrator rejects a `restore_patch` up front. Told
+        # to the agent here so it never negotiates a restore it can't honor.
+        "restore_supported": isolation != "worktree" and not (task.worktree_path if task else ""),
     }
     # Stories mode: hand the resolver the manifest intent (the story entry) and a
     # sentinel indicator, so it sees WHAT the story is meant to do and WHETHER the

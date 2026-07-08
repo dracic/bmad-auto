@@ -922,6 +922,45 @@ def set_frontmatter_status(path: Path, status: str) -> bool:
     return True
 
 
+def set_frontmatter_field(path: Path, key: str, value: str) -> bool:
+    """Rewrite (or insert) a scalar ``<key>:`` line in a spec's `---`…`---`
+    frontmatter block.
+
+    Same minimal in-place line surgery as `set_frontmatter_status` (no YAML
+    round-trip) so the spec's formatting, comments, and field order survive.
+    Unlike the status helper, a missing key is INSERTED as the block's last
+    line: callers assert a field's value whether or not the skill wrote one
+    (the patch-restore re-arm re-stamps ``baseline_revision``, which only the
+    skill's step-03 writes). Returns True when the file was rewritten; False
+    when it has no frontmatter or already carries the exact value.
+    """
+    if not path.is_file():
+        return False
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        return False
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return False
+    block_lines = parts[1].splitlines(keepends=True)
+    replaced = False
+    for i, line in enumerate(block_lines):
+        stripped = line.lstrip()
+        if stripped.startswith(f"{key}:"):
+            indent = line[: len(line) - len(stripped)]
+            newline = "\n" if line.endswith("\n") else ""
+            block_lines[i] = f"{indent}{key}: {value}{newline}"
+            replaced = True
+            break
+    if not replaced:
+        block_lines.append(f"{key}: {value}\n")
+    rebuilt = parts[0] + "---" + "".join(block_lines) + "---" + parts[2]
+    if rebuilt == text:  # already at the target value — idempotent no-op
+        return False
+    path.write_text(rebuilt, encoding="utf-8")
+    return True
+
+
 def artifact_relpaths(paths: ProjectPaths) -> tuple[str, ...]:
     """Repo-relative posix prefixes of the orchestrator-owned BMAD artifact
     folders (the output root and the implementation/planning artifact dirs),
@@ -946,7 +985,9 @@ def artifact_relpaths(paths: ProjectPaths) -> tuple[str, ...]:
     return tuple(out)
 
 
-def verify_dev_exclude_relpaths(paths: ProjectPaths, spec_path: Path) -> tuple[str, ...]:
+def verify_dev_exclude_relpaths(
+    paths: ProjectPaths, spec_path: Path, restore_patch: str | None = None
+) -> tuple[str, ...]:
     """Repo-relative posix paths the dev/bundle proof-of-work gate excludes from
     `has_changes_since` — file-granularity, unlike `artifact_relpaths`' whole-folder
     exclusion (still used as-is by `Engine._protected_relpaths` for rollback
@@ -965,15 +1006,26 @@ def verify_dev_exclude_relpaths(paths: ProjectPaths, spec_path: Path) -> tuple[s
     reconciliation registers as real work instead of a permanent false "no changes
     since baseline".
 
+    `restore_patch` (the task's latched intent-gap patch file, BMAD-METHOD #2564)
+    is excluded too when set: the patch is untracked halt residue under the
+    protected artifact dirs that survives every reset, so counting it would let a
+    restore re-drive whose session produced nothing pass the gate on the patch
+    file's mere presence — the gate must key on the APPLIED work (the tracked diff
+    from baseline), not on the orchestrator-owned patch that carried it.
+
     `spec_path` comes from a session-reported (untrusted) `spec_file` string, so
     it is `.resolve()`d before deriving the relpath, same as `spec_within_roots`:
     an un-normalized `..`/`.` segment would still resolve to the real on-disk
     file (the OS resolves it), but as a raw string it wouldn't match git's own
     normalized path output, silently defeating this exclude and letting a bare
     status flip on the session's own spec count as real work."""
+    candidates: list[Path] = [paths.sprint_status, spec_path]
+    if restore_patch:
+        p = Path(restore_patch)
+        candidates.append(p if p.is_absolute() else paths.project / p)
     out: list[str] = []
     project = paths.project.resolve()
-    for path in (paths.sprint_status, spec_path):
+    for path in candidates:
         try:
             rel = path.resolve().relative_to(project).as_posix()
         except ValueError:
@@ -1088,7 +1140,7 @@ def verify_dev(
         task,
         paths,
         expected_status="in-review" if review_enabled else "done",
-        proof_exclude=verify_dev_exclude_relpaths(paths, spec_path),
+        proof_exclude=verify_dev_exclude_relpaths(paths, spec_path, task.restore_patch),
     )
     if gate is not None:
         return gate
@@ -1131,7 +1183,7 @@ def verify_dev_bundle(
         task,
         paths,
         expected_status="in-review" if review_enabled else "done",
-        proof_exclude=verify_dev_exclude_relpaths(paths, spec_path),
+        proof_exclude=verify_dev_exclude_relpaths(paths, spec_path, task.restore_patch),
     )
     if gate is not None:
         return gate
@@ -1244,7 +1296,7 @@ def verify_dev_stories(
         proof_exclude=(
             None
             if plan_halt
-            else verify_dev_exclude_relpaths(paths, spec_path)
+            else verify_dev_exclude_relpaths(paths, spec_path, task.restore_patch)
             + _stories_relpaths(paths.project, spec_folder)
         ),
     )
@@ -1398,6 +1450,15 @@ def finalize_commit(repo: Path, baseline: str | None, message: str) -> str | Non
     keeping the index (`reset --soft`), then commit the accumulated index. The
     working tree is never touched, so a failure leaves the chain intact.
 
+    Residual-artifacts note (BMAD-METHOD #2563): the skill now commits every file
+    of the reviewed diff and deliberately leaves unrelated `git status` residue
+    uncommitted (files outside the change's scope). The `add -A` here sweeps that
+    residue into the story commit too — an intentional divergence from the skill's
+    scoped commit. The loop must end each story on a clean tree because story
+    N+1's step-01 HALTs on a dirty tree, so the orchestrator squashes EVERYTHING
+    since baseline (skill commits + its own bookkeeping + any residue) into the one
+    story commit rather than leaving the tree dirty for the next story to trip on.
+
     Returns the new HEAD sha, or None when there is nothing to finalize: no
     version control (`baseline` falsy or NO_VCS) or the tree already equals
     `baseline` (no skill commits and no bookkeeping delta)."""
@@ -1427,6 +1488,33 @@ def finalize_commit(repo: Path, baseline: str | None, message: str) -> str | Non
             )
         raise GitError(f"git commit failed: {out}")
     return rev_parse_head(repo)
+
+
+def apply_patch(repo: Path, patch_path: Path) -> None:
+    """Apply a saved patch to `repo`'s working tree (`git apply`), raising on failure.
+
+    The intent-gap patch-restore re-drive (BMAD-METHOD #2564) uses this to re-lay
+    the attempted change bmad-dev-auto saved before reverting. New files in the
+    patch are created (they land untracked, matching how the original attempt sat
+    before its revert).
+
+    A clean apply is likely but NOT guaranteed: the patch was diffed from the
+    story's ORIGINAL baseline, while re-arm advances the re-drive's baseline to the
+    project's post-resolve HEAD (runs.rearm_escalation) — so the apply holds only
+    while the resolve session left the patched files untouched. A resolve session
+    that committed changes to those files makes `git apply` fail, deliberately
+    loudly: silently merging the human's resolution with the stale attempt could
+    reproduce the very gap being resolved. A non-zero `git apply` — that overlap, a
+    missing/corrupt patch, any other drift — raises `GitError` with git's output;
+    the caller escalates rather than dispatch a session onto a half-applied tree,
+    and the human re-resolves (typically re-arming without a restore, since the
+    resolution commits already carry the overlapping work).
+    """
+    if not patch_path.is_file():
+        raise GitError(f"restore patch not found: {patch_path}")
+    rc, out = _git(repo, "apply", str(patch_path))
+    if rc != 0:
+        raise GitError(f"git apply {patch_path} failed: {out}")
 
 
 def commit_paths(repo: Path, message: str, paths: list[Path]) -> str | None:

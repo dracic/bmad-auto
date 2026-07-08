@@ -100,6 +100,24 @@ def test_set_frontmatter_status_no_frontmatter(tmp_path):
     assert verify.set_frontmatter_status(spec, "ready-for-dev") is False
 
 
+def test_set_frontmatter_field_replaces_inserts_idempotent(tmp_path):
+    spec = tmp_path / "spec.md"
+    spec.write_text(SPEC, encoding="utf-8")
+    assert verify.set_frontmatter_field(spec, "owner", "winston") is True
+    assert verify.read_frontmatter(spec)["owner"] == "winston"
+    # unlike set_frontmatter_status, a missing key is INSERTED (block's last line)
+    assert verify.set_frontmatter_field(spec, "baseline_revision", "abc123") is True
+    fm = verify.read_frontmatter(spec)
+    assert fm["baseline_revision"] == "abc123"
+    assert fm["status"] == "in-review" and fm["title"] == "List command"  # untouched
+    # idempotent: already at the target value
+    assert verify.set_frontmatter_field(spec, "baseline_revision", "abc123") is False
+    # no frontmatter block -> no write
+    bare = tmp_path / "bare.md"
+    bare.write_text("# just a heading\n", encoding="utf-8")
+    assert verify.set_frontmatter_field(bare, "baseline_revision", "abc123") is False
+
+
 # ----------------------------------------------------------- build_context
 
 
@@ -138,6 +156,24 @@ def test_build_context_no_session_files(tmp_path):
     ctx = json.loads(path.read_text(encoding="utf-8"))
     assert ctx["escalations"] == []
     assert ctx["paused_reason"].startswith("CRITICAL")
+
+
+def test_build_context_restore_supported_signal(tmp_path):
+    """The agent must know up front when a patch-restore can't be honored
+    (worktree isolation / a worktree-executed task), so it never negotiates a
+    restore the orchestrator will reject after the session."""
+    run_dir, state, task = _escalated_run(tmp_path, with_session=False)
+    key = "6-4-cli-list-command"
+
+    path = resolve.build_context(state, run_dir, key)
+    assert json.loads(path.read_text(encoding="utf-8"))["restore_supported"] is True
+
+    path = resolve.build_context(state, run_dir, key, isolation="worktree")
+    assert json.loads(path.read_text(encoding="utf-8"))["restore_supported"] is False
+
+    task.worktree_path = str(tmp_path / "wt")  # recorded worktree execution
+    path = resolve.build_context(state, run_dir, key)
+    assert json.loads(path.read_text(encoding="utf-8"))["restore_supported"] is False
 
 
 # ----------------------------------------------------------- rearm_escalation
@@ -337,6 +373,136 @@ def test_rearm_sprint_spec_named_like_a_sentinel_is_not_deleted(tmp_path):
     assert not (run_dir / "sentinels").exists()  # no sentinel preservation in sprint mode
 
 
+def test_rearm_rejects_restore_patch_on_a_sentinel(tmp_path):
+    """T1 (stories x patch-restore): a sentinel-wedged story escalated BEFORE
+    planning — there is no attempted implementation to restore, and its re-arm
+    re-dispatches a planning leg, so laying a patch onto the tree first is never
+    safe. Re-arm must reject loudly BEFORE mutating anything: the sentinel stays
+    on disk, the task stays ESCALATED, and no latch is persisted."""
+    key = "6-4-cli-list-command"
+    stories_dir = tmp_path / "stories"
+    stories_dir.mkdir(parents=True)
+    sentinel = stories_dir / f"{key}-unresolved.md"
+    sentinel.write_text(
+        "---\nstatus: blocked\n---\n\n## Auto Run Result\n\nStatus: blocked\nintent too vague\n",
+        encoding="utf-8",
+    )
+    run_dir, _, _ = _escalated_run(
+        tmp_path, spec_file=str(sentinel), source="stories", sentinel_kind="unresolved"
+    )
+
+    with pytest.raises(runs.RearmError, match="sentinel"):
+        runs.rearm_escalation(run_dir, restore_patch="artifacts/attempt.patch")
+
+    assert sentinel.is_file()  # nothing deleted, copy NOT preserved — no clear happened
+    task = load_state(run_dir).tasks[key]
+    assert task.phase == Phase.ESCALATED  # not re-armed; the escalation stays armed
+    assert task.restore_patch is None  # no latch persisted
+    assert task.sentinel_kind == "unresolved"  # detection verdict intact for a retry
+    # nothing was journaled at all — no sentinel-cleared, no story-escalation-resolved
+    assert not (run_dir / "journal.jsonl").exists()
+
+
+def test_rearm_rejects_restore_patch_without_a_spec_file(tmp_path):
+    """A restore only works through the spec's in-review flip, so an escalated
+    task with NO recorded spec (ambiguous two-file wedge, unknown --story
+    selector, session died before naming one) has no routing target: the latch
+    would stick, the flip would be skipped, and the engine would lay the patch
+    onto the tree before a planning leg. Rejected before any mutation."""
+    run_dir, _, _ = _escalated_run(tmp_path, spec_file=None)
+
+    with pytest.raises(runs.RearmError, match="no recorded spec file"):
+        runs.rearm_escalation(run_dir, restore_patch="artifacts/attempt.patch")
+
+    task = load_state(run_dir).tasks["6-4-cli-list-command"]
+    assert task.phase == Phase.ESCALATED  # not re-armed; the escalation stays armed
+    assert task.restore_patch is None  # no latch persisted
+    assert not (run_dir / "journal.jsonl").exists()  # nothing journaled
+
+    runs.rearm_escalation(run_dir)  # a from-scratch re-arm remains available
+    assert load_state(run_dir).tasks["6-4-cli-list-command"].phase == Phase.PENDING
+
+
+def test_rearm_restore_patch_on_a_real_stories_spec_is_allowed(tmp_path):
+    """The T1 guard keys on the recorded sentinel verdict, not on stories mode:
+    a review-stage intent gap on a REAL stories spec (sentinel_kind unset) is a
+    legitimate restore target and re-arms to in-review like sprint mode."""
+    key = "6-4-cli-list-command"
+    stories_dir = tmp_path / "stories"
+    stories_dir.mkdir(parents=True)
+    spec = stories_dir / f"{key}-slug.md"
+    spec.write_text("---\nstatus: blocked\n---\n\n## Intent\n\nx\n", encoding="utf-8")
+    run_dir, _, _ = _escalated_run(tmp_path, spec_file=str(spec), source="stories")
+
+    runs.rearm_escalation(run_dir, restore_patch="artifacts/attempt.patch")
+    task = load_state(run_dir).tasks[key]
+    assert task.phase == Phase.PENDING
+    assert task.restore_patch == "artifacts/attempt.patch"
+    assert verify.read_frontmatter(spec)["status"] == "in-review"  # restore routing
+
+
+def _resolve_repo(tmp_path):
+    """A tiny real repo so rearm's baseline advance has a HEAD to read."""
+    git(tmp_path, "init", "-q", "-b", "main")
+    git(tmp_path, "config", "user.email", "test@test")
+    git(tmp_path, "config", "user.name", "test")
+    (tmp_path / ".gitignore").write_text(".bmad-loop/runs/\n")
+    (tmp_path / "src.txt").write_text("original\n")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-q", "-m", "initial")
+    return git(tmp_path, "rev-parse", "HEAD")
+
+
+def test_rearm_restore_patch_restamps_spec_baseline(tmp_path):
+    """The in-review route skips step-03 — the only step that stamps
+    `baseline_revision` — so the patch-restore re-arm re-stamps it to the
+    advanced baseline itself. Otherwise the re-driven step-04 would build its
+    review diff (and, on an intent-gap/bad-spec re-triage, revert) "since" the
+    ORIGINAL pre-attempt sha, clawing back the very resolve-session commits the
+    baseline advance blesses as the re-drive's starting point."""
+    key = "6-4-cli-list-command"
+    old_head = _resolve_repo(tmp_path)
+    spec = tmp_path / "spec.md"
+    spec.write_text(
+        f"---\nstatus: blocked\nbaseline_revision: {old_head}\n---\n\n## Intent\n\nx\n",
+        encoding="utf-8",
+    )
+    run_dir, _, _ = _escalated_run(tmp_path, spec_file=str(spec))
+    # the resolve session leaves a commit NOT overlapping the patch (blessed input)
+    (tmp_path / "fixture.txt").write_text("resolution fixture\n")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-q", "-m", "resolution fixture")
+    new_head = git(tmp_path, "rev-parse", "HEAD")
+
+    runs.rearm_escalation(run_dir, restore_patch="artifacts/attempt.patch")
+
+    fm = verify.read_frontmatter(spec)
+    assert fm["baseline_revision"] == new_head  # step-04 diffs from the ADVANCED baseline
+    assert fm["status"] == "in-review"
+    assert load_state(run_dir).tasks[key].baseline_commit == new_head
+
+
+def test_rearm_from_scratch_leaves_spec_baseline_alone(tmp_path):
+    """A from-scratch re-arm routes ready-for-dev -> step-03, which re-stamps
+    `baseline_revision` itself — the re-arm must not touch it."""
+    old_head = _resolve_repo(tmp_path)
+    spec = tmp_path / "spec.md"
+    spec.write_text(
+        f"---\nstatus: blocked\nbaseline_revision: {old_head}\n---\n\n## Intent\n\nx\n",
+        encoding="utf-8",
+    )
+    run_dir, _, _ = _escalated_run(tmp_path, spec_file=str(spec))
+    (tmp_path / "fixture.txt").write_text("resolution fixture\n")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-q", "-m", "resolution fixture")
+
+    runs.rearm_escalation(run_dir)  # no restore
+
+    fm = verify.read_frontmatter(spec)
+    assert fm["baseline_revision"] == old_head  # untouched; step-03 owns the stamp
+    assert fm["status"] == "ready-for-dev"
+
+
 # -------------------------------------------------- non-UTF-8 robustness (bug class)
 # A story spec / sentinel is agent- or human-authored, so it can contain non-UTF-8
 # bytes. `read_text(encoding="utf-8")` raises UnicodeDecodeError (a ValueError, NOT an
@@ -423,6 +589,17 @@ def test_rearm_tolerates_non_utf8_sentinel(tmp_path):
         if json.loads(line).get("kind") == "sentinel-cleared"
     ]
     assert cleared[0]["sentinel_kind"] == "unresolved" and cleared[0]["condition"] == ""
+
+
+def test_read_resolution_non_utf8_marker_is_resolution_error(tmp_path):
+    """UnicodeDecodeError is a ValueError, not an OSError — a non-UTF-8 marker
+    must surface as the clean ResolutionError every consumer handles (CLI abort,
+    TUI conservative warning), never an uncaught decode crash."""
+    marker = resolve.resolution_path(tmp_path, "6-4-cli-list-command")
+    marker.parent.mkdir(parents=True)
+    marker.write_bytes(_BAD_UTF8)
+    with pytest.raises(resolve.ResolutionError, match="unreadable"):
+        resolve.read_resolution(tmp_path, "6-4-cli-list-command")
 
 
 def test_rearm_rejects_non_escalation_stage(tmp_path):

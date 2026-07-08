@@ -988,6 +988,49 @@ def test_commit_paths_noop_when_unchanged(project):
     assert verify.commit_paths(project.project, "noop", [project.project.parent / "x"]) is None
 
 
+def test_apply_patch_replays_saved_diff(project):
+    """A patch saved off the baseline re-applies cleanly onto that same baseline —
+    tracked edits AND new (untracked) files — reproducing the reverted attempt."""
+    repo = project.project
+    baseline = verify.rev_parse_head(repo)
+    # the "attempt": edit a tracked file + add a new file, then capture the diff
+    (repo / "src.txt").write_text("original\nattempted change\n")
+    (repo / "new_module.py").write_text("print('hi')\n")
+    patch = project.implementation_artifacts / "attempt.patch"
+    # git diff HEAD includes new files with --binary-safe text; -N stages intent so
+    # untracked files appear in the diff (mirrors how the skill saves the attempt)
+    git(repo, "add", "-N", "new_module.py")
+    patch.write_text(git(repo, "diff", "HEAD") + "\n", encoding="utf-8")
+    # revert the attempt back to baseline (as the skill does before halting)
+    git(repo, "reset", "-q", "--hard", baseline)
+    (repo / "new_module.py").unlink(missing_ok=True)
+    assert (repo / "src.txt").read_text() == "original\n"
+
+    verify.apply_patch(repo, patch)
+
+    assert (repo / "src.txt").read_text() == "original\nattempted change\n"
+    assert (repo / "new_module.py").read_text() == "print('hi')\n"
+
+
+def test_apply_patch_missing_file_raises(project):
+    with pytest.raises(verify.GitError, match="restore patch not found"):
+        verify.apply_patch(project.project, project.implementation_artifacts / "nope.patch")
+
+
+def test_apply_patch_conflict_raises(project):
+    """A patch that does not apply against the current tree raises GitError with
+    git's output — the caller escalates rather than dispatch onto a broken tree."""
+    repo = project.project
+    patch = project.implementation_artifacts / "bad.patch"
+    # a diff against content the tree does not have
+    patch.write_text(
+        "--- a/src.txt\n+++ b/src.txt\n@@ -1 +1 @@\n-something-else\n+patched\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(verify.GitError, match="git apply"):
+        verify.apply_patch(repo, patch)
+
+
 def test_read_frontmatter_tolerates_garbage(project):
     p = project.project / "x.md"
     p.write_text("no frontmatter here")
@@ -1064,6 +1107,42 @@ def test_verify_dev_exclude_relpaths_is_file_granular(project):
     # prefix would swallow the artifact dirs' content right back out of view.
     assert "_bmad-output" not in rels
     assert "_bmad-output/implementation-artifacts/deferred-work.md" not in rels
+
+
+def test_verify_dev_exclude_relpaths_includes_latched_restore_patch(project):
+    """T4 (patch-restore x #79): a latched intent-gap patch file joins the
+    file-granular excludes — absolute or project-relative, both derive the same
+    repo-relative entry; no latch leaves the excludes unchanged."""
+    sp = spec_path(project, "1-1-a")
+    patch = project.implementation_artifacts / "attempt.patch"
+    rel = "_bmad-output/implementation-artifacts/attempt.patch"
+    assert rel in verify.verify_dev_exclude_relpaths(project, sp, str(patch))
+    assert rel in verify.verify_dev_exclude_relpaths(project, sp, rel)
+    assert rel not in verify.verify_dev_exclude_relpaths(project, sp)
+
+
+def test_verify_dev_latched_restore_patch_is_not_proof_of_work(project):
+    """T4 (patch-restore x #79): the latched patch file is untracked halt residue
+    under the protected artifact dirs — it survives every reset, so counting it
+    would let a restore re-drive whose session produced nothing pass the
+    proof-of-work gate on the patch's mere presence. The gate must key on the
+    APPLIED work (tracked diff from baseline), not the patch that carried it."""
+    write_sprint(project, {"1-1-a": "review"})
+    sp = spec_path(project, "1-1-a")
+    write_spec(sp, "in-review", "NO_VCS")
+    git(project.project, "add", "-A")
+    git(project.project, "commit", "-q", "-m", "baseline")
+    task = make_task(project)
+    patch = project.implementation_artifacts / "attempt.patch"
+    patch.write_text("stale attempt diff\n", encoding="utf-8")  # untracked residue
+
+    # control: unlatched, the residue is indistinguishable from session work and
+    # passes the gate — exactly the vacuous pass the latch exclusion prevents
+    assert verify.verify_dev(task, project, dev_result(sp)).ok
+
+    task.restore_patch = str(patch)
+    out = verify.verify_dev(task, project, dev_result(sp))
+    assert not out.ok and "no changes" in out.reason
 
 
 def test_verify_dev_exclude_relpaths_normalizes_dotdot_segments(project):
