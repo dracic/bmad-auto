@@ -2339,28 +2339,10 @@ def _escalate_with_patch(project, story_key, patch_path):
 
 
 def _restoring_dev_effect(project, story_key, seen):
-    """A re-driven dev effect that records what the tree looked like when it ran
-    (so a test can assert the restored diff was present) then finalizes to done."""
-
-    def effect(spec):
-        repo = project.project
-        seen.append((repo / "src.txt").read_text())
-        baseline = rev_parse_head(repo)
-        sp = spec_path(project, story_key)
-        write_spec(sp, "done", baseline)
-        return SessionResult(
-            status="completed",
-            result_json={
-                "workflow": "auto-dev",
-                "story_key": story_key,
-                "spec_file": str(sp),
-                "baseline_commit": baseline,
-                "escalations": [],
-                "followup_review_recommended": False,
-            },
-        )
-
-    return effect
+    """A re-driven dev effect that records what the tree looked like when it ran (so a
+    test can assert the restored diff was present) and leaves `src.txt` exactly as the
+    restore laid it down — the applied patch IS this session's proof of work."""
+    return dev_effect(project, story_key, followup_review=False, seen=seen, write_src=False)
 
 
 def test_restore_patch_applies_onto_baseline(project):

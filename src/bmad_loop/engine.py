@@ -905,9 +905,7 @@ class Engine:
         the escalatable DEV_VERIFY phase first (`_escalate` raises RunPaused)."""
         if not task.restore_patch:
             return
-        patch = Path(task.restore_patch)
-        if not patch.is_absolute():
-            patch = self.workspace.root / patch
+        patch = verify.resolve_restore_path(task.restore_patch, self.workspace.root)
         try:
             verify.apply_patch(self.workspace.root, patch)
         except verify.GitError as e:
@@ -917,8 +915,11 @@ class Engine:
                 patch=task.restore_patch,
                 error=str(e),
             )
-            if task.phase == Phase.DEV_RUNNING:
-                advance(task, Phase.DEV_VERIFY)  # PENDING/DEV_RUNNING can't escalate directly
+            # Call-site invariant: `_dev_phase` advances the task to DEV_RUNNING
+            # immediately before dispatch, and this runs on that path only — so the
+            # step to DEV_VERIFY is unconditional. It is required because `_escalate`
+            # cannot transition out of DEV_RUNNING directly.
+            advance(task, Phase.DEV_VERIFY)
             self._escalate(task, f"intent-gap restore patch failed to apply: {e}")
         self.journal.append("attempt-restored", story_key=task.story_key, patch=task.restore_patch)
 

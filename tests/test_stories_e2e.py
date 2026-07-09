@@ -40,6 +40,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from conftest import install_dev_base_skills
 
 HAVE_TMUX = sys.platform != "win32" and shutil.which("tmux") is not None
 pytestmark = pytest.mark.skipif(not HAVE_TMUX, reason="stories E2E needs real tmux")
@@ -210,23 +211,7 @@ def _scaffold(root: Path, entries: list[dict]) -> None:
         (root / "_bmad-output" / sub).mkdir(parents=True, exist_ok=True)
         (root / "_bmad-output" / sub / ".keep").write_text("", encoding="utf-8")
 
-    # base skills (DEV_BASE_SKILLS) + the folder+id dispatch content probe
-    skills = root / ".claude" / "skills"
-    dev = skills / "bmad-dev-auto"
-    dev.mkdir(parents=True)
-    (dev / "SKILL.md").write_text("# bmad-dev-auto\n", encoding="utf-8")
-    (dev / "step-04-review.md").write_text("x\n", encoding="utf-8")
-    (dev / "customize.toml").write_text("# review layers\n", encoding="utf-8")
-    (dev / "step-01-clarify-and-route.md").write_text(
-        "This is a **folder+id dispatch** router.\n", encoding="utf-8"
-    )
-    for hunter in (
-        "bmad-review-adversarial-general",
-        "bmad-review-edge-case-hunter",
-        "bmad-review-verification-gap",
-    ):
-        (skills / hunter).mkdir(parents=True)
-        (skills / hunter / "SKILL.md").write_text(f"# {hunter}\n", encoding="utf-8")
+    install_dev_base_skills(root, folder_id=True)  # tree matches PROFILE_TOML's skill_tree
 
     folder = root / SPEC_FOLDER
     (folder / "stories").mkdir(parents=True)
@@ -280,22 +265,7 @@ def _scaffold_sprint(root: Path, story_key: str) -> None:
         (root / "_bmad-output" / sub / ".keep").write_text("", encoding="utf-8")
 
     # the SAME new folder+id-capable skill stub the stories scaffold installs
-    skills = root / ".claude" / "skills"
-    dev = skills / "bmad-dev-auto"
-    dev.mkdir(parents=True)
-    (dev / "SKILL.md").write_text("# bmad-dev-auto\n", encoding="utf-8")
-    (dev / "step-04-review.md").write_text("x\n", encoding="utf-8")
-    (dev / "customize.toml").write_text("# review layers\n", encoding="utf-8")
-    (dev / "step-01-clarify-and-route.md").write_text(
-        "This is a **folder+id dispatch** router.\n", encoding="utf-8"
-    )
-    for hunter in (
-        "bmad-review-adversarial-general",
-        "bmad-review-edge-case-hunter",
-        "bmad-review-verification-gap",
-    ):
-        (skills / hunter).mkdir(parents=True)
-        (skills / hunter / "SKILL.md").write_text(f"# {hunter}\n", encoding="utf-8")
+    install_dev_base_skills(root, folder_id=True)  # tree matches PROFILE_TOML's skill_tree
 
     sprint = {
         "generated": "01-06-2026 10:00",
@@ -355,22 +325,7 @@ def _scaffold_sweep(root: Path) -> None:
         (root / "_bmad-output" / sub / ".keep").write_text("", encoding="utf-8")
 
     # the SAME folder+id-capable skill stubs the other scaffolds install
-    skills = root / ".claude" / "skills"
-    dev = skills / "bmad-dev-auto"
-    dev.mkdir(parents=True)
-    (dev / "SKILL.md").write_text("# bmad-dev-auto\n", encoding="utf-8")
-    (dev / "step-04-review.md").write_text("x\n", encoding="utf-8")
-    (dev / "customize.toml").write_text("# review layers\n", encoding="utf-8")
-    (dev / "step-01-clarify-and-route.md").write_text(
-        "This is a **folder+id dispatch** router.\n", encoding="utf-8"
-    )
-    for hunter in (
-        "bmad-review-adversarial-general",
-        "bmad-review-edge-case-hunter",
-        "bmad-review-verification-gap",
-    ):
-        (skills / hunter).mkdir(parents=True)
-        (skills / hunter / "SKILL.md").write_text(f"# {hunter}\n", encoding="utf-8")
+    install_dev_base_skills(root, folder_id=True)  # tree matches PROFILE_TOML's skill_tree
 
     # canonical DW-format ledger (no legacy content → migration is skipped)
     (impl / "deferred-work.md").write_text(

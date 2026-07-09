@@ -11,7 +11,7 @@ from conftest import git, write_spec
 
 from bmad_loop.adapters.base import SessionResult
 from bmad_loop.adapters.mock import MockAdapter
-from bmad_loop.journal import Journal, load_state
+from bmad_loop.journal import Journal, load_state, save_state
 from bmad_loop.model import (
     PAUSE_ESCALATION,
     PAUSE_PLAN_CHECKPOINT,
@@ -136,9 +136,20 @@ def stories_checkpoint_effect():
 
 
 def make_engine(project, script, *, policy=None, spec_folder=SPEC_FOLDER, **kwargs):
+    """Mirrors `cli.cmd_run`: the launching scope (`--max-stories`, `--story`, `--epic`)
+    is persisted on RunState as well as handed to the engine, because `resume` rebuilds
+    the cap and filters from run state alone (cli._resume_paused_run). Seeding only the
+    constructor made every resume test silently run uncapped/unfiltered (#84)."""
     run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
     adapter = MockAdapter(script, usage_per_session=TokenUsage(input_tokens=10, output_tokens=5))
-    state = RunState(run_id="test-run", project=str(project.project), started_at="now")
+    state = RunState(
+        run_id="test-run",
+        project=str(project.project),
+        started_at="now",
+        max_stories=kwargs.get("max_stories"),
+        story_filter=kwargs.get("story_filter"),
+        epic_filter=kwargs.get("epic_filter"),
+    )
     engine = StoriesEngine(
         paths=project,
         policy=policy or _stories_policy(),
@@ -1004,7 +1015,6 @@ def test_max_stories_survives_a_checkpoint_pause_resume(project):
     exceeded)."""
     setup_stories(project, [entry("1", done_checkpoint=True), entry("2"), entry("3")])
     engine, _ = make_engine(project, [stories_dev_effect()], max_stories=2)
-    engine.state.max_stories = 2  # cli.py persists this on RunState so resume rebuilds the cap
 
     # run 1: story 1 dispatched + committed, then pauses at its done_checkpoint
     # (dispatched=1 < cap=2, more stories pending → not skip-if-last)
@@ -1022,6 +1032,31 @@ def test_max_stories_survives_a_checkpoint_pause_resume(project):
     assert set(final.tasks) == {"1", "2"}  # story 3 never dispatched — cap honored
     assert final.tasks["1"].phase == Phase.DONE and final.tasks["2"].phase == Phase.DONE
     assert _kinds(resumed.journal, "max-stories-reached")
+
+
+def test_make_engine_persists_the_launching_scope_for_resume(project):
+    """#84: the launching scope must survive the state round-trip with no per-test
+    seeding — a `make_engine` that configured only the constructor let every resume
+    test above silently run uncapped/unfiltered, masking exactly the durability
+    regressions they exist to catch."""
+    setup_stories(project, [entry("1"), entry("2")])
+    engine, _ = make_engine(project, [], max_stories=2, story_filter="1", epic_filter=7)
+    save_state(engine.run_dir, engine.state)  # the engine's own _save, ahead of a run
+
+    reloaded = load_state(engine.run_dir)  # what `resume` actually reads back
+    assert reloaded.max_stories == 2
+    assert reloaded.story_filter == "1"
+    assert reloaded.epic_filter == 7
+
+    resumed, _ = resume_engine(project, engine, [])  # no manual seeding anywhere
+    assert resumed.state.max_stories == 2
+    # construction must not clobber the durable scope: StoriesEngine nulls the
+    # story_filter/epic_filter *constructor kwargs* (a flat list has no E-S refs),
+    # and the base Engine parks them on itself — never back onto RunState.
+    assert resumed.state.story_filter == "1"
+    assert resumed.state.epic_filter == 7
+    # `--story` instead drives StoriesEngine's own id filter, scanned at pick time
+    assert resumed._story_id_filter == "1"
 
 
 def test_sentinel_detected_journaled_at_pick(project):

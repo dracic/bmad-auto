@@ -811,6 +811,7 @@ def _resolve_restore_patch(
     story_key: str,
     args: argparse.Namespace,
     pol,
+    state,
     task,
 ) -> tuple[str | None, str | None]:
     """Determine the intent-gap patch-restore latch (BMAD-METHOD #2564) for a re-arm.
@@ -825,7 +826,12 @@ def _resolve_restore_patch(
     outside the trusted roots, the run can't restore in place, or the restore
     input itself is corrupt (unreadable resolution.json, empty/non-string value)
     — the caller aborts strictly rather than silently re-driving from scratch
-    when a restore was (or may have been) asked for."""
+    when a restore was (or may have been) asked for.
+
+    The run-state preconditions come from ``runs.validate_restore_latch``, shared
+    verbatim with ``runs.rearm_escalation``; only the CLI-side halves live here —
+    path resolution against ``--project`` and trusted-roots containment, which need
+    the loaded bmad config."""
     raw = getattr(args, "restore_patch", None)
     if raw is not None and not raw.strip():
         # `--restore-patch ""` is a classic unset-shell-var slip. Treating it as
@@ -859,27 +865,21 @@ def _resolve_restore_patch(
             raw = val
     if not raw:
         return None, None
-    # Restore is an in-place-only recovery: a worktree-isolation re-drive discards
-    # the unit's worktree (engine._finish_inflight — taking a patch saved inside it
-    # along) and re-mounts a fresh one, so the re-apply could only fail on a
-    # destroyed patch file. Reject up front instead of latching a patch that can
-    # never restore. Checked against BOTH the recorded run state
-    # (task.worktree_path — how the escalated unit actually executed) and the live
-    # policy (how the resume will execute), so a policy edit between escalation
-    # and resolve can't skew the guard.
-    if pol.scm.isolation == "worktree" or getattr(task, "worktree_path", ""):
-        return None, (
-            "restore patch is unsupported for worktree-isolation runs (the re-drive "
-            "discards and re-mounts the unit's worktree, so an in-place restore has "
-            "nothing durable to land on) — re-arm from scratch instead: drop "
-            "--restore-patch, or if the resolve agent recorded the restore in "
-            "resolution.json, re-run with --no-interactive (which ignores that "
-            "marker) instead of repeating the agent session"
-        )
-    patch = Path(raw)
-    if not patch.is_absolute():
-        patch = project / patch
-    patch = patch.resolve()
+    # The state-side preconditions (sentinel wedge, spec-less escalation, worktree
+    # isolation) are the same set rearm_escalation enforces — run them here so an
+    # unhonorable restore aborts BEFORE the interactive resolve session rather than
+    # after. The live policy's isolation mode is the one input run state can't
+    # carry, so pass it: a policy edit between escalation and resolve can't skew
+    # the guard.
+    err = runs.validate_restore_latch(
+        state, task, story_key, worktree_isolation=pol.scm.isolation == "worktree"
+    )
+    if err is not None:
+        return None, err
+    # `.resolve()` on top of the shared normalizer: this is the one consumer that
+    # feeds a containment check (spec_within_roots), which needs `..`/symlinks
+    # collapsed. The resolved absolute path is what gets latched.
+    patch = verify.resolve_restore_path(raw, project).resolve()
     # Same trusted-roots shape as the frontmatter reconcile's spec_within_roots:
     # bmad-dev-auto saves the patch under implementation_artifacts, and artifact
     # dirs configured OUTSIDE the project tree are a supported layout — a bare
@@ -984,7 +984,9 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     # can't be honored so it never negotiates one.
     restore_patch: str | None = None
     if args.restore_patch is not None:
-        restore_patch, err = _resolve_restore_patch(project, run_dir, story_key, args, pol, task)
+        restore_patch, err = _resolve_restore_patch(
+            project, run_dir, story_key, args, pol, state, task
+        )
         if err is not None:
             print(err, file=sys.stderr)
             return 1
@@ -1014,7 +1016,9 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     # resolution.json restore latch: only exists after the session ran, so this
     # arm of the validation cannot be hoisted above it.
     if args.restore_patch is None:
-        restore_patch, err = _resolve_restore_patch(project, run_dir, story_key, args, pol, task)
+        restore_patch, err = _resolve_restore_patch(
+            project, run_dir, story_key, args, pol, state, task
+        )
         if err is not None:
             print(err, file=sys.stderr)
             return 1

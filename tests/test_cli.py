@@ -5,7 +5,7 @@ import json
 
 import pytest
 import yaml
-from conftest import install_bmad_config, write_sprint
+from conftest import escalated_run, install_bmad_config, write_sprint
 
 from bmad_loop import cli
 from bmad_loop import policy as policy_mod
@@ -824,24 +824,11 @@ def _write_bmad_config(project, impl="{project-root}/artifacts"):
 
 
 def _escalated_run(project, run_id="r1", *, story="s1", spec_file=None, worktree_path=""):
-    from bmad_loop.model import Phase, StoryTask
-
-    task = StoryTask(
-        story_key=story,
-        epic=1,
-        phase=Phase.ESCALATED,
-        attempt=1,
-        spec_file=spec_file,
-        worktree_path=worktree_path,
-    )
-    return _make_run_with_state(
-        project,
-        run_id,
-        paused_reason="CRITICAL escalation",
-        paused_stage="escalation",
-        paused_story_key=story,
-        tasks={story: task},
-    )
+    """conftest's builder with this module's shape: only the run_dir comes back (the
+    CLI tests drive the real `resolve` command and re-load state from disk)."""
+    return escalated_run(
+        project, run_id, story_key=story, spec_file=spec_file, worktree_path=worktree_path
+    ).run_dir
 
 
 def test_resolve_no_such_run(tmp_path, capsys):

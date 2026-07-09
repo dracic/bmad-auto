@@ -122,7 +122,9 @@ implemented.
 
 **First check `restore_supported` in the context file.** When it is `false`
 (worktree-isolation runs: the re-drive discards and re-mounts the unit's
-worktree, so an in-place restore can never land), **never offer the restore
+worktree, so an in-place restore can never land; an escalation with no recorded
+spec: a restored patch has no review to resume; a pre-planning sentinel wedge:
+there is no attempted implementation to restore), **never offer the restore
 option and never record `restore_patch`** — the orchestrator would reject the
 resolution and this whole session's negotiation would be wasted. The patch is
 still available as evidence.

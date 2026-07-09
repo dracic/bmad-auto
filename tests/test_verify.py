@@ -1300,6 +1300,45 @@ def test_verify_dev_latched_restore_patch_is_not_proof_of_work(project):
     assert not out.ok and "no changes" in out.reason
 
 
+def test_verify_dev_stories_latched_restore_patch_is_not_proof_of_work(project):
+    """The same T4 exclusion, reached through the stories gate. `_verify_shared_gates`
+    derives it from `task.restore_patch` for every mode, so a mode that forgets to
+    thread the latch through can no longer regress silently (#91)."""
+    spec_folder = project.planning_artifacts / "epic-a"
+    task = make_stories_task(project, "1")
+    sp = write_story(spec_folder, "1", "x", "done", "NO_VCS")
+    git(project.project, "add", "-A")
+    git(project.project, "commit", "-q", "-m", "baseline")
+    task.baseline_commit = verify.rev_parse_head(project.project)
+    patch = project.implementation_artifacts / "attempt.patch"
+    patch.write_text("stale attempt diff\n", encoding="utf-8")  # untracked residue
+
+    # control: unlatched, the residue passes for real session work
+    out = verify.verify_dev_stories(
+        task, project, dev_result(sp), spec_folder=spec_folder, review_enabled=False
+    )
+    assert out.ok
+
+    task.restore_patch = str(patch)
+    out = verify.verify_dev_stories(
+        task, project, dev_result(sp), spec_folder=spec_folder, review_enabled=False
+    )
+    assert not out.ok and "no changes" in out.reason
+
+
+def test_resolve_restore_path_joins_only_relative_latches(tmp_path):
+    """The one normalizer behind engine/verify/cli/runs (#91): absolute latches pass
+    through untouched, relative ones anchor on the caller's root, and nothing is
+    `.resolve()`d (the CLI adds that itself, for its containment check)."""
+    absolute = tmp_path / "sub" / "attempt.patch"
+    assert verify.resolve_restore_path(str(absolute), tmp_path / "other") == absolute
+    assert verify.resolve_restore_path("art/attempt.patch", tmp_path) == tmp_path / "art" / (
+        "attempt.patch"
+    )
+    # no normalization: the `..` survives, so a containment check still sees it
+    assert ".." in str(verify.resolve_restore_path("../escape.patch", tmp_path))
+
+
 def test_verify_dev_baseline_era_untracked_is_not_proof_of_work(project):
     """#88: the from-scratch case the T4 latch exclusion cannot reach. After an
     intent-gap halt the saved patch is untracked residue under the protected
