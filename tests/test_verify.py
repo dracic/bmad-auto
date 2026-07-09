@@ -1113,6 +1113,43 @@ def test_patch_new_files_skips_quoted_paths(project):
     assert verify.patch_new_files(patch) == set()
 
 
+def test_patch_new_files_strips_mnemonic_prefixes(project):
+    """`diff.mnemonicPrefix=true` in the user's config makes `git diff HEAD` emit
+    `c/`/`w/` instead of `a/`/`b/`. `apply_patch`'s plain `git apply` (-p1) strips
+    the first component whatever it is, so the parser must mirror that or the
+    recorded residue is `w/<path>` and the exclusion silently no-ops."""
+    repo = project.project
+    (repo / "new_module.py").write_text("print('hi')\n")
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "deep.txt").write_text("nested\n")
+    git(repo, "add", "-AN")
+    patch = project.implementation_artifacts / "mnemonic.patch"
+    patch.write_text(
+        git(repo, "-c", "diff.mnemonicPrefix=true", "diff", "HEAD") + "\n", encoding="utf-8"
+    )
+    assert "+++ w/new_module.py" in patch.read_text(encoding="utf-8")  # fixture sanity
+    assert verify.patch_new_files(patch) == {"new_module.py", "pkg/deep.txt"}
+
+
+def test_patch_new_files_skips_unstrippable_targets(project):
+    """A prefixless single-component target (`git diff --no-prefix`) cannot survive
+    `git apply`'s -p1 strip — the apply would have failed, so no residue can exist.
+    Recording it verbatim could exclude (and later delete) a same-named file the
+    human created; skip it instead."""
+    patch = project.implementation_artifacts / "noprefix.patch"
+    patch.write_text(
+        "diff --git newfile.txt newfile.txt\n"
+        "new file mode 100644\n"
+        "index 0000000..1111111\n"
+        "--- /dev/null\n"
+        "+++ newfile.txt\n"
+        "@@ -0,0 +1 @@\n"
+        "+x\n",
+        encoding="utf-8",
+    )
+    assert verify.patch_new_files(patch) == set()
+
+
 def test_patch_new_files_missing_patch_raises_oserror(project):
     """The caller (rearm) turns this into a journaled best-effort degrade."""
     with pytest.raises(OSError):

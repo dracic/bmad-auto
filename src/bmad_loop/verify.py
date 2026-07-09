@@ -1562,7 +1562,12 @@ def patch_new_files(patch_path: Path) -> set[str]:
     Text-parse, not `git apply --numstat`: the caller runs after the tree has moved
     on, so the patch may no longer apply, and a creation list must still come back.
     Within each `diff --git` block, an old-side `---` header naming `_DIFF_ABSENT`
-    marks a creation, and the `+++ b/<path>` after it names the file. Deletions (the
+    marks a creation, and the `+++ <prefix>/<path>` after it names the file. The
+    prefix is stripped by mirroring what `apply_patch`'s plain `git apply` (default
+    -p1) did when it laid the residue down: drop the first path component whatever
+    it is — `b/` standard, `w/`/`i/`/`c/` under diff.mnemonicPrefix, `2/` from
+    --no-index. A target -p1 cannot strip (no `/`, e.g. --no-prefix output) is
+    skipped: that apply failed outright, so no residue exists. Deletions (the
     absent token on the *new* side) are never returned — the caller feeds this to an
     *exclusion* set, and excluding a path the human later re-created would make the
     next rollback delete their file. For the same reason every ambiguous entry is
@@ -1589,9 +1594,11 @@ def patch_new_files(patch_path: Path) -> set[str]:
         elif line.startswith("+++ ") and creating:
             creating = False
             target = line[4:].split("\t", 1)[0].strip()
-            if target == _DIFF_ABSENT or target.startswith('"'):
-                continue  # a delete-then-create pair, or a quoted path we won't guess
-            new_files.add(target[2:] if target.startswith("b/") else target)
+            if target == _DIFF_ABSENT or target.startswith('"') or "/" not in target:
+                continue  # delete-then-create pair, quoted path, or un-strippable target
+            rel = target.split("/", 1)[1]  # mirror `git apply`'s default -p1
+            if rel:
+                new_files.add(rel)
     return new_files
 
 
