@@ -174,6 +174,25 @@ class SynthResult:
     status_consistent: bool
 
 
+def _read_text_or_empty(path: Path) -> str:
+    """Read a spec on the *read-back* path, degrading an unreadable file to "".
+
+    An absent, binary/truncated, or unreadable spec carries no parseable result
+    section, so it reads exactly like a spec that has not terminated yet — the
+    caller then waits, nudges, or keeps its verdict. Never a crash: this runs on
+    the observation path, where the orchestrator's job is to classify what it
+    finds, not to trust it. (UnicodeDecodeError is a ValueError, not an OSError.)
+
+    The *repair* path deliberately does the opposite — `reset_spec_status` and
+    `strip_auto_run_result` let an unreadable spec raise, because silently
+    skipping a rewrite leaves the spec in a state the caller believes it fixed.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
 def synthesize_result(
     spec_path: Path,
     *,
@@ -207,9 +226,7 @@ def synthesize_result(
     """
     fm = read_frontmatter(spec_path)
     fm_status = str(fm.get("status", "")).strip().lower()
-    arr = parse_auto_run_result(
-        spec_path.read_text(encoding="utf-8") if spec_path.is_file() else ""
-    )
+    arr = parse_auto_run_result(_read_text_or_empty(spec_path))
 
     terminal = (DONE, BLOCKED, PLAN_HALT_STATUS) if plan_halt else (DONE, BLOCKED)
     # Not terminal yet: no result section AND frontmatter not at a terminal state.
@@ -284,7 +301,11 @@ def find_result_artifact(impl_artifacts: Path, *, since_ns: int) -> Path | None:
         if not path.name.startswith(FALLBACK_RESULT_PREFIX):
             try:
                 text = path.read_text(encoding="utf-8")
-            except OSError:
+            except (OSError, UnicodeDecodeError):
+                # A binary/truncated candidate cannot be shown to carry a terminal
+                # section, so it does not qualify — skip it exactly like an
+                # unreadable one. UnicodeDecodeError is a ValueError, so a bare
+                # `except OSError` let a torn mid-write spec crash the scan.
                 continue
             if not _section_headings(text):
                 continue

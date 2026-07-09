@@ -28,6 +28,11 @@ from bmad_loop.signals import HookEvent
 
 HAVE_TMUX = sys.platform != "win32" and shutil.which("tmux") is not None
 
+# The read-back decodes artifacts as UTF-8. A spec truncated mid-write (the CLI was
+# killed) can end inside a multi-byte sequence; `read_text(encoding="utf-8")` then
+# raises UnicodeDecodeError — a ValueError, NOT an OSError.
+_BAD_UTF8 = b"\xff\xfe\x00\x01 not utf-8 \x80\x81"
+
 FAKE_CLI = """#!/bin/bash
 # fake CLI: last positional arg is the prompt; env comes from tmux -e
 prompt="${@: -1}"
@@ -355,6 +360,23 @@ def test_generic_dev_fallback_done_marker_frontmatter_only(tmp_path):
     assert rj["status"] == "done"
 
 
+def test_scan_readback_non_utf8_spec_returns_none(tmp_path):
+    """The scan-path twin of the stories read-back guard: a binary/truncated spec
+    (or a torn glimpse of one still being written) degrades to a result-less
+    read-back on the Stop path too, so the session nudges/stalls instead of
+    crashing the run. find_result_artifact's `except OSError` never caught this."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    (impl / "spec-3-1-foo.md").write_bytes(_BAD_UTF8)
+    assert adapter._result_json(_dev_handle(), _dev_spec(tmp_path), wait=False) is None
+
+
+def test_scan_readback_non_utf8_fallback_marker_returns_none(tmp_path):
+    """The fallback marker is name-matched, so it reaches synthesize_result unread."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    (impl / "bmad-dev-auto-result-3-1-dev-1.md").write_bytes(_BAD_UTF8)
+    assert adapter._result_json(_dev_handle(), _dev_spec(tmp_path), wait=False) is None
+
+
 def test_generic_dev_ignores_pre_launch_artifact(tmp_path, monkeypatch):
     """A spec left by a prior cycle (mtime below the launch floor) is not this
     session's output and must not be read as a stale completion."""
@@ -513,7 +535,7 @@ def test_stories_readback_non_utf8_spec_returns_none(tmp_path):
     adapter, _ = make_dev_adapter(tmp_path)
     d = tmp_path / "epic" / "stories"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "1-slug.md").write_bytes(b"\xff\xfe\x00\x01 not utf-8 \x80\x81")
+    (d / "1-slug.md").write_bytes(_BAD_UTF8)
     assert adapter._result_json(_dev_handle(), _stories_spec(tmp_path), wait=False) is None
 
 
@@ -1080,6 +1102,278 @@ def test_capped_session_still_completes_when_marker_lands_late(tmp_path, monkeyp
     assert sent == [generic.STALL_NUDGE_TEXT]  # the cap was already exhausted
 
 
+# ----------------------------------------------- post-kill reconcile (#61)
+#
+# A session that finished its work but lost its final Stop ends "stalled"
+# (nudge-unresponsive under a live window), or "timeout" when no hook event
+# ever arrived (total hook loss never arms the stall grace). Both verdicts
+# discard the on-disk result — correctly, at verdict time, because the window
+# was alive to distrust. run()'s finally-kill settles that question:
+# _post_kill_reconcile re-probes and, on a provably dead window, re-runs the
+# read-back and rescues a self-consistent successful terminal. These drive the
+# hook in isolation, plus through run() for the kill-before-scan ordering.
+
+_DONE_SPEC = (
+    "---\nstatus: done\nbaseline_revision: abc123\n---\n\n"
+    "## Auto Run Result\n\nStatus: done\nImplemented.\n"
+)
+
+
+def _unvouched(status="stalled") -> SessionResult:
+    return SessionResult(status=status, session_id="sess", transcript_path="/t.jsonl")
+
+
+def test_post_kill_reconcile_rescues_consistent_done_artifact(tmp_path):
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    (impl / "spec-3-1-foo.md").write_text(_DONE_SPEC)
+    result = adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), _unvouched())
+    assert result.status == "completed"
+    assert result.result_json["status"] == "done"
+    assert result.result_json["post_kill_reconciled"] is True
+    # the stall verdict's identity is preserved on the rescued result
+    assert result.session_id == "sess"
+    assert result.transcript_path == "/t.jsonl"
+
+
+def test_post_kill_reconcile_rescues_timeout(tmp_path):
+    """Total hook loss (misconfigured hooks, events-dir write failure) never arms
+    the stall grace — the session exits `timeout` with no artifact check at all.
+    The same post-kill rescue must cover it."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    (impl / "spec-3-1-foo.md").write_text(_DONE_SPEC)
+    result = adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), _unvouched("timeout"))
+    assert result.status == "completed"
+    assert result.result_json["post_kill_reconciled"] is True
+
+
+def test_post_kill_reconcile_leaves_other_statuses_alone(tmp_path):
+    """completed and crashed already had their artifact read at verdict time;
+    the hook must not touch them (nor re-scan for a completed result)."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    (impl / "spec-3-1-foo.md").write_text(_DONE_SPEC)
+    for status in ("completed", "crashed"):
+        original = _unvouched(status)
+        assert (
+            adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original) is original
+        )
+
+
+def test_post_kill_reconcile_keeps_stall_when_window_alive_after_kill(tmp_path):
+    """kill_window is best-effort; a window that survived it is still live, so the
+    live-window invariant (#48/#53) still applies — no rescue."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: True
+    (impl / "spec-3-1-foo.md").write_text(_DONE_SPEC)
+    original = _unvouched()
+    result = adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original)
+    assert result is original
+    assert result.status == "stalled"
+    assert result.result_json is None
+
+
+def test_post_kill_reconcile_probe_error_keeps_stall(tmp_path):
+    """A transport failure on the post-kill probe means liveness is unknowable —
+    and unknown is not dead (tri-state): never upgrade on a guess."""
+    adapter, impl = make_dev_adapter(tmp_path)
+
+    def boom(handle):
+        raise MultiplexerError("tmux hang")
+
+    adapter._window_alive = boom
+    (impl / "spec-3-1-foo.md").write_text(_DONE_SPEC)
+    original = _unvouched()
+    assert adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original) is original
+
+
+def test_post_kill_reconcile_inconsistent_status_keeps_stall(tmp_path):
+    """Frontmatter and prose actively disagreeing is exactly the low-trust state
+    the stricter-than-crash gate exists for: keep the stall verdict."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    (impl / "spec-3-1-foo.md").write_text(
+        "---\nstatus: done\n---\n\n## Auto Run Result\n\nStatus: in-progress\n"
+    )
+    original = _unvouched()
+    assert adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original) is original
+
+
+def test_post_kill_reconcile_blocked_artifact_keeps_stall(tmp_path):
+    """A blocked terminal carries no finished work to preserve, and blocked-plus-
+    nudge-unresponsive is weak evidence — not rescued."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    (impl / "spec-3-1-foo.md").write_text(
+        "---\nstatus: blocked\n---\n\n## Auto Run Result\n\nStatus: blocked\nStuck.\n"
+    )
+    original = _unvouched()
+    assert adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original) is original
+
+
+def test_post_kill_reconcile_no_artifact_keeps_stall(tmp_path):
+    adapter, _ = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    original = _unvouched()
+    assert adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original) is original
+
+
+def test_post_kill_reconcile_ignores_pre_launch_artifact(tmp_path):
+    """The launch floor still applies: a terminal spec predating this session is a
+    stale prior artifact, not evidence this session finished."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    spec_file = impl / "spec-3-1-foo.md"
+    spec_file.write_text(_DONE_SPEC)
+    handle = _dev_handle(launched_ns=spec_file.stat().st_mtime_ns + 1)
+    original = _unvouched()
+    assert adapter._post_kill_reconcile(handle, _dev_spec(tmp_path), original) is original
+
+
+# ---- corrupt / unreadable artifacts: the rescue must never make things worse.
+#
+# The hook is the one path guaranteed to read a file immediately after run()'s
+# finally-kill — precisely when a spec the CLI was mid-write is truncated, quite
+# possibly through a multi-byte UTF-8 sequence. An escaping exception is NOT
+# contained per-task: it unwinds past adapter.run() to the engine's broad
+# `except Exception`, which marks the whole RUN crashed and abandons every
+# remaining story. So a read fault keeps the original verdict, like every other
+# keep-verdict branch.
+
+
+def test_post_kill_reconcile_synth_read_error_keeps_stall(tmp_path, monkeypatch):
+    """The load-bearing guard, pinned independently of devcontract's internals:
+    whatever the read-back raises, the hook returns the verdict it was given.
+    OSError and UnicodeDecodeError share no base class below Exception."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    (impl / "spec-3-1-foo.md").write_text(_DONE_SPEC)
+    for exc in (OSError("I/O error"), UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")):
+
+        def raising(handle, spec, *, wait, _exc=exc):
+            raise _exc
+
+        monkeypatch.setattr(adapter, "_synth_result", raising)
+        original = _unvouched()
+        assert (
+            adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original) is original
+        )
+
+
+def test_post_kill_reconcile_non_utf8_scan_artifact_keeps_stall(tmp_path):
+    """A truncated/binary `spec-*.md` on the mtime-scan path: find_result_artifact
+    reads it to check for a terminal section, and its `except OSError` never
+    catches a decode error."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    (impl / "spec-3-1-foo.md").write_bytes(_BAD_UTF8)
+    original = _unvouched()
+    assert adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original) is original
+
+
+def test_post_kill_reconcile_non_utf8_fallback_marker_keeps_stall(tmp_path):
+    """The no-spec fallback marker is matched by NAME, so the finder hands it back
+    without ever reading it — the decode fault lands in synthesize_result instead.
+    This is the artifact an injected-workflow session writes, and a `timeout`
+    verdict reaches this hook having never read anything at all."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    (impl / "bmad-dev-auto-result-3-1-dev-1.md").write_bytes(_BAD_UTF8)
+    original = _unvouched("timeout")
+    assert adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original) is original
+
+
+def test_post_kill_reconcile_non_utf8_stories_spec_keeps_stall(tmp_path):
+    """Stories mode resolves the spec by id, not by scan; the same fault must
+    degrade to a kept verdict there too."""
+    adapter, _ = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    d = tmp_path / "epic" / "stories"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "1-slug.md").write_bytes(_BAD_UTF8)
+    original = _unvouched()
+    assert (
+        adapter._post_kill_reconcile(_dev_handle(), _stories_spec(tmp_path), original) is original
+    )
+
+
+def test_post_kill_reconcile_blank_frontmatter_prose_done_rescues(tmp_path):
+    """status_consistent is "no active disagreement": a blank frontmatter with prose
+    `done` is exactly what a delivered Stop would have synthesized (the engine's
+    reconcile repairs the lagging frontmatter downstream) — rescued."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    (impl / "spec-3-1-foo.md").write_text("## Auto Run Result\n\nStatus: done\nDone.\n")
+    result = adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), _unvouched())
+    assert result.status == "completed"
+    assert result.result_json["status"] == "done"
+
+
+def test_post_kill_reconcile_rescues_stories_spec(tmp_path):
+    adapter, _ = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    _write_story_spec(
+        tmp_path,
+        "1",
+        "foo",
+        "---\nstatus: done\nbaseline_revision: story1base\n---\n\n"
+        "## Auto Run Result\n\nStatus: done\nImplemented.\n",
+    )
+    result = adapter._post_kill_reconcile(_dev_handle(), _stories_spec(tmp_path), _unvouched())
+    assert result.status == "completed"
+    assert result.result_json["status"] == "done"
+    assert result.result_json["baseline_commit"] == "story1base"
+
+
+def test_post_kill_reconcile_rescues_stories_plan_halt_leg(tmp_path):
+    """The plan-halt leg's `ready-for-dev` is a successful terminal (marked
+    plan_halt, no escalation) — a lost Stop on that leg is rescued too. This
+    deliberately widens #61's literal done-only wording."""
+    adapter, _ = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    _write_story_spec(tmp_path, "1", "foo", "---\nstatus: ready-for-dev\n---\n\nplan\n")
+    spec = _stories_spec(tmp_path)
+    spec.env["BMAD_LOOP_PLAN_HALT"] = "1"
+    result = adapter._post_kill_reconcile(_dev_handle(), spec, _unvouched())
+    assert result.status == "completed"
+    assert result.result_json["plan_halt"] is True
+    assert result.result_json["post_kill_reconciled"] is True
+
+
+def test_run_kills_before_the_post_kill_probe(tmp_path):
+    """run() must tear the window down before the hook probes/scans — the rescue's
+    trust rests on the kill having settled liveness."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    (impl / "spec-3-1-foo.md").write_text(_DONE_SPEC)
+    order = []
+    adapter.start_session = lambda spec: _dev_handle()
+    adapter.wait_for_completion = lambda handle, spec: _unvouched()
+    adapter.kill = lambda handle: order.append("kill")
+    adapter._window_alive = lambda handle: (order.append("probe"), False)[1]
+    result = adapter.run(_dev_spec(tmp_path))
+    assert order == ["kill", "probe"]
+    assert result.status == "completed"
+
+
+def test_run_exception_kills_without_reconcile(tmp_path):
+    """A raising wait_for_completion (e.g. RunStopped) must still kill the window
+    and propagate — the hook only runs on the normal return path."""
+    adapter, _ = make_dev_adapter(tmp_path)
+    calls = []
+    adapter.start_session = lambda spec: _dev_handle()
+
+    def raising_wait(handle, spec):
+        raise RuntimeError("stop requested")
+
+    adapter.wait_for_completion = raising_wait
+    adapter.kill = lambda handle: calls.append("kill")
+    adapter._post_kill_reconcile = lambda handle, spec, result: calls.append("hook")
+    with pytest.raises(RuntimeError, match="stop requested"):
+        adapter.run(_dev_spec(tmp_path))
+    assert calls == ["kill"]
+
+
 def test_wait_for_completion_tolerates_transient_liveness_probe_failure(tmp_path, monkeypatch):
     """A transient transport hang (the liveness probe raising MultiplexerError, e.g.
     a 30s tmux hang) must never be read as a dead window -> crash. The tick is
@@ -1353,3 +1647,55 @@ def test_tmux_crash_detected(tmp_path):
         subprocess.run(["tmux", "kill-session", "-t", adapter.session_name], capture_output=True)
     assert result.status == "crashed"
     assert result.result_json is None
+
+
+@pytest.mark.skipif(not HAVE_TMUX, reason="tmux not available")
+def test_tmux_timeout_with_flushed_spec_rescued_post_kill(tmp_path):
+    """End-to-end #61 (total hook loss): the session writes its terminal spec but
+    never emits any hook event, so the wait loop idles to `timeout` — a path that
+    never arms the stall grace and checks no artifact. run()'s real kill then
+    settles liveness, and the post-kill reconcile rescues the finished work
+    through a real tmux probe + scan."""
+    impl = tmp_path / "impl"
+    impl.mkdir()
+    fake = tmp_path / "fake-cli"
+    fake.write_text(
+        "#!/bin/bash\n"
+        "# finished work, but hooks are 'misconfigured': no event files at all\n"
+        f"printf -- '---\\nstatus: done\\nbaseline_revision: abc123\\n---\\n\\n"
+        f"## Auto Run Result\\n\\nStatus: done\\nImplemented.\\n' > {impl}/spec-3-1-foo.md\n"
+        "sleep 60  # stay alive so the wait loop times out under a live window\n"
+    )
+    fake.chmod(0o755)
+    adapter = GenericDevAdapter(
+        run_dir=tmp_path / f"run-{uuid.uuid4().hex[:8]}",
+        policy=Policy(limits=LimitsPolicy()),
+        profile=get_profile("claude"),
+        binary=str(fake),
+        extra_args=(),
+        paths=ProjectPaths(
+            project=tmp_path,
+            implementation_artifacts=impl,
+            planning_artifacts=tmp_path / "plan",
+        ),
+    )
+    spec = SessionSpec(
+        task_id="t-rescue",
+        role="dev",
+        prompt="/bmad-dev-auto 3-1",
+        cwd=tmp_path,
+        env={
+            "BMAD_LOOP_RUN_DIR": str(adapter.run_dir),
+            "BMAD_LOOP_TASK_ID": "t-rescue",
+            "BMAD_LOOP_STORY_KEY": "3-1",
+        },
+        timeout_s=6.0,
+    )
+    try:
+        result = adapter.run(spec)
+    finally:
+        subprocess.run(["tmux", "kill-session", "-t", adapter.session_name], capture_output=True)
+
+    assert result.status == "completed"
+    assert result.result_json["status"] == "done"
+    assert result.result_json["post_kill_reconciled"] is True

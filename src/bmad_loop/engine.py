@@ -2066,6 +2066,10 @@ class Engine:
         self.journal.set_active_log(task_id)
         self.journal.append("session-start", task_id=task_id, role=role, prompt=prompt)
         result = adapter.run(spec)
+        # A post-kill rescue (#61) is otherwise indistinguishable from a normal
+        # completion in the journal; leave a breadcrumb for forensics.
+        if result.result_json is not None and result.result_json.get("post_kill_reconciled"):
+            self.journal.append("session-rescued-post-kill", task_id=task_id, role=role)
         # Only dev/review sessions are resumable — `_resumable_session` matches
         # exactly those task ids under DEV_RUNNING/REVIEW_RUNNING. For everything
         # else (triage/sweep, labeled plugin-workflow sessions) the payload is

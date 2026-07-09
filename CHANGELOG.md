@@ -31,6 +31,18 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **A finished session whose final `Stop` hook was lost no longer loses its work.** A dev/review
+  session that wrote its terminal spec but never delivered the `Stop` ended `stalled` — or `timeout`,
+  when hooks were misconfigured and no event ever arrived — and the on-disk result was discarded.
+  The adapter now re-reads the spec after the window is provably dead, rescuing a self-consistent
+  successful terminal; every rescue still faces the full deterministic verify, and the journal records
+  `session-rescued-post-kill` so it stays distinguishable from a live completion. (#95, closes #61)
+- **A corrupt terminal artifact no longer crashes the whole run.** A spec truncated mid-write (a
+  multi-byte UTF-8 sequence cut in half) raised out of the read-back and past the per-task boundary,
+  marking the run `CRASHED` and abandoning every remaining story. The read-back now degrades an
+  undecodable spec to "no result yet" — the session retries or keeps its verdict — and the post-kill
+  rescue additionally keeps its verdict on _any_ read fault, so a best-effort rescue can never make
+  things worse. The repair path still raises on purpose. (#95, closes #96)
 - **Windows installs now pull `psutil` automatically** — moved from the opt-in `non-linux` extra to a
   platform-scoped core dependency (`sys_platform == 'win32'`), so the TUI liveness column no longer
   shows every run as `?` on a stock install. macOS keeps the `non-linux` extra; Linux stays dep-free.

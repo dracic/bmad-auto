@@ -459,12 +459,18 @@ class GenericDevAdapter(GenericAdapter):
         return dirs
 
     def _result_json(self, handle: SessionHandle, spec: SessionSpec, *, wait: bool) -> dict | None:
+        sr = self._synth_result(handle, spec, wait=wait)
+        return sr.result_json if sr is not None else None
+
+    def _synth_result(
+        self, handle: SessionHandle, spec: SessionSpec, *, wait: bool
+    ) -> devcontract.SynthResult | None:
         # Stories mode (folder+id dispatch): the story spec lives at a
         # deterministic id-keyed path, so resolve it directly instead of the
         # mtime-floor scan. The engine exports BMAD_LOOP_SPEC_FOLDER only for
         # stories runs, so sprint/sweep runs keep the scan path below unchanged.
         if spec.env.get("BMAD_LOOP_SPEC_FOLDER"):
-            return self._stories_result_json(handle, spec, wait=wait)
+            return self._stories_synth_result(handle, spec, wait=wait)
         # Mirror the base _await_result poll: the skill's terminal spec may not be
         # flushed to disk the instant the Stop event fires, so briefly await it when
         # wait=True instead of reading once and mis-reporting a stall.
@@ -482,14 +488,14 @@ class GenericDevAdapter(GenericAdapter):
                     dw_ids = [tok for tok in (i.strip() for i in raw_dw_ids) if tok]
                     return devcontract.synthesize_result(
                         spec_path, story_key=story_key, dw_ids=dw_ids or None
-                    ).result_json
+                    )
             if not wait or time.monotonic() >= deadline:
                 return None
             time.sleep(RESULT_POLL_S)
 
-    def _stories_result_json(
+    def _stories_synth_result(
         self, handle: SessionHandle, spec: SessionSpec, *, wait: bool
-    ) -> dict | None:
+    ) -> devcontract.SynthResult | None:
         """Deterministic stories-mode read-back: resolve ``<spec-folder>/stories/
         <id>-*.md`` by id (never the mtime scan) and synthesize from it.
 
@@ -530,9 +536,9 @@ class GenericDevAdapter(GenericAdapter):
                 and self._written_this_session(state.path, handle.launched_ns)
             ):
                 try:
-                    result_json = devcontract.synthesize_result(
+                    sr = devcontract.synthesize_result(
                         state.path, story_key=story_key or None, plan_halt=plan_halt
-                    ).result_json
+                    )
                 except UnicodeDecodeError:
                     # A non-UTF-8 read is either a torn glimpse of a spec still
                     # being written (keep polling — a later pass sees the finished
@@ -541,9 +547,9 @@ class GenericDevAdapter(GenericAdapter):
                     # wedge (resolve_story_spec degrades an undecodable PRESENT
                     # spec to status "" → pause for resolve), never a crash of
                     # the read-back poll.
-                    result_json = None
-                if result_json is not None:
-                    return result_json
+                    sr = None
+                if sr is not None and sr.result_json is not None:
+                    return sr
             if not wait or time.monotonic() >= deadline:
                 return None
             time.sleep(RESULT_POLL_S)
@@ -559,6 +565,70 @@ class GenericDevAdapter(GenericAdapter):
             return spec_path.stat().st_mtime_ns >= launched_ns
         except OSError:
             return False
+
+    def _post_kill_reconcile(
+        self, handle: SessionHandle, spec: SessionSpec, result: SessionResult
+    ) -> SessionResult:
+        """Rescue a finished-but-unvouched session once its window is dead (#61).
+
+        A session that wrote its terminal spec but whose final Stop event was
+        lost ends ``stalled`` (nudge-unresponsive under a live window, where
+        the artifact is advisory — the #48/#53 invariant), or ``timeout`` when
+        no hook event ever arrived (hook misconfig, events-dir write failure —
+        that path never arms the stall grace at all). Both verdicts discard
+        the on-disk result solely because the window was alive to distrust;
+        ``run()``'s kill has since settled that the way window death already
+        vouches for the crash path. So: re-probe, and only on a provably dead
+        window re-run the same read-back a delivered Stop would have run.
+
+        The gate is deliberately stricter than the crash path's
+        accept-any-terminal: the synthesis must be self-consistent
+        (``status_consistent`` — "no active disagreement"; a blank frontmatter
+        with prose ``done`` passes, exactly what a delivered Stop would have
+        synthesized, and the engine's reconcile repairs the lag) and a
+        *successful* terminal — ``done``, or the stories plan-halt leg (a
+        deliberate widening of #61's literal done-only wording). A ``blocked``
+        terminal is never rescued: it carries no finished work, and
+        blocked-plus-nudge-unresponsive is weak evidence of anything. Every
+        rescue still runs the engine's full deterministic verify downstream,
+        so a bogus upgrade degrades into an ordinary verify-failed retry. A
+        cap-exhausted injected-workflow stall whose marker landed before the
+        kill is rescued by the same trust model."""
+        if result.status not in ("stalled", "timeout") or result.result_json is not None:
+            return result
+        try:
+            if self._window_alive(handle):
+                # The kill silently failed (best-effort teardown): the window
+                # is still alive, so the live-window invariant still applies.
+                return result
+        except MultiplexerError:
+            return result  # liveness unknowable: unknown is not dead
+        try:
+            sr = self._synth_result(handle, spec, wait=False)
+        except (OSError, UnicodeDecodeError):
+            # An unreadable artifact is not evidence a session finished. This
+            # hook runs right after run()'s finally-kill — the moment a spec the
+            # CLI was mid-write is truncated, possibly through a multi-byte UTF-8
+            # sequence — so a corrupt read is the *expected* fault here, not an
+            # anomaly. Keep the verdict: a best-effort rescue must never escalate
+            # a clean stall/timeout into an exception, which the engine does not
+            # contain per-task (it fails the whole run). UnicodeDecodeError is a
+            # ValueError, so both must be named.
+            return result
+        if sr is None or sr.result_json is None or not sr.status_consistent:
+            return result
+        rj = sr.result_json
+        if rj.get("escalations") or not (
+            rj.get("status") == devcontract.DONE or rj.get("plan_halt") is True
+        ):
+            return result
+        rj["post_kill_reconciled"] = True
+        return SessionResult(
+            status="completed",
+            result_json=rj,
+            session_id=result.session_id,
+            transcript_path=result.transcript_path,
+        )
 
 
 # Back-compat alias: the adapter was ``GenericTmuxAdapter`` before tmux moved
