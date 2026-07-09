@@ -28,6 +28,11 @@ from bmad_loop.signals import HookEvent
 
 HAVE_TMUX = sys.platform != "win32" and shutil.which("tmux") is not None
 
+# The read-back decodes artifacts as UTF-8. A spec truncated mid-write (the CLI was
+# killed) can end inside a multi-byte sequence; `read_text(encoding="utf-8")` then
+# raises UnicodeDecodeError — a ValueError, NOT an OSError.
+_BAD_UTF8 = b"\xff\xfe\x00\x01 not utf-8 \x80\x81"
+
 FAKE_CLI = """#!/bin/bash
 # fake CLI: last positional arg is the prompt; env comes from tmux -e
 prompt="${@: -1}"
@@ -355,6 +360,23 @@ def test_generic_dev_fallback_done_marker_frontmatter_only(tmp_path):
     assert rj["status"] == "done"
 
 
+def test_scan_readback_non_utf8_spec_returns_none(tmp_path):
+    """The scan-path twin of the stories read-back guard: a binary/truncated spec
+    (or a torn glimpse of one still being written) degrades to a result-less
+    read-back on the Stop path too, so the session nudges/stalls instead of
+    crashing the run. find_result_artifact's `except OSError` never caught this."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    (impl / "spec-3-1-foo.md").write_bytes(_BAD_UTF8)
+    assert adapter._result_json(_dev_handle(), _dev_spec(tmp_path), wait=False) is None
+
+
+def test_scan_readback_non_utf8_fallback_marker_returns_none(tmp_path):
+    """The fallback marker is name-matched, so it reaches synthesize_result unread."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    (impl / "bmad-dev-auto-result-3-1-dev-1.md").write_bytes(_BAD_UTF8)
+    assert adapter._result_json(_dev_handle(), _dev_spec(tmp_path), wait=False) is None
+
+
 def test_generic_dev_ignores_pre_launch_artifact(tmp_path, monkeypatch):
     """A spec left by a prior cycle (mtime below the launch floor) is not this
     session's output and must not be read as a stale completion."""
@@ -513,7 +535,7 @@ def test_stories_readback_non_utf8_spec_returns_none(tmp_path):
     adapter, _ = make_dev_adapter(tmp_path)
     d = tmp_path / "epic" / "stories"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "1-slug.md").write_bytes(b"\xff\xfe\x00\x01 not utf-8 \x80\x81")
+    (d / "1-slug.md").write_bytes(_BAD_UTF8)
     assert adapter._result_json(_dev_handle(), _stories_spec(tmp_path), wait=False) is None
 
 
@@ -1095,10 +1117,6 @@ _DONE_SPEC = (
     "---\nstatus: done\nbaseline_revision: abc123\n---\n\n"
     "## Auto Run Result\n\nStatus: done\nImplemented.\n"
 )
-
-# The read-back decodes artifacts as UTF-8. `read_text(encoding="utf-8")` raises
-# UnicodeDecodeError (a ValueError, NOT an OSError) on these bytes.
-_BAD_UTF8 = b"\xff\xfe\x00\x01 not utf-8 \x80\x81"
 
 
 def _unvouched(status="stalled") -> SessionResult:

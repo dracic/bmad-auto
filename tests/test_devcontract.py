@@ -1,5 +1,6 @@
 """Tests for the generic bmad-dev-auto -> result.json translation shim."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -337,6 +338,43 @@ def test_find_artifact_ignores_heading_in_longer_outer_fence(tmp_path):
         encoding="utf-8",
     )
     assert devcontract.find_result_artifact(tmp_path, since_ns=0) is None
+
+
+# The read-back decodes artifacts as UTF-8. A spec truncated mid-write (the CLI
+# was killed) can end inside a multi-byte sequence; `read_text(encoding="utf-8")`
+# then raises UnicodeDecodeError — a ValueError, NOT an OSError.
+_BAD_UTF8 = b"\xff\xfe\x00\x01 not utf-8 \x80\x81"
+
+
+def test_find_artifact_skips_non_utf8_spec(tmp_path):
+    """A binary/truncated candidate cannot be shown to carry a terminal section, so
+    it does not qualify — and must be skipped, not raised on, even though it is the
+    newest file. An older qualifying spec still wins."""
+    good = tmp_path / "spec-1-1-a.md"
+    good.write_text("---\nstatus: done\n---\n\n## Auto Run Result\n\nStatus: done\n")
+    torn = tmp_path / "spec-1-1-b.md"
+    torn.write_bytes(_BAD_UTF8)
+    os.utime(good, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(torn, ns=(2_000_000_000, 2_000_000_000))  # newest, but unreadable
+    assert devcontract.find_result_artifact(tmp_path, since_ns=0) == good
+
+
+def test_find_artifact_skips_only_candidate_when_non_utf8(tmp_path):
+    (tmp_path / "spec-1-1-a.md").write_bytes(_BAD_UTF8)
+    assert devcontract.find_result_artifact(tmp_path, since_ns=0) is None
+
+
+def test_synthesize_result_non_utf8_fallback_marker_is_not_terminal(tmp_path):
+    """The no-spec fallback marker is matched by NAME, so the finder hands it back
+    without ever reading it — the decode fault lands here instead. An unreadable
+    spec carries no parseable result, so it reads exactly like one that has not
+    terminated yet: no result_json, no crash."""
+    marker = tmp_path / "bmad-dev-auto-result-unclear-1234.md"
+    marker.write_bytes(_BAD_UTF8)
+    assert devcontract.find_result_artifact(tmp_path, since_ns=0) == marker
+    sr = devcontract.synthesize_result(marker, story_key="1-1")
+    assert sr.result_json is None
+    assert sr.status_consistent is True
 
 
 # ----------------------------------------------------------- reset_spec_status
