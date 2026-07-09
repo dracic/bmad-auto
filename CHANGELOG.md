@@ -46,6 +46,17 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **Run ids are validated, so a run ref can no longer escape the runs directory.** A positional ref
+  (`delete`, `stop`, `archive`, `resume`, `status`) was recomposed into a path raw, so
+  `bmad-loop delete ../../x` deleted any outside directory holding a `state.json`; the hidden
+  `--run-id` flag on `run`/`sweep` reached a directory name, a multiplexer session name and a git ref
+  unchecked. A supplied id must now match `[A-Za-z0-9][A-Za-z0-9_-]*` (≤ 120 chars, no reserved
+  Windows device name) — rejected, never sanitized, so ids stay bijective with paths and sessions —
+  and a ref that is absolute, climbs with `..`, or carries a separator skips the exact-match branch,
+  falling through to partial matching over enumerated run dirs only. Ids recovered from the outside
+  world — a `bmad-loop-<id>` session name, a `<kind>-<id>` control-session window name — pass the
+  same validator before they steer a path. Partial refs unaffected (#104).
+
 - **An abandoned patch-restore no longer smuggles its files into the corrected story's commit.**
   Re-arming a story whose previous re-drive had already applied a restore patch snapshotted that
   patch's new (untracked) files as _pre-existing_, so every later rollback preserved them and

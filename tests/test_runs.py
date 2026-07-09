@@ -9,7 +9,7 @@ import tarfile
 import pytest
 from conftest import escalated_run, git
 
-from bmad_loop import runs
+from bmad_loop import platform_util, runs
 from bmad_loop.adapters import tmux_base
 from bmad_loop.journal import load_state, save_state
 from bmad_loop.model import RunState
@@ -102,6 +102,65 @@ def test_new_run_id_format():
     assert re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{4}", runs.new_run_id())
 
 
+def test_is_valid_run_id_is_identity_for_generated_ids():
+    """The validator must accept everything our one legitimate producer emits —
+    and those ids must survive both sanitizers byte-for-byte, since a run id is a
+    directory name (safe_segment) and a git ref component (safe_ref_segment) at once."""
+    for _ in range(20):
+        run_id = runs.new_run_id()
+        assert runs.is_valid_run_id(run_id)
+        assert platform_util.safe_segment(run_id) == run_id
+        assert platform_util.safe_ref_segment(run_id) == run_id
+
+
+@pytest.mark.parametrize("value", ["r1", "RID", "a", "A_b-C9", "x" * platform_util.MAX_SEGMENT])
+def test_is_valid_run_id_accepts(value):
+    assert runs.is_valid_run_id(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",  # empty
+        "..",  # traversal
+        "../x",
+        "..\\x",
+        "/etc/passwd",  # posix absolute
+        "C:\\windows",  # windows drive-absolute
+        "C:rel",  # windows drive-relative
+        "a/b",  # posix separator
+        "a\\b",  # windows separator
+        "-lead",  # leading dash (git porcelain option-lookalike)
+        "_lead",  # leading underscore: only [A-Za-z0-9] may start an id
+        ".hidden",  # leading dot
+        "a.b",  # dot: mangles a multiplexer session name
+        "a:b",  # colon: mangles a multiplexer session name, illegal in a git ref
+        "a b",  # whitespace
+        "a\tb",
+        "a\nb",
+        "a\x00b",  # control char
+        "trailing.",  # windows drops trailing dots
+        "trailing ",  # ...and trailing spaces
+        'a"b',
+        "a<b",
+        "a>b",
+        "a|b",
+        "a?b",
+        "a*b",
+        "a~b",
+        "a^b",
+        "a[b",
+        "a@{b",
+        "CON",  # reserved windows device basenames, any case, with or without ext
+        "nul",
+        "COM1",
+        "x" * (platform_util.MAX_SEGMENT + 1),  # over the segment cap
+    ],
+)
+def test_is_valid_run_id_rejects(value):
+    assert not runs.is_valid_run_id(value)
+
+
 def test_write_pid(tmp_path):
     runs.write_pid(tmp_path)
     tokens = (tmp_path / "engine.pid").read_text().split()
@@ -162,6 +221,48 @@ def test_resolve_run_dir_ambiguous(tmp_path):
     _make_run(tmp_path, "20260619-101010-a1c9")
     with pytest.raises(runs.RunRefError, match="ambiguous run ref 'a1' matches 2 runs"):
         runs.resolve_run_dir(tmp_path, "a1")
+
+
+@pytest.mark.parametrize("ref", ["../../outside", "../outside", "a/b", "a\\b"])
+def test_resolve_run_dir_never_escapes_the_runs_dir(tmp_path, ref):
+    """The exact branch recomposes `project / RUNS_DIR / ref` from the raw ref, so a
+    ref carrying separators or `..` must never reach it — otherwise
+    `bmad-loop delete ../../x` rmtree's any outside directory that happens to hold a
+    state.json. Such refs fall through to partial matching, which can only yield a
+    name `list_run_dirs` enumerated, i.e. an immediate child of the runs dir.
+
+    Stated as containment rather than no-match because `a\\b` is one legal directory
+    name on POSIX (inside the runs dir, so it legitimately resolves) and a nested
+    path on Windows (where it must not)."""
+    project = tmp_path / "proj"
+    _make_run(project, "20260620-143025-a1b2")
+    runs_dir = (project / ".bmad-loop" / "runs").resolve()
+    # plant a state.json exactly where the un-gated exact branch would land
+    planted = (project / ".bmad-loop" / "runs" / ref).resolve()
+    planted.mkdir(parents=True, exist_ok=True)
+    (planted / "state.json").write_text("{}")
+
+    try:
+        got = runs.resolve_run_dir(project, ref)
+    except runs.RunRefError as e:
+        assert "no such run" in str(e)
+    else:
+        assert got.resolve().parent == runs_dir  # an enumerated run dir, never an escape
+    assert (planted / "state.json").is_file()  # never consumed as a run
+
+
+def test_resolve_run_dir_absolute_ref_never_escapes(tmp_path):
+    """`run_dir_for(project, "/abs")` is `Path("/abs")` — `/`-join discards the
+    project prefix entirely, so an absolute ref escapes without needing a `..`."""
+    project = tmp_path / "proj"
+    _make_run(project, "20260620-143025-a1b2")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "state.json").write_text("{}")
+
+    with pytest.raises(runs.RunRefError, match="no such run"):
+        runs.resolve_run_dir(project, str(outside))
+    assert (outside / "state.json").is_file()
 
 
 def test_resolve_run_dir_exact_wins_over_ambiguity(tmp_path):
@@ -478,6 +579,24 @@ def test_prunable_sessions_partitions(tmp_path, monkeypatch):
     assert sorted(prunable) == ["fin-1", "orphan-1", "untag-fin"]
     assert alive == ["live-1"]
     assert unknown == set()
+
+
+def test_prunable_sessions_skips_invalid_run_ids(tmp_path, monkeypatch):
+    """A session name is untrusted input (anyone can create one). Stripping the
+    prefix off `bmad-loop-../../x` would hand `run_dir_for` a traversing id, and a
+    tagged session would then steer engine_liveness — and prune_sessions' kill — at
+    a path outside the runs dir. Reject before recomposing."""
+    mine = runs.project_tag(tmp_path)
+    good = _make_state_run(tmp_path, "fin-1")
+    (good / "engine.pid").write_text(str(_dead_pid()))
+
+    sessions = ["bmad-loop-fin-1", "bmad-loop-../../x", "bmad-loop-a.b", "bmad-loop-"]
+    monkeypatch.setattr(runs, "tmux_sessions", lambda: sessions)
+    monkeypatch.setattr(runs, "session_project_tags", lambda: dict.fromkeys(sessions, mine))
+
+    prunable, live, unknown = runs.prunable_sessions(tmp_path)
+    assert prunable == ["fin-1"]
+    assert live == [] and unknown == set()
 
 
 def test_prunable_sessions_flags_unknown(tmp_path, monkeypatch):

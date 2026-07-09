@@ -32,6 +32,7 @@ from .adapters.base import CodingCLIAdapter
 from .engine import Engine
 from .journal import Journal, load_state, save_state
 from .model import RunState
+from .platform_util import MAX_SEGMENT
 from .process_host import ProcessHostError
 from .runs import RUNS_DIR
 from .stories_engine import StoriesEngine
@@ -46,6 +47,21 @@ def _project(args: argparse.Namespace) -> Path:
 
 def _policy_path(project: Path) -> Path:
     return project / POLICY_FILE
+
+
+def _reject_bad_run_id(run_id: str | None) -> int | None:
+    """Guard the hidden ``--run-id`` flag before the id becomes a directory name, a
+    multiplexer session name and a git ref component. Rejects rather than sanitizes
+    (see ``runs.is_valid_run_id``): a coerced id would no longer name the run the
+    caller asked for. Returns 1 to abort, None to proceed."""
+    if run_id is not None and not runs.is_valid_run_id(run_id):
+        print(
+            f"error: invalid --run-id {run_id!r} — expected {runs.RUN_ID_RE.pattern} "
+            f"(at most {MAX_SEGMENT} characters, not a reserved device name)",
+            file=sys.stderr,
+        )
+        return 1
+    return None
 
 
 def _reconcile_stale(project: Path, paths: bmadconfig.ProjectPaths, pol) -> None:
@@ -360,6 +376,8 @@ def _validate_stories_queue(
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    if (rc := _reject_bad_run_id(args.run_id)) is not None:
+        return rc
     project = _project(args)
     paths = bmadconfig.load_paths(project)
     pol = policy_mod.load(_policy_path(project))
@@ -646,6 +664,8 @@ def _sweep_factory(project: Path, paths: bmadconfig.ProjectPaths):
 
 
 def cmd_sweep(args: argparse.Namespace) -> int:
+    if (rc := _reject_bad_run_id(args.run_id)) is not None:
+        return rc
     project = _project(args)
     paths = bmadconfig.load_paths(project)
     pol = policy_mod.load(_policy_path(project))

@@ -299,6 +299,51 @@ def test_prune_ctl_windows(monkeypatch, tmp_path: Path):
     assert killed == [["tmux", "kill-window", "-t", "@3"]]
 
 
+def test_prune_ctl_windows_skips_invalid_run_ids(monkeypatch, tmp_path: Path):
+    """A ctl-window name is untrusted input (anyone can rename a tmux window).
+    Stripping the kind prefix off `run-../../x` would hand run_dir_for a
+    traversing id, steering the liveness read — and, for an untagged window,
+    the run-dir ownership fallback — at a path outside the runs dir. Reject
+    before recomposing (mirrors runs.prunable_sessions)."""
+    from bmad_loop import runs
+
+    mine = runs.project_tag(tmp_path)
+    # a real runs dir, so the traversal has an existing anchor to climb from
+    (tmp_path / ".bmad-loop" / "runs").mkdir(parents=True)
+    # where the un-gated recomposition of `run-../../planted` would land: an
+    # outside dir whose state.json would otherwise claim the untagged window
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    (planted / "state.json").write_text("{}")
+
+    windows = (
+        f"@2\tsweep-20260101-000000-dead\t{mine}\n"  # legit orphan — still killed
+        f"@3\trun-../../x\t{mine}\n"  # traversal — skipped
+        f"@5\tsweep-a.b\t{mine}\n"  # invalid charset — skipped
+        "@6\trun-../../planted\t\n"  # untagged — outside state.json must not claim it
+    )
+    killed: list[list[str]] = []
+
+    def fake(argv, **kwargs):
+        verb = argv[1]
+        if verb == "has-session":
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if verb == "display-message":  # current window is none of the rows
+            return subprocess.CompletedProcess(argv, 0, stdout="@1\n", stderr="")
+        if verb == "list-windows":
+            return subprocess.CompletedProcess(argv, 0, stdout=windows, stderr="")
+        if verb == "kill-window":
+            killed.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(tmux_base.subprocess, "run", fake)
+    monkeypatch.setattr(tmux_base.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    assert launch.prunable_ctl_windows(tmp_path) == ["sweep-20260101-000000-dead"]
+    assert launch.prune_ctl_windows(tmp_path) == ["sweep-20260101-000000-dead"]
+    assert killed == [["tmux", "kill-window", "-t", "@2"]]
+
+
 def test_prune_ctl_windows_no_session(monkeypatch, tmp_path: Path):
     def fake(argv, **kwargs):  # has-session reports the ctl session is gone
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")

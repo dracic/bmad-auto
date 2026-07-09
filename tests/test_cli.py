@@ -603,6 +603,45 @@ def test_run_honors_preassigned_run_id_and_writes_pid(project, monkeypatch):
     assert (run_dir / "engine.pid").read_text().split()[0] == str(os.getpid())
 
 
+_BAD_RUN_IDS = [
+    "../../escape",  # traversal out of the runs dir
+    "..",
+    "/etc/passwd",  # posix absolute
+    "C:\\windows",  # windows drive-absolute
+    "a/b",  # path separators
+    "a\\b",
+    "a.b",  # dot/colon mangle a multiplexer session name
+    "a:b",
+    "-lead",  # leading dash
+    "a b",  # whitespace
+    "",  # empty
+    "CON",  # reserved windows device basename
+]
+
+
+@pytest.mark.parametrize("bad", _BAD_RUN_IDS)
+@pytest.mark.parametrize("command", ["run", "sweep"])
+def test_start_rejects_invalid_run_id(project, monkeypatch, capsys, command, bad):
+    """The hidden --run-id flag is a lookup key that becomes a directory name, a
+    multiplexer session name and a git ref. Reject at the boundary — before any
+    directory is created, and before the preflight side effects run."""
+    install_bmad_config(project)
+    monkeypatch.setattr(cli, "Engine", _StubEngine)
+    monkeypatch.setattr(cli, "SweepEngine", _StubEngine)
+    monkeypatch.setattr(cli, "_make_adapters", lambda *a, **k: {r: None for r in cli.ROLES})
+
+    # `--run-id=<bad>` (not a separate argv token) so argparse doesn't first reject
+    # a leading-dash value as an unknown option — the guard is what must reject it.
+    assert cli.main([command, "--project", str(project.project), f"--run-id={bad}"]) == 1
+    err = capsys.readouterr().err
+    # the stderr message is the real pin: an unguarded run/sweep would also return 1
+    # here (dirty tree / missing base skills), just for the wrong reason.
+    assert "invalid --run-id" in err and repr(bad) in err
+    # rejected before the id reached a path: no run dir, inside or outside the runs dir
+    assert not (project.project / ".bmad-loop" / "runs").exists()
+    assert not (project.project / "escape").exists()
+
+
 def test_run_aborts_when_base_skills_missing(project, monkeypatch, capsys):
     """The orchestrator depends on the non-bundled upstream skills (bmad-dev-auto
     + the review hunters); a run must fail loudly at preflight (not stall mid-run)

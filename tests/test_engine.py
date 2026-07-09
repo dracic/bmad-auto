@@ -502,7 +502,7 @@ def test_run_session_labeled_task_id_capped_as_a_whole(project):
     engine._run_session(task, role="dev", prompt="p", seq=1, label="l" * 110)
 
     (record,) = task.sessions
-    assert len(record.task_id) <= platform_util._MAX_SEGMENT
+    assert len(record.task_id) <= platform_util.MAX_SEGMENT
 
 
 @pytest.mark.parametrize("key", ["6-4:cli?list", "k" * 130])
