@@ -1092,6 +1092,36 @@ def test_has_changes_since_excludes_artifact_only_edit(project):
     )
 
 
+def test_has_changes_since_subtracts_baseline_untracked(project):
+    """Untracked files already on disk when the baseline snapshot was taken are
+    not this session's work. `None` deliberately keeps counting all of them —
+    the opposite of `attempt_dirty`'s ignore-all — so a pre-snapshot run's
+    proof-of-work gate is never silently weakened."""
+    baseline = verify.rev_parse_head(project.project)
+    (project.project / "residue.txt").write_text("left by an earlier halt\n")
+
+    assert verify.has_changes_since(project.project, baseline) is True
+    assert verify.has_changes_since(project.project, baseline, baseline_untracked=None) is True
+    assert (
+        verify.has_changes_since(project.project, baseline, baseline_untracked=["residue.txt"])
+        is False
+    )
+
+    # a file created after the snapshot is this session's
+    (project.project / "fresh.txt").write_text("this session\n")
+    assert (
+        verify.has_changes_since(project.project, baseline, baseline_untracked=["residue.txt"])
+        is True
+    )
+    # and a tracked edit counts regardless of how complete the snapshot is
+    (project.project / "fresh.txt").unlink()
+    (project.project / "src.txt").write_text("real\n")
+    assert (
+        verify.has_changes_since(project.project, baseline, baseline_untracked=["residue.txt"])
+        is True
+    )
+
+
 def test_verify_dev_exclude_relpaths_is_file_granular(project):
     """Unlike artifact_relpaths (whole-folder), this excludes only the
     sprint-status ledger and the session's own claimed spec file — sibling
@@ -1143,6 +1173,63 @@ def test_verify_dev_latched_restore_patch_is_not_proof_of_work(project):
     task.restore_patch = str(patch)
     out = verify.verify_dev(task, project, dev_result(sp))
     assert not out.ok and "no changes" in out.reason
+
+
+def test_verify_dev_baseline_era_untracked_is_not_proof_of_work(project):
+    """#88: the from-scratch case the T4 latch exclusion cannot reach. After an
+    intent-gap halt the saved patch is untracked residue under the protected
+    artifact dirs, and a from-scratch re-arm (`restore_patch=None`) never learns
+    its path — but the re-arm's snapshot captured it. Subtracting
+    `baseline_untracked` is the only mechanical close: a re-driven session that
+    produced nothing but a status flip must not pass the gate on that residue."""
+    write_sprint(project, {"1-1-a": "review"})
+    sp = spec_path(project, "1-1-a")
+    write_spec(sp, "in-review", "NO_VCS")
+    git(project.project, "add", "-A")
+    git(project.project, "commit", "-q", "-m", "baseline")
+    task = make_task(project)
+    residue = project.implementation_artifacts / "attempt.patch"
+    residue.write_text("stale intent-gap diff\n", encoding="utf-8")
+    rel = residue.relative_to(project.project).as_posix()
+
+    # no latch (from-scratch re-arm) — only the snapshot can rule the residue out
+    assert task.restore_patch is None
+    task.baseline_untracked = [rel]
+    out = verify.verify_dev(task, project, dev_result(sp))
+    assert not out.ok and "no changes" in out.reason
+
+    # None (a pre-snapshot run) still counts every untracked file: the gate fails
+    # open toward "work happened", never toward a silently disabled gate
+    task.baseline_untracked = None
+    assert verify.verify_dev(task, project, dev_result(sp)).ok
+
+    # real work passes with the snapshot in place
+    task.baseline_untracked = [rel]
+    (project.project / "src.txt").write_text("real work\n")
+    assert verify.verify_dev(task, project, dev_result(sp)).ok
+
+
+def test_verify_dev_baseline_gate_reads_the_skills_baseline_revision_key(project):
+    """#89: the generic bmad-dev-auto skill's step-03 stamps `baseline_revision`;
+    `baseline_commit` exists only in the orchestrator's synthesized result.json.
+    Reading just the latter made the baseline-match gate dead code in production
+    (an absent key skips the check), so a spec claiming a foreign baseline sailed
+    through. Masked for years by fixtures that stamped the key the skill never
+    writes."""
+    write_sprint(project, {"1-1-a": "review"})
+    task = make_task(project)
+    sp = spec_path(project, "1-1-a")
+
+    write_spec(sp, "in-review", "0" * 40)  # a foreign baseline, skill-style key
+    body = sp.read_text()
+    assert "baseline_revision:" in body and "baseline_commit:" not in body
+    out = verify.verify_dev(task, project, dev_result(sp))
+    assert not out.ok and "does not match" in out.reason
+
+    # matching baseline + real work → the gate passes
+    write_spec(sp, "in-review", task.baseline_commit)
+    (project.project / "src.txt").write_text("real work\n")
+    assert verify.verify_dev(task, project, dev_result(sp)).ok
 
 
 def test_verify_dev_exclude_relpaths_normalizes_dotdot_segments(project):

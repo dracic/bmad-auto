@@ -31,6 +31,22 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **Baseline-era untracked residue no longer vacuously satisfies the proof-of-work gate.**
+  `has_changes_since` counted every untracked file. After an intent-gap halt the saved patch is
+  untracked residue under the artifact dirs every reset deliberately protects, so a from-scratch
+  re-arm — which never learns the patch's path — let a re-driven session that produced nothing but a
+  spec status flip pass the gate on that file's mere presence, and `finalize_commit`'s `add -A` swept
+  it into the story commit. The gate now subtracts the task's `baseline_untracked` snapshot. A `None`
+  snapshot (a pre-upgrade run) still counts every untracked file — deliberately the opposite of
+  `attempt_dirty`'s ignore-all, because a proof-of-work gate has to fail open toward "work happened".
+  (closes #88)
+- **The baseline-match verify gate was dead code for generic dev sessions.** The gate read the spec's
+  `baseline_commit` and skipped itself when that key was absent — but `bmad-dev-auto` stamps
+  `baseline_revision`; `baseline_commit` exists only in the orchestrator's synthesized `result.json`.
+  In production the check never fired, so a spec claiming a stale or foreign baseline sailed through.
+  The gate now reads either key, the idiom `devcontract` already used. The test fixture stamps
+  `baseline_revision` like the real skill does, so it can no longer fabricate the key that hid this.
+  (closes #89)
 - **Unit keys with git-ref-illegal characters no longer break worktree runs.** `unit_branch_name`
   built `bmad-loop/<run_id>/<unit_key>` from the raw ids, so a key or `--run-id` carrying `:`, `..`,
   `@{`, a space or a trailing `.lock` cleared the (already-sanitized) worktree dir only to die at
