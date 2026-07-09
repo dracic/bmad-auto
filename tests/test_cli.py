@@ -929,6 +929,36 @@ def test_resolve_no_interactive_rearms_and_resumes(tmp_path, monkeypatch, capsys
     assert "ready-for-dev" in spec.read_text()
 
 
+def test_resolve_echoes_this_rearms_stale_restore_events(tmp_path, monkeypatch, capsys):
+    """#90's journal entries reach the operator. The commits variant is warn-only —
+    stderr is the only place it ever surfaces. Entries from *earlier* re-arms are
+    already-acted-on history and must not be replayed."""
+    from bmad_loop import runs
+    from bmad_loop.journal import Journal
+
+    run_dir = _escalated_run(tmp_path, "r1")
+    Journal(run_dir).append("stale-restore-excluded", story_key="s1", files=["FROM-LAST-TIME.txt"])
+
+    def fake_rearm(rd, key, *, restore_patch=None):
+        journal = Journal(rd)
+        journal.append("stale-restore-excluded", story_key=key, patch="a.patch", files=["new.txt"])
+        journal.append("stale-restore-unparseable", story_key=key, patch="b.patch", error="OSErr")
+        journal.append("stale-restore-commits", story_key=key, old_baseline="f" * 40, commits=["c"])
+        return key
+
+    monkeypatch.setattr(runs, "rearm_escalation", fake_rearm)
+    monkeypatch.setattr(cli, "_resume_paused_run", lambda proj, rd: 0)
+    assert (
+        cli.main(["resolve", "--project", str(tmp_path), "r1", "--no-interactive", "--resume"]) == 0
+    )
+
+    err = capsys.readouterr().err
+    assert "excluded the abandoned restore's new files from the re-drive baseline: new.txt" in err
+    assert "could not read the abandoned restore patch (b.patch)" in err
+    assert "1 commit(s) sit below the re-drive's new baseline (ffffffffffff..)" in err
+    assert "FROM-LAST-TIME.txt" not in err
+
+
 def test_resolve_interactive_runs_session_then_rearms(tmp_path, monkeypatch):
     from bmad_loop import resolve
     from bmad_loop.journal import load_state

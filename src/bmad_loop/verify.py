@@ -26,6 +26,11 @@ from .sprintstatus import story_status
 GIT_TIMEOUT_S = 120
 COMMAND_TIMEOUT_S = 30 * 60
 
+# How git's own diff format names the absent side of a creation/deletion. A
+# protocol token git emits verbatim on every platform, Windows included — never
+# opened, never joined onto. Only `patch_new_files` reads it.
+_DIFF_ABSENT = "/dev/null"  # portability: git diff-format token, not a real path
+
 # result.json `workflow` value for the dev pass. A machine contract: the
 # orchestrator forges this value in `devcontract` when synthesizing the dev
 # result from the spec the bmad-dev-auto session leaves on disk; a mismatch
@@ -1548,6 +1553,46 @@ def apply_patch(repo: Path, patch_path: Path) -> None:
     rc, out = _git(repo, "apply", str(patch_path))
     if rc != 0:
         raise GitError(f"git apply {patch_path} failed: {out}")
+
+
+def patch_new_files(patch_path: Path) -> set[str]:
+    """Repo-relative posix paths the saved patch *creates* — the untracked residue
+    an `apply_patch` leaves behind (see `runs.rearm_escalation`).
+
+    Text-parse, not `git apply --numstat`: the caller runs after the tree has moved
+    on, so the patch may no longer apply, and a creation list must still come back.
+    Within each `diff --git` block, an old-side `---` header naming `_DIFF_ABSENT`
+    marks a creation, and the `+++ b/<path>` after it names the file. Deletions (the
+    absent token on the *new* side) are never returned — the caller feeds this to an
+    *exclusion* set, and excluding a path the human later re-created would make the
+    next rollback delete their file. For the same reason every ambiguous entry is
+    skipped rather than guessed: quoted paths (`+++ "b/wéird"`, core.quotePath),
+    renames, and non-`git diff` unified diffs with no `diff --git` header yield fewer
+    results, never wrong ones. Under-reporting degrades to the pre-#90 behavior;
+    over-reporting deletes user data.
+
+    Raises OSError / UnicodeDecodeError when the patch cannot be read; the caller
+    decides (rearm treats it as best-effort and journals `stale-restore-unparseable`).
+    """
+    new_files: set[str] = set()
+    in_hunk = False  # past the first `@@`, a `--- x` line is content, not a header
+    creating = False
+    for line in patch_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("diff --git "):
+            in_hunk = creating = False
+        elif line.startswith("@@"):
+            in_hunk = True
+        elif in_hunk:
+            continue
+        elif line.startswith("--- "):
+            creating = line[4:].strip() == _DIFF_ABSENT
+        elif line.startswith("+++ ") and creating:
+            creating = False
+            target = line[4:].split("\t", 1)[0].strip()
+            if target == _DIFF_ABSENT or target.startswith('"'):
+                continue  # a delete-then-create pair, or a quoted path we won't guess
+            new_files.add(target[2:] if target.startswith("b/") else target)
+    return new_files
 
 
 def commit_paths(repo: Path, message: str, paths: list[Path]) -> str | None:

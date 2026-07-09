@@ -1031,6 +1031,94 @@ def test_apply_patch_conflict_raises(project):
         verify.apply_patch(repo, patch)
 
 
+def _saved_patch(project, name="attempt.patch"):
+    """Capture the working tree as a restore patch, the way the skill saves one."""
+    repo = project.project
+    git(repo, "add", "-AN")  # intent-to-add so new files appear in `git diff HEAD`
+    patch = project.implementation_artifacts / name
+    patch.write_text(git(repo, "diff", "HEAD") + "\n", encoding="utf-8")
+    return patch
+
+
+def test_patch_new_files_names_created_files(project):
+    repo = project.project
+    (repo / "new_module.py").write_text("print('hi')\n")
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "deep.txt").write_text("nested\n")
+    assert verify.patch_new_files(_saved_patch(project)) == {"new_module.py", "pkg/deep.txt"}
+
+
+def test_patch_new_files_ignores_modifications(project):
+    repo = project.project
+    (repo / "src.txt").write_text("original\nedited\n")
+    assert verify.patch_new_files(_saved_patch(project)) == set()
+
+
+def test_patch_new_files_never_returns_deletions(project):
+    """A deleted file must not land in the exclusion set: the human may re-create
+    that path, and excluding it would make the next rollback delete their copy."""
+    repo = project.project
+    git(repo, "rm", "-q", "src.txt")
+    assert verify.patch_new_files(_saved_patch(project)) == set()
+
+
+def test_patch_new_files_multi_file_patch(project):
+    """One patch carrying a creation, a modification and a deletion — only the
+    creation comes back."""
+    repo = project.project
+    (repo / "created.txt").write_text("new\n")
+    (repo / ".gitignore").write_text("*.log\n")
+    git(repo, "rm", "-q", "src.txt")
+    assert verify.patch_new_files(_saved_patch(project)) == {"created.txt"}
+
+
+def test_patch_new_files_ignores_header_lookalikes_in_hunk_bodies(project):
+    """Hunk *content* that reads like a file header (a removed `-- /dev/null` line
+    renders as `--- /dev/null`) must not be mistaken for a creation."""
+    patch = project.implementation_artifacts / "tricky.patch"
+    patch.write_text(
+        "diff --git a/real.txt b/real.txt\n"
+        "new file mode 100644\n"
+        "index 0000000..1111111\n"
+        "--- /dev/null\n"
+        "+++ b/real.txt\n"
+        "@@ -0,0 +1 @@\n"
+        "+hello\n"
+        "diff --git a/mod.txt b/mod.txt\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/mod.txt\n"
+        "+++ b/mod.txt\n"
+        "@@ -1 +1 @@\n"
+        "--- /dev/null\n"  # a removed line whose content is `-- /dev/null`
+        "+++ b/evil.txt\n"  # an added line whose content is `++ b/evil.txt`
+        "\\ No newline at end of file\n",
+        encoding="utf-8",
+    )
+    assert verify.patch_new_files(patch) == {"real.txt"}
+
+
+def test_patch_new_files_skips_quoted_paths(project):
+    """core.quotePath output is skipped rather than guessed — under-reporting is
+    safe, a wrong path would get a user file deleted."""
+    patch = project.implementation_artifacts / "quoted.patch"
+    patch.write_text(
+        'diff --git "a/w\\303\\251ird.txt" "b/w\\303\\251ird.txt"\n'
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        '+++ "b/w\\303\\251ird.txt"\n'
+        "@@ -0,0 +1 @@\n"
+        "+x\n",
+        encoding="utf-8",
+    )
+    assert verify.patch_new_files(patch) == set()
+
+
+def test_patch_new_files_missing_patch_raises_oserror(project):
+    """The caller (rearm) turns this into a journaled best-effort degrade."""
+    with pytest.raises(OSError):
+        verify.patch_new_files(project.implementation_artifacts / "gone.patch")
+
+
 def test_read_frontmatter_tolerates_garbage(project):
     p = project.project / "x.md"
     p.write_text("no frontmatter here")

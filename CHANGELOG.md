@@ -31,6 +31,17 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **An abandoned patch-restore no longer smuggles its files into the corrected story's commit.**
+  Re-arming a story whose previous re-drive had already applied a restore patch snapshotted that
+  patch's new (untracked) files as _pre-existing_, so every later rollback preserved them and
+  `finalize_commit`'s `add -A` swept the abandoned attempt into the corrected commit. The re-arm now
+  parses the old latch (`verify.patch_new_files`) and subtracts its creations from the refreshed
+  baseline snapshot — the re-drive's own reset then removes them. Best-effort: a missing or
+  unreadable patch degrades to the old behavior instead of failing the resolve. Commits the
+  escalated attempt left below the advanced baseline can't be reverted mechanically (the resolve
+  session's own commits share that range), so they are journaled and echoed to stderr for the human
+  to classify. New journal events: `stale-restore-excluded` / `-unparseable` / `-commits`.
+  (closes #90)
 - **Baseline-era untracked residue no longer vacuously satisfies the proof-of-work gate.**
   `has_changes_since` counted every untracked file. After an intent-gap halt the saved patch is
   untracked residue under the artifact dirs every reset deliberately protects, so a from-scratch

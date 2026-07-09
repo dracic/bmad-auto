@@ -593,6 +593,10 @@ def rearm_escalation(
         )
 
     journal = Journal(run_dir)
+    # Read before the unconditional overwrite below: they describe the restore
+    # attempt this re-arm is abandoning, and the residue block needs both.
+    old_latch = task.restore_patch
+    old_baseline = task.baseline_commit
     # deliberate reset, not a normal state-machine transition (mirrors
     # engine._finish_inflight): a clean re-attempt against the corrected spec.
     task.phase = Phase.PENDING
@@ -650,6 +654,21 @@ def rearm_escalation(
                     f"(it must be readable UTF-8), then re-run resolve"
                 ) from e
 
+    # A previous restore latch is being replaced (or re-latched onto the same
+    # patch): the abandoned attempt applied that patch, so its NEW files sit
+    # untracked in the tree right now. The refresh below would capture them as
+    # "pre-existing" — after which every rollback preserves them and
+    # finalize_commit's `add -A` sweeps the abandoned attempt into the corrected
+    # story's commit. Subtract them instead (issue #90).
+    #
+    # Runs after the spec block for the same reason the refresh does (a cleared
+    # sentinel must not be snapshotted), and before it because it feeds it.
+    # Nothing is deleted here: the re-drive's reset (verify.safe_rollback) removes
+    # whatever the refreshed snapshot no longer blesses, at the right moment.
+    stale_residue = _stale_restore_residue(
+        Path(state.project), journal, key, old_latch, old_baseline
+    )
+
     # Advance the attempt baseline to the project's current HEAD and refresh the
     # untracked snapshot: whatever the human-driven resolve session left on the
     # branch (a committed fixture, a corrected ledger, ...) is authorized input
@@ -668,7 +687,7 @@ def rearm_escalation(
     try:
         repo = Path(state.project)
         head = verify.rev_parse_head(repo)
-        untracked = sorted(verify.untracked_files(repo))
+        untracked = sorted(verify.untracked_files(repo) - stale_residue)
         task.baseline_commit = head
         task.baseline_untracked = untracked
     except Exception:  # noqa: BLE001  # nosec B110 - best-effort git read, must not fail re-arm
@@ -701,6 +720,77 @@ def rearm_escalation(
         restore=bool(restore_patch),
     )
     return key
+
+
+def _stale_restore_residue(
+    repo: Path,
+    journal: Journal,
+    story_key: str,
+    old_latch: str | None,
+    old_baseline: str | None,
+) -> set[str]:
+    """The untracked files an abandoned patch-restore attempt left in the tree —
+    to be subtracted from the re-arm's refreshed `baseline_untracked` (issue #90).
+
+    Empty when no restore was latched. Deliberately *not* a `git apply -R`: the
+    re-drive's own reset already reverts the patch's tracked hunks, an `apply -R`
+    fails outright on any drift the resolve session introduced, and it misbehaves
+    on the committed variant below. Only the patch's new files are durable
+    contamination, and naming them is enough — `verify.safe_rollback` deletes
+    whatever the refreshed snapshot stops blessing.
+
+    Also journals (warn-only) the commits sitting between the OLD baseline and the
+    new one: a commit the escalated re-drive session made now becomes the next
+    re-drive's permanent starting point, and no reset revisits it. It is not
+    mechanically reversible — the resolve session's own blessed commits live in the
+    same range and reverting those would claw back the human's resolution — so the
+    human is the classifier. `bmad-loop resolve` echoes these to stderr.
+
+    Best-effort throughout: a deleted or unreadable patch, a non-repo project, a
+    bad old baseline — none may wedge a resolve. Every failure degrades to the
+    pre-#90 behavior and says so in the journal.
+    """
+    if not old_latch:
+        return set()
+    patch_path = Path(old_latch)
+    if not patch_path.is_absolute():
+        patch_path = repo / patch_path
+
+    residue: set[str] = set()
+    try:
+        residue = verify.patch_new_files(patch_path)
+    except (OSError, UnicodeDecodeError) as e:
+        # degrade to the pre-#90 snapshot rather than wedge the resolve
+        journal.append(
+            "stale-restore-unparseable",
+            story_key=story_key,
+            patch=str(patch_path),
+            error=f"{e.__class__.__name__}: {e}",
+        )
+    else:
+        if residue:
+            journal.append(
+                "stale-restore-excluded",
+                story_key=story_key,
+                patch=str(patch_path),
+                files=sorted(residue),
+            )
+
+    # Independent of the parse above — an unreadable patch must not also cost the
+    # human the only notice they get about the committed variant.
+    if old_baseline:
+        try:
+            shas = verify.commits_above(repo, old_baseline)
+        except Exception:  # noqa: BLE001  # nosec B110 - warn-only, must not fail re-arm
+            shas = []
+        if shas:
+            journal.append(
+                "stale-restore-commits",
+                story_key=story_key,
+                old_baseline=old_baseline,
+                commits=shas,
+            )
+    return residue
 
 
 def _sentinel_condition(spec_path: Path, story_key: str) -> str | None:
