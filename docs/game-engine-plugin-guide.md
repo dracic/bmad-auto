@@ -242,8 +242,9 @@ guards, by script:
 
 - **`unity_teardown.py` — process discovery.** Linux uses a zero-dependency
   `/proc` scan to find the worktree-bound Editor/MCP-server; non-Linux falls back
-  to the same scan over **`psutil`**, imported lazily from the optional `non-linux`
-  extra (`pip install 'bmad-loop[non-linux]'`) with a clear error if missing. The
+  to the same scan over **`psutil`**, imported lazily — a core dependency on
+  Windows, the optional `non-linux` extra on macOS (`pip install
+'bmad-loop[non-linux]'`) — with a clear error if missing. The
   hard-kill uses `signal.SIGKILL` where present, degrading to `SIGTERM`/`taskkill`
   on Windows. Liveness uses `os.kill(pid, 0)` on POSIX but `psutil.pid_exists` on
   Windows (where `os.kill(pid, 0)` would _terminate_ the process).
