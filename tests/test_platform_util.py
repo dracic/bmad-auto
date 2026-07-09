@@ -189,7 +189,7 @@ def test_retrying_unlink_propagates_missing_file(tmp_path):
 def _is_legal_segment(seg: str) -> bool:
     return (
         bool(seg)
-        and len(seg) <= platform_util._MAX_SEGMENT
+        and len(seg) <= platform_util.MAX_SEGMENT
         and not platform_util._ILLEGAL_SEGMENT_CHARS.search(seg)
         and not seg.endswith((" ", "."))
         and not platform_util._is_reserved_basename(seg)
@@ -239,7 +239,7 @@ def test_safe_segment_distinct_dirty_keys_never_collide():
 
 def test_safe_segment_caps_length():
     out = platform_util.safe_segment("x" * 500)
-    assert len(out) <= platform_util._MAX_SEGMENT
+    assert len(out) <= platform_util.MAX_SEGMENT
     assert _is_legal_segment(out)
 
 
@@ -356,7 +356,7 @@ def test_safe_ref_segment_distinct_dirty_keys_never_collide():
 
 
 def test_safe_ref_segment_caps_length():
-    assert len(platform_util.safe_ref_segment("x" * 500)) <= platform_util._MAX_SEGMENT
+    assert len(platform_util.safe_ref_segment("x" * 500)) <= platform_util.MAX_SEGMENT
 
 
 @pytest.mark.parametrize("value", _REF_CORPUS)

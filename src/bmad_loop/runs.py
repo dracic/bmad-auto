@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import secrets
 import shutil
 import tarfile
@@ -14,7 +15,13 @@ from . import devcontract, verify
 from .adapters.multiplexer import get_multiplexer
 from .journal import STATE_FILE, Journal, load_state, save_state
 from .model import PAUSE_ESCALATION, Phase, RunState, StoryTask
-from .platform_util import atomic_replace
+from .platform_util import (
+    MAX_SEGMENT,
+    atomic_replace,
+    has_parent_ref,
+    is_absolute_path,
+    safe_segment,
+)
 from .process_host import get_process_host
 
 RUNS_DIR = Path(".bmad-loop") / "runs"
@@ -37,6 +44,36 @@ _STOP_POLL_S = 0.1
 
 def new_run_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+
+
+# A run id is a lookup key with exactly one legitimate producer (new_run_id), and it
+# lands in three positions at once: a directory name under RUNS_DIR, a multiplexer
+# session name (bmad-loop-<id>), and a git ref component (bmad-loop/<id>/<unit>).
+# So an id supplied from outside is *rejected*, never sanitized — coercing it would
+# break the id<->path<->session bijection the CLI relies on to find a run again.
+#
+# The charset is a superset of every new_run_id() output and excludes, by
+# construction: path separators and `..` (traversal), `<>:"|?*` plus trailing dots
+# and spaces (Windows), `.` and `:` (multiplexer session-name mangling), and all
+# whitespace/control characters. It is also identity under safe_ref_segment, so the
+# unit branch a run produces reads back verbatim — hence no ref check below.
+RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def is_valid_run_id(value: str) -> bool:
+    """True when ``value`` is a run id we would have produced ourselves — the guard
+    every externally-supplied ``--run-id`` and every id recomposed from the outside
+    world (a foreign multiplexer session name) must pass before it touches a path.
+
+    The length cap is ``platform_util.MAX_SEGMENT``: a run id is a directory name.
+    The ``safe_segment`` identity check adds the one rule ``RUN_ID_RE`` cannot
+    express — the reserved Windows device basenames (``CON``, ``NUL``, ``COM1``…),
+    which are legal-looking ids that no filesystem will accept as a directory."""
+    return (
+        bool(RUN_ID_RE.fullmatch(value))
+        and len(value) <= MAX_SEGMENT
+        and safe_segment(value) == value
+    )
 
 
 def list_run_dirs(project: Path) -> list[Path]:
@@ -100,14 +137,30 @@ def short_ref(run_id: str) -> str:
     return run_id.rsplit("-", 1)[-1]
 
 
+def _is_path_escape(ref: str) -> bool:
+    """True when ``ref`` would steer ``run_dir_for``'s recomposition outside the
+    runs dir — it is absolute/drive-qualified, climbs with ``..``, or carries a
+    path separator of either flavour. Sub-check of the run-id charset rather than
+    `is_valid_run_id` itself: a run dir created by an older version (or by hand)
+    may bear a name we would no longer mint, and must stay addressable."""
+    return is_absolute_path(ref) or has_parent_ref(ref) or "/" in ref or "\\" in ref
+
+
 def resolve_run_dir(project: Path, ref: str) -> Path:
     """Full or partial run id -> its run dir. An exact id wins outright;
     otherwise a partial matches when the trailing segment starts with `ref` or
     the full id ends with `ref` (run ids are date-prefixed, so the tail is what
-    distinguishes them). Raises RunRefError on no match / ambiguity."""
-    exact = run_dir_for(project, ref)
-    if is_run(exact):
-        return exact
+    distinguishes them). Raises RunRefError on no match / ambiguity.
+
+    The exact branch recomposes a path from the raw ref, so it is skipped for any
+    ref that could escape the runs dir (`bmad-loop delete ../../x` would otherwise
+    rmtree an outside directory that happens to hold a state.json). Such a ref
+    falls through to partial matching, which can only ever yield a name
+    `list_run_dirs` enumerated — and so cannot escape."""
+    if not _is_path_escape(ref):
+        exact = run_dir_for(project, ref)
+        if is_run(exact):
+            return exact
     matches = [
         d
         for d in list_run_dirs(project)
@@ -253,6 +306,8 @@ def prunable_sessions(project: Path) -> tuple[list[str], list[str], set[str]]:
         if name == CTL_SESSION or not name.startswith(_SESSION_PREFIX):
             continue
         run_id = name[len(_SESSION_PREFIX) :]
+        if not is_valid_run_id(run_id):
+            continue  # a foreign/mangled session name must not steer a run-dir path
         run_dir = run_dir_for(project, run_id)
         tag = tags.get(name, "")
         if tag:

@@ -51,7 +51,7 @@ _RESERVED_BASENAMES = frozenset(
     | {f"LPT{s}" for s in "¹²³"}
 )
 _ILLEGAL_SEGMENT_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-_MAX_SEGMENT = 120  # keep segment (incl. any collision suffix) well under the 255 limit
+MAX_SEGMENT = 120  # keep segment (incl. any collision suffix) well under the 255 limit
 
 # git-check-ref-format(1) rejects these anywhere in a ref component: ASCII control
 # chars and space (\x00-\x20), DEL, and `~ ^ : ? * [ \`. `/` is added because it
@@ -183,7 +183,7 @@ def safe_segment(name: str) -> str:
     clean name that happens to look like a sanitized-plus-digest name passes
     through verbatim, and case-insensitive NTFS collisions between clean names
     remain the caller's concern. Never raises."""
-    cleaned = _ILLEGAL_SEGMENT_CHARS.sub("_", name).rstrip(". ")[:_MAX_SEGMENT]
+    cleaned = _ILLEGAL_SEGMENT_CHARS.sub("_", name).rstrip(". ")[:MAX_SEGMENT]
     if _is_reserved_basename(cleaned):
         cleaned = "_" + cleaned
     if not cleaned:
@@ -191,7 +191,7 @@ def safe_segment(name: str) -> str:
     if cleaned == name:
         return name  # already a legal segment — keep it byte-identical
     suffix = _digest_suffix(name)
-    return cleaned[: _MAX_SEGMENT - len(suffix)] + suffix
+    return cleaned[: MAX_SEGMENT - len(suffix)] + suffix
 
 
 def _is_clean_ref_segment(seg: str) -> bool:
@@ -202,7 +202,7 @@ def _is_clean_ref_segment(seg: str) -> bool:
     directory built from the same key."""
     return (
         bool(seg)
-        and len(seg) <= _MAX_SEGMENT
+        and len(seg) <= MAX_SEGMENT
         and not _ILLEGAL_REF_CHARS.search(seg)
         and ".." not in seg
         and "@{" not in seg
@@ -241,4 +241,4 @@ def safe_ref_segment(name: str) -> str:
     if not cleaned or cleaned == "@":
         cleaned = "_"
     suffix = _digest_suffix(name)
-    return cleaned[: _MAX_SEGMENT - len(suffix)] + suffix
+    return cleaned[: MAX_SEGMENT - len(suffix)] + suffix
