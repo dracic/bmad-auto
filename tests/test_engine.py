@@ -570,6 +570,35 @@ def test_happy_path(project):
     assert adapter.sessions[1].prompt.startswith("/bmad-dev-auto ")
 
 
+def test_post_kill_rescued_result_flows_and_journals(project):
+    """A result rescued by the adapter's post-kill reconcile (#61) reaches the
+    engine as an ordinary completed result — it must flow the completed path
+    (reconcile/verify/commit) unchanged, with the extra breadcrumb key riding
+    along harmlessly — plus one forensic journal entry, since the rescue is
+    otherwise indistinguishable from a live completion."""
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+
+    inner = dev_effect(project, "1-1-a", followup_review=False)
+
+    def rescued_dev(spec):
+        result = inner(spec)
+        # what GenericDevAdapter._post_kill_reconcile returns: a synthesized
+        # result (status included) stamped with the rescue breadcrumb
+        result.result_json["status"] = "done"
+        result.result_json["post_kill_reconciled"] = True
+        return result
+
+    engine, _ = make_engine(project, [rescued_dev])
+    summary = engine.run()
+
+    assert summary.done == 1 and summary.deferred == 0 and not summary.paused
+    task = engine.state.tasks["1-1-a"]
+    assert task.phase == Phase.DONE
+    assert task.commit_sha and task.commit_sha != task.baseline_commit
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "session-rescued-post-kill" in kinds
+
+
 def test_inplace_ready_gate_veto_defers_before_any_session(project):
     """A plugin gating pre_ready_gate in non-isolated (in-place) mode — e.g. a
     shared-mode Unity engine waiting on the live Editor — defers the unit via the
