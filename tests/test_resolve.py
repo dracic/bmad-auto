@@ -148,10 +148,12 @@ def test_build_context_no_session_files(tmp_path):
 
 
 def test_build_context_restore_supported_signal(tmp_path):
-    """The agent must know up front when a patch-restore can't be honored
-    (worktree isolation / a worktree-executed task), so it never negotiates a
-    restore the orchestrator will reject after the session."""
-    run_dir, state, task = _escalated_run(tmp_path, with_session=False)
+    """The agent must know up front when a patch-restore can't be honored, so it
+    never negotiates a restore the orchestrator will reject after the session. The
+    flag is `validate_restore_latch`'s verdict — every leg (worktree isolation / a
+    worktree-executed task, a spec-less escalation, a pre-planning sentinel wedge),
+    not a worktree-only copy that drifts from the validator (#91)."""
+    run_dir, state, task = _escalated_run(tmp_path, spec_file="/abs/spec.md", with_session=False)
     key = "6-4-cli-list-command"
 
     path = resolve.build_context(state, run_dir, key)
@@ -161,6 +163,17 @@ def test_build_context_restore_supported_signal(tmp_path):
     assert json.loads(path.read_text(encoding="utf-8"))["restore_supported"] is False
 
     task.worktree_path = str(tmp_path / "wt")  # recorded worktree execution
+    path = resolve.build_context(state, run_dir, key)
+    assert json.loads(path.read_text(encoding="utf-8"))["restore_supported"] is False
+
+    task.worktree_path = ""
+    task.spec_file = None  # spec-less escalation: a restored patch has no review to resume
+    path = resolve.build_context(state, run_dir, key)
+    assert json.loads(path.read_text(encoding="utf-8"))["restore_supported"] is False
+
+    task.spec_file = "/abs/spec.md"
+    state.source = "stories"
+    task.sentinel_kind = "missing-prd"  # pre-planning wedge: nothing attempted to restore
     path = resolve.build_context(state, run_dir, key)
     assert json.loads(path.read_text(encoding="utf-8"))["restore_supported"] is False
 

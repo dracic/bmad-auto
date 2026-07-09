@@ -23,6 +23,7 @@ from typing import Any
 from .adapters.base import SessionSpec
 from .model import RunState
 from .platform_util import safe_segment
+from .runs import validate_restore_latch
 
 RESOLVE_DIR = "resolve"
 
@@ -96,6 +97,16 @@ def _gather_escalations(run_dir: Path, state: RunState, story_key: str) -> list[
 def build_context(state: RunState, run_dir: Path, story_key: str, *, isolation: str = "") -> Path:
     """Write resolve/<story_key>/context.json for the resolve skill to read."""
     task = state.tasks.get(story_key)
+    # Patch-restore availability (#2564): the shared `validate_restore_latch`
+    # verdict, not a local copy of one leg. Any of them — worktree isolation (the
+    # re-drive discards and re-mounts the unit's worktree), a spec-less escalation,
+    # a pre-planning sentinel wedge — means the orchestrator would reject a
+    # `restore_patch` after the session; told to the agent up front so it never
+    # negotiates a restore it can't honor.
+    restore_supported = task is not None and (
+        validate_restore_latch(state, task, story_key, worktree_isolation=isolation == "worktree")
+        is None
+    )
     context = {
         "story_key": story_key,
         "run_id": state.run_id,
@@ -106,11 +117,7 @@ def build_context(state: RunState, run_dir: Path, story_key: str, *, isolation: 
         # as_posix so the context contract is the same string on every OS (the
         # path is consumed by the agent, and Python/tools accept '/' on Windows).
         "resolution_path": resolution_path(run_dir, story_key).as_posix(),
-        # Patch-restore availability (#2564): a worktree-isolation re-drive
-        # discards and re-mounts the unit's worktree, so an in-place restore can
-        # never land — the orchestrator rejects a `restore_patch` up front. Told
-        # to the agent here so it never negotiates a restore it can't honor.
-        "restore_supported": isolation != "worktree" and not (task.worktree_path if task else ""),
+        "restore_supported": restore_supported,
     }
     # Stories mode: hand the resolver the manifest intent (the story entry) and a
     # sentinel indicator, so it sees WHAT the story is meant to do and WHETHER the

@@ -37,7 +37,9 @@ breaking changes may land in a minor release.
   programmatically could latch a patch the re-drive can never honor; it now rejects it too.
   `verify.resolve_restore_path` replaces four copies of the maybe-relative→absolute join, and the
   shared verify gate derives the restore-patch proof-of-work exclusion from the task instead of
-  threading it in from three call sites. Otherwise behavior-neutral. (closes #91)
+  threading it in from three call sites. The resolve context's `restore_supported` signal is now the
+  validator's verdict too, so the agent never negotiates a restore for a sentinel-wedged or spec-less
+  escalation either. Otherwise behavior-neutral. (closes #91)
 - **Test helper fidelity.** `make_engine` seeds the launching scope (`max_stories`, `story_filter`,
   `epic_filter`) on `RunState` like `cmd_run` does, so resume tests no longer silently ran uncapped;
   the three `_escalated_run` fixtures collapse into one parameterized conftest builder. (closes #84)
