@@ -1123,7 +1123,7 @@ def _verify_shared_gates(
     if task.baseline_commit and claimed_baseline not in ("", "NO_VCS"):
         if not same_commit(claimed_baseline, task.baseline_commit):
             return VerifyOutcome.retry(
-                f"spec baseline_commit {claimed_baseline[:12]} does not match "
+                f"spec baseline {claimed_baseline[:12]} does not match "
                 f"orchestrator-recorded baseline {task.baseline_commit[:12]}"
             )
 
