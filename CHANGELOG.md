@@ -53,7 +53,9 @@ breaking changes may land in a minor release.
   unchecked. A supplied id must now match `[A-Za-z0-9][A-Za-z0-9_-]*` (≤ 120 chars, no reserved
   Windows device name) — rejected, never sanitized, so ids stay bijective with paths and sessions —
   and a ref that is absolute, climbs with `..`, or carries a separator skips the exact-match branch,
-  falling through to partial matching over enumerated run dirs only. Partial refs unaffected (#104).
+  falling through to partial matching over enumerated run dirs only. Ids recovered from the outside
+  world — a `bmad-loop-<id>` session name, a `<kind>-<id>` control-session window name — pass the
+  same validator before they steer a path. Partial refs unaffected (#104).
 
 - **An abandoned patch-restore no longer smuggles its files into the corrected story's commit.**
   Re-arming a story whose previous re-drive had already applied a restore patch snapshotted that

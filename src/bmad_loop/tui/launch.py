@@ -203,6 +203,8 @@ def _ctl_window_candidates(project: Path) -> list[tuple[str, str]]:
         m = _CTL_WINDOW_RE.match(name)
         if m is None:
             continue  # not a run window (e.g. the session's initial shell)
+        if not runs.is_valid_run_id(m.group(1)):
+            continue  # a foreign/mangled window name must not steer a run-dir path
         run_dir = runs.run_dir_for(project, m.group(1))
         if tag:
             if tag != mine:
