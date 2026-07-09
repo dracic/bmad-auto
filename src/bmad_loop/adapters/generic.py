@@ -603,7 +603,18 @@ class GenericDevAdapter(GenericAdapter):
                 return result
         except MultiplexerError:
             return result  # liveness unknowable: unknown is not dead
-        sr = self._synth_result(handle, spec, wait=False)
+        try:
+            sr = self._synth_result(handle, spec, wait=False)
+        except (OSError, UnicodeDecodeError):
+            # An unreadable artifact is not evidence a session finished. This
+            # hook runs right after run()'s finally-kill — the moment a spec the
+            # CLI was mid-write is truncated, possibly through a multi-byte UTF-8
+            # sequence — so a corrupt read is the *expected* fault here, not an
+            # anomaly. Keep the verdict: a best-effort rescue must never escalate
+            # a clean stall/timeout into an exception, which the engine does not
+            # contain per-task (it fails the whole run). UnicodeDecodeError is a
+            # ValueError, so both must be named.
+            return result
         if sr is None or sr.result_json is None or not sr.status_consistent:
             return result
         rj = sr.result_json

@@ -1096,6 +1096,10 @@ _DONE_SPEC = (
     "## Auto Run Result\n\nStatus: done\nImplemented.\n"
 )
 
+# The read-back decodes artifacts as UTF-8. `read_text(encoding="utf-8")` raises
+# UnicodeDecodeError (a ValueError, NOT an OSError) on these bytes.
+_BAD_UTF8 = b"\xff\xfe\x00\x01 not utf-8 \x80\x81"
+
 
 def _unvouched(status="stalled") -> SessionResult:
     return SessionResult(status=status, session_id="sess", transcript_path="/t.jsonl")
@@ -1207,6 +1211,73 @@ def test_post_kill_reconcile_ignores_pre_launch_artifact(tmp_path):
     handle = _dev_handle(launched_ns=spec_file.stat().st_mtime_ns + 1)
     original = _unvouched()
     assert adapter._post_kill_reconcile(handle, _dev_spec(tmp_path), original) is original
+
+
+# ---- corrupt / unreadable artifacts: the rescue must never make things worse.
+#
+# The hook is the one path guaranteed to read a file immediately after run()'s
+# finally-kill — precisely when a spec the CLI was mid-write is truncated, quite
+# possibly through a multi-byte UTF-8 sequence. An escaping exception is NOT
+# contained per-task: it unwinds past adapter.run() to the engine's broad
+# `except Exception`, which marks the whole RUN crashed and abandons every
+# remaining story. So a read fault keeps the original verdict, like every other
+# keep-verdict branch.
+
+
+def test_post_kill_reconcile_synth_read_error_keeps_stall(tmp_path, monkeypatch):
+    """The load-bearing guard, pinned independently of devcontract's internals:
+    whatever the read-back raises, the hook returns the verdict it was given.
+    OSError and UnicodeDecodeError share no base class below Exception."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    (impl / "spec-3-1-foo.md").write_text(_DONE_SPEC)
+    for exc in (OSError("I/O error"), UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")):
+
+        def raising(handle, spec, *, wait, _exc=exc):
+            raise _exc
+
+        monkeypatch.setattr(adapter, "_synth_result", raising)
+        original = _unvouched()
+        assert (
+            adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original) is original
+        )
+
+
+def test_post_kill_reconcile_non_utf8_scan_artifact_keeps_stall(tmp_path):
+    """A truncated/binary `spec-*.md` on the mtime-scan path: find_result_artifact
+    reads it to check for a terminal section, and its `except OSError` never
+    catches a decode error."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    (impl / "spec-3-1-foo.md").write_bytes(_BAD_UTF8)
+    original = _unvouched()
+    assert adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original) is original
+
+
+def test_post_kill_reconcile_non_utf8_fallback_marker_keeps_stall(tmp_path):
+    """The no-spec fallback marker is matched by NAME, so the finder hands it back
+    without ever reading it — the decode fault lands in synthesize_result instead.
+    This is the artifact an injected-workflow session writes, and a `timeout`
+    verdict reaches this hook having never read anything at all."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    (impl / "bmad-dev-auto-result-3-1-dev-1.md").write_bytes(_BAD_UTF8)
+    original = _unvouched("timeout")
+    assert adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original) is original
+
+
+def test_post_kill_reconcile_non_utf8_stories_spec_keeps_stall(tmp_path):
+    """Stories mode resolves the spec by id, not by scan; the same fault must
+    degrade to a kept verdict there too."""
+    adapter, _ = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    d = tmp_path / "epic" / "stories"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "1-slug.md").write_bytes(_BAD_UTF8)
+    original = _unvouched()
+    assert (
+        adapter._post_kill_reconcile(_dev_handle(), _stories_spec(tmp_path), original) is original
+    )
 
 
 def test_post_kill_reconcile_blank_frontmatter_prose_done_rescues(tmp_path):
