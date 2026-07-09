@@ -5,7 +5,7 @@ scripted fake `claude` wired in as a custom profile — no LLM, no cost, fully
 reproducible. The fake fakes both the CLI and its Stop hook (it writes the
 SessionStart/Stop event files itself), so no `bmad-loop init` is needed; it
 leaves the id-keyed story spec on disk and the `GenericDevAdapter` synthesizes
-the result from it (`_stories_result_json`, keyed on `BMAD_LOOP_SPEC_FOLDER`).
+the result from it (`_stories_synth_result`, keyed on `BMAD_LOOP_SPEC_FOLDER`).
 
 The fake routes on the story spec's frontmatter status, like `bmad-dev-auto`
 step-01: no spec / `ready-for-dev` → implement to `done`; `BMAD_LOOP_PLAN_HALT`

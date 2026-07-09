@@ -459,12 +459,18 @@ class GenericDevAdapter(GenericAdapter):
         return dirs
 
     def _result_json(self, handle: SessionHandle, spec: SessionSpec, *, wait: bool) -> dict | None:
+        sr = self._synth_result(handle, spec, wait=wait)
+        return sr.result_json if sr is not None else None
+
+    def _synth_result(
+        self, handle: SessionHandle, spec: SessionSpec, *, wait: bool
+    ) -> devcontract.SynthResult | None:
         # Stories mode (folder+id dispatch): the story spec lives at a
         # deterministic id-keyed path, so resolve it directly instead of the
         # mtime-floor scan. The engine exports BMAD_LOOP_SPEC_FOLDER only for
         # stories runs, so sprint/sweep runs keep the scan path below unchanged.
         if spec.env.get("BMAD_LOOP_SPEC_FOLDER"):
-            return self._stories_result_json(handle, spec, wait=wait)
+            return self._stories_synth_result(handle, spec, wait=wait)
         # Mirror the base _await_result poll: the skill's terminal spec may not be
         # flushed to disk the instant the Stop event fires, so briefly await it when
         # wait=True instead of reading once and mis-reporting a stall.
@@ -482,14 +488,14 @@ class GenericDevAdapter(GenericAdapter):
                     dw_ids = [tok for tok in (i.strip() for i in raw_dw_ids) if tok]
                     return devcontract.synthesize_result(
                         spec_path, story_key=story_key, dw_ids=dw_ids or None
-                    ).result_json
+                    )
             if not wait or time.monotonic() >= deadline:
                 return None
             time.sleep(RESULT_POLL_S)
 
-    def _stories_result_json(
+    def _stories_synth_result(
         self, handle: SessionHandle, spec: SessionSpec, *, wait: bool
-    ) -> dict | None:
+    ) -> devcontract.SynthResult | None:
         """Deterministic stories-mode read-back: resolve ``<spec-folder>/stories/
         <id>-*.md`` by id (never the mtime scan) and synthesize from it.
 
@@ -530,9 +536,9 @@ class GenericDevAdapter(GenericAdapter):
                 and self._written_this_session(state.path, handle.launched_ns)
             ):
                 try:
-                    result_json = devcontract.synthesize_result(
+                    sr = devcontract.synthesize_result(
                         state.path, story_key=story_key or None, plan_halt=plan_halt
-                    ).result_json
+                    )
                 except UnicodeDecodeError:
                     # A non-UTF-8 read is either a torn glimpse of a spec still
                     # being written (keep polling — a later pass sees the finished
@@ -541,9 +547,9 @@ class GenericDevAdapter(GenericAdapter):
                     # wedge (resolve_story_spec degrades an undecodable PRESENT
                     # spec to status "" → pause for resolve), never a crash of
                     # the read-back poll.
-                    result_json = None
-                if result_json is not None:
-                    return result_json
+                    sr = None
+                if sr is not None and sr.result_json is not None:
+                    return sr
             if not wait or time.monotonic() >= deadline:
                 return None
             time.sleep(RESULT_POLL_S)
