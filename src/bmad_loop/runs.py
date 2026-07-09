@@ -14,6 +14,7 @@ from . import devcontract, verify
 from .adapters.multiplexer import get_multiplexer
 from .journal import STATE_FILE, Journal, load_state, save_state
 from .model import PAUSE_ESCALATION, Phase
+from .platform_util import atomic_replace
 from .process_host import get_process_host
 
 RUNS_DIR = Path(".bmad-loop") / "runs"
@@ -357,15 +358,15 @@ def delete_run(run_dir: Path) -> None:
 
 def archive_run(project: Path, run_dir: Path) -> Path:
     """Compress a run dir into .bmad-loop/archive/<id>.tar.gz and remove the
-    original. The tarball is written to a temp path then os.replace'd into place
-    so a partial archive never appears. Callers enforce the live guard."""
+    original. The tarball is written to a temp path then atomically replaced into
+    place so a partial archive never appears. Callers enforce the live guard."""
     archive_dir = project / ARCHIVE_DIR
     archive_dir.mkdir(parents=True, exist_ok=True)
     dest = archive_dir / f"{run_dir.name}.tar.gz"
     tmp = dest.with_suffix(".tar.gz.tmp")
     with tarfile.open(tmp, "w:gz") as tar:
         tar.add(run_dir, arcname=run_dir.name)
-    os.replace(tmp, dest)
+    atomic_replace(tmp, dest)
     shutil.rmtree(run_dir)
     return dest
 

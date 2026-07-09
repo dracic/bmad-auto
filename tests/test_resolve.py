@@ -15,6 +15,7 @@ from bmad_loop.model import (
     SessionRecord,
     StoryTask,
 )
+from bmad_loop.platform_util import safe_segment
 
 SPEC = """\
 ---
@@ -174,6 +175,20 @@ def test_build_context_restore_supported_signal(tmp_path):
     task.worktree_path = str(tmp_path / "wt")  # recorded worktree execution
     path = resolve.build_context(state, run_dir, key)
     assert json.loads(path.read_text(encoding="utf-8"))["restore_supported"] is False
+
+
+def test_build_context_sanitizes_dirty_story_key(tmp_path):
+    """A story key with Windows-illegal chars lands in a sanitized directory,
+    while the key itself stays raw inside the context payload (it is data)."""
+    run_dir, state, _ = _escalated_run(tmp_path)
+    dirty = "6-4:cli?list"
+    seg = safe_segment(dirty)
+    assert seg != dirty
+    path = resolve.build_context(state, run_dir, dirty)
+    assert path.parent.name == seg
+    ctx = json.loads(path.read_text(encoding="utf-8"))
+    assert ctx["story_key"] == dirty
+    assert ctx["resolution_path"].endswith(f"resolve/{seg}/resolution.json")
 
 
 # ----------------------------------------------------------- rearm_escalation

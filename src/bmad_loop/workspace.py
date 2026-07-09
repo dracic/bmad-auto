@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import verify
 from .bmadconfig import ProjectPaths
+from .platform_util import safe_segment
 
 # Per-unit worktrees live under the run dir (.bmad-loop/runs/<run_id>/worktrees/),
 # which `bmad-loop init` already gitignores — so unit checkouts never show up as
@@ -85,7 +86,7 @@ def open_unit_workspace(
     keeps the commits earlier units already landed on it.
     """
     branch = unit_branch_name(run_id, unit_key, branch_per)
-    wt = (unit_worktrees_dir(run_dir) / unit_key).resolve()
+    wt = (unit_worktrees_dir(run_dir) / safe_segment(unit_key)).resolve()
     wt.parent.mkdir(parents=True, exist_ok=True)
     if verify.branch_exists(repo_root, branch):
         verify.worktree_add(repo_root, wt, branch, create=False)
@@ -134,7 +135,7 @@ def close_unit_workspace(
         except verify.GitError:
             diff = ""
         if diff:
-            patch = run_dir / "failed" / unit_key / "changes.patch"
+            patch = run_dir / "failed" / safe_segment(unit_key) / "changes.patch"
             patch.parent.mkdir(parents=True, exist_ok=True)
             patch.write_text(diff, encoding="utf-8")
         if keep_failed:

@@ -39,6 +39,7 @@ from .model import (
     SessionRecord,
     StoryTask,
 )
+from .platform_util import safe_segment
 from .plugins import HookBus, HookContext, PluginRegistry
 from .policy import Policy
 from .runs import kill_session
@@ -132,6 +133,15 @@ stalled and its work may be discarded."""
 def _setup_mcp_agent_id(profile_name: str) -> str:
     """Map a CLI profile name to its Unity-MCP `setup-mcp` agent id."""
     return _SETUP_MCP_AGENT_IDS.get(profile_name, profile_name)
+
+
+def _session_task_id(story_key: str, part: str, seq: int) -> str:
+    """Single composition point for session task ids. Sanitize the whole
+    composition, not the parts: two individually capped parts can still compose
+    past a Windows filename segment limit, and ``safe_segment``'s digest suffix
+    differs between the two orders. ``_resumable_session``'s resume match must
+    be byte-identical to what ``_run_session`` stored, so both MUST call this."""
+    return safe_segment(f"{story_key}-{part}-{seq}")
 
 
 class Engine:
@@ -1175,7 +1185,7 @@ class Engine:
             role, seq = "review", task.review_cycle
         else:
             return None
-        task_id = f"{task.story_key}-{role}-{seq}"
+        task_id = _session_task_id(task.story_key, role, seq)
         for record in reversed(task.sessions):
             if record.task_id != task_id:
                 continue
@@ -1992,7 +2002,7 @@ class Engine:
     ) -> SessionResult:
         # ``label`` names a non-standard session (a plugin-provided workflow) so
         # its task_id stays distinct from the role's own dev/review attempts.
-        task_id = f"{task.story_key}-{label or role}-{seq}"
+        task_id = _session_task_id(task.story_key, label if label else role, seq)
         adapter = self.adapters[role]
         cfg = self.policy.adapter.resolved(role)
         env = {
@@ -2171,7 +2181,7 @@ class Engine:
     def _write_feedback(self, task: StoryTask, reason: str) -> Path:
         """Persist a verification failure where the next session can read it —
         deterministic evidence must reach the LLM, not just the journal."""
-        path = self.run_dir / "feedback" / f"{task.story_key}-{len(task.sessions)}.md"
+        path = self.run_dir / "feedback" / f"{safe_segment(task.story_key)}-{len(task.sessions)}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             f"# Verification feedback: {task.story_key}\n\n"
@@ -2333,7 +2343,7 @@ class Engine:
         spec_path = Path(task.spec_file)
         if not spec_path.is_file():
             return
-        dest = self.run_dir / "deferred" / task.story_key
+        dest = self.run_dir / "deferred" / safe_segment(task.story_key)
         dest.mkdir(parents=True, exist_ok=True)
         shutil.move(str(spec_path), str(dest / spec_path.name))
         self.journal.append(

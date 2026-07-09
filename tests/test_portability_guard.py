@@ -55,6 +55,13 @@ KILL_PROBE_ALLOW = {
     "process_host.py",
 }
 
+# Broader than the signal-0 probe: *any* `os.kill(` — a real signal send is just as
+# destructive-on-Windows as the probe form. Only the ProcessHost may call it directly;
+# everything else routes through the seam (terminate / force_kill / is_alive).
+OS_KILL_ALLOW = {
+    "process_host.py",
+}
+
 # The two sanctioned `shell=True` spots: operator-authored command strings whose
 # cmd/PowerShell port is an explicit out-of-scope follow-up.
 SHELL_ALLOW = {
@@ -158,6 +165,17 @@ def _scan():
             ):
                 findings.append(("killprobe", rel, node.lineno, line_at(node.lineno)))
 
+            # os.kill(...) in any form — every signal send maps to a destructive
+            # TerminateProcess on Windows, so confine the call to the ProcessHost.
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "kill"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "os"
+            ):
+                findings.append(("oskill", rel, node.lineno, line_at(node.lineno)))
+
             # start_new_session=True as a call kwarg
             if (
                 isinstance(node, ast.keyword)
@@ -243,6 +261,20 @@ def test_pid_existence_probe_only_in_liveness_helpers():
         elif ACK not in txt:
             bad.append(f"  {rel}:{ln}: {txt.strip()}  (missing '{ACK}' ack)")
     assert not bad, "os.kill(pid, 0) outside liveness helpers:\n" + "\n".join(bad)
+
+
+def test_os_kill_only_in_process_host():
+    """Any reachable ``os.kill`` maps to a destructive TerminateProcess on Windows —
+    confine it to ``process_host.py``. Detects the literal ``os.kill(`` form only;
+    import aliases and assigned aliases are deliberately not tracked — this is a
+    review tripwire, not a sandbox. Other call sites route through the ProcessHost
+    seam (``terminate`` / ``force_kill`` / ``is_alive``)."""
+    offenders = [(rel, ln, txt) for _, rel, ln, txt in _of("oskill") if rel not in OS_KILL_ALLOW]
+    assert (
+        not offenders
+    ), "os.kill( outside process_host.py — route it through the ProcessHost seam:\n" + "\n".join(
+        f"  {rel}:{ln}: {txt.strip()}" for rel, ln, txt in offenders
+    )
 
 
 def test_start_new_session_only_in_detach_helpers():

@@ -22,6 +22,7 @@ from . import deferredwork, gates, verify
 from .engine import Engine
 from .escalation import critical_escalations
 from .model import Phase, StoryTask
+from .platform_util import atomic_replace
 from .statemachine import advance
 from .workspace import discard_worktree
 
@@ -793,7 +794,7 @@ class SweepEngine(Engine):
         if seeded:
             tmp = decisions_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(answers, indent=2), encoding="utf-8")
-            tmp.replace(decisions_path)
+            atomic_replace(tmp, decisions_path)
         pending = [d for d in plan.decisions if d.id not in answers]
         answered_interactively = False
         if not self.prompting:
@@ -831,7 +832,7 @@ class SweepEngine(Engine):
                 }
                 tmp = decisions_path.with_suffix(".tmp")
                 tmp.write_text(json.dumps(answers, indent=2), encoding="utf-8")
-                tmp.replace(decisions_path)
+                atomic_replace(tmp, decisions_path)
                 self.journal.append(
                     "decision-answered",
                     dw_id=decision.id,

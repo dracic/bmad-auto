@@ -176,11 +176,20 @@ def _force_kill_lingering(worktree: Path) -> int:
             break
         time.sleep(0.5)
     for pid in pids:
-        if host.is_alive(pid) and ident[pid] is not None and host.identity(pid) == ident[pid]:
-            try:
-                host.force_kill(pid)
-            except OSError:
-                pass
+        if not host.is_alive(pid):
+            continue
+        if ident[pid] is None or host.identity(pid) != ident[pid]:
+            print(
+                f"unity_teardown: pid {pid} survived terminate but its identity is "
+                "missing or changed since teardown began; skipping force-kill to "
+                "avoid hitting a reused pid",
+                file=sys.stderr,
+            )
+            continue
+        try:
+            host.force_kill(pid)
+        except OSError:
+            pass
     return len(pids)
 
 
