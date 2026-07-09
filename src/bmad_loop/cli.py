@@ -897,6 +897,36 @@ def _resolve_restore_patch(
     return str(patch), None
 
 
+def _echo_stale_restore(run_dir: Path, seen_entries: int) -> None:
+    """Surface the `stale-restore-*` events a just-completed re-arm journaled about
+    the restore attempt it abandoned (runs._stale_restore_residue). The commits
+    variant is the one the human must act on — nothing else will."""
+    for entry in Journal(run_dir).entries()[seen_entries:]:
+        kind = entry.get("kind", "")
+        if kind == "stale-restore-excluded":
+            files = ", ".join(entry.get("files", []))
+            print(
+                f"note: excluded the abandoned restore's new files from the "
+                f"re-drive baseline: {files}",
+                file=sys.stderr,
+            )
+        elif kind == "stale-restore-unparseable":
+            print(
+                f"warning: could not read the abandoned restore patch "
+                f"({entry.get('patch', '?')}) — its new files may be swept into the "
+                "next commit; check `git status` before resuming",
+                file=sys.stderr,
+            )
+        elif kind == "stale-restore-commits":
+            n = len(entry.get("commits", []))
+            print(
+                f"warning: {n} commit(s) sit below the re-drive's new baseline "
+                f"({entry.get('old_baseline', '?')[:12]}..) — if any came from the "
+                "abandoned attempt rather than your resolve, revert them now",
+                file=sys.stderr,
+            )
+
+
 def cmd_resolve(args: argparse.Namespace) -> int:
     from .model import PAUSE_ESCALATION, Phase
 
@@ -993,11 +1023,13 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     if args.resume is None and not _confirm(f"re-arm {story_key} and resume run {args.run_id}?"):
         print("cancelled — run is still paused at the escalation")
         return 0
+    seen_entries = len(Journal(run_dir).entries())
     try:
         runs.rearm_escalation(run_dir, story_key, restore_patch=restore_patch)
     except runs.RearmError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    _echo_stale_restore(run_dir, seen_entries)
     print(
         f"re-armed {story_key}"
         + (" (restoring the attempted change for review)" if restore_patch else "")

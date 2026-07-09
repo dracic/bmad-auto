@@ -7,6 +7,7 @@ import sys
 import tarfile
 
 import pytest
+from conftest import git
 
 from bmad_loop import runs
 from bmad_loop.adapters import tmux_base
@@ -530,11 +531,23 @@ def test_delete_run(tmp_path):
     assert not run_dir.exists()
 
 
-def _escalated_run(tmp_path, spec_text, *, restore_patch_stale=None):
+def _escalated_run(tmp_path, spec_text, *, restore_patch_stale=None, git_project=False):
+    """`git_project=True` makes `state.project` a real repo with the spec committed,
+    so rearm's baseline snapshot refresh actually runs — in a bare tmp_path its
+    best-effort `except` swallows every git call and the refresh silently no-ops."""
     from bmad_loop.model import PAUSE_ESCALATION, Phase, StoryTask
 
     spec = tmp_path / "spec.md"
     spec.write_text(spec_text, encoding="utf-8")
+    baseline = None
+    if git_project:
+        (tmp_path / ".gitignore").write_text(".bmad-loop/\n")  # keep run state out of the snapshot
+        git(tmp_path, "init", "-q", "-b", "main")
+        git(tmp_path, "config", "user.email", "test@test")
+        git(tmp_path, "config", "user.name", "test")
+        git(tmp_path, "add", "-A")
+        git(tmp_path, "commit", "-q", "-m", "initial")
+        baseline = git(tmp_path, "rev-parse", "HEAD")
     task = StoryTask(
         story_key="1-1-a",
         epic=1,
@@ -542,6 +555,7 @@ def _escalated_run(tmp_path, spec_text, *, restore_patch_stale=None):
         attempt=2,
         spec_file=str(spec),
         restore_patch=restore_patch_stale,
+        baseline_commit=baseline,
     )
     run_dir = _make_state_run(
         tmp_path,
@@ -591,6 +605,121 @@ def test_rearm_plain_mode_sets_ready_for_dev_and_clears_stale_latch(tmp_path):
     assert "status: ready-for-dev" in spec.read_text()
     entry = [e for e in Journal(run_dir).entries() if e["kind"] == "story-escalation-resolved"][-1]
     assert entry["restore"] is False
+
+
+# --------------------------------------------- #90: abandoned restore-latch residue
+
+
+def _stale_restore_tree(tmp_path, *, latch="artifacts/attempt.patch"):
+    """An escalation whose latched restore already applied: `newfile.txt` is the
+    patch's untracked creation, `human.txt` is the resolve session's own file."""
+    run_dir, spec = _escalated_run(
+        tmp_path, _SPEC_WITH_ARR, restore_patch_stale=latch, git_project=True
+    )
+    patch = tmp_path / "artifacts" / "attempt.patch"
+    patch.parent.mkdir(parents=True, exist_ok=True)
+    patch.write_text(
+        "diff --git a/newfile.txt b/newfile.txt\n"
+        "new file mode 100644\n"
+        "index 0000000..1111111\n"
+        "--- /dev/null\n"
+        "+++ b/newfile.txt\n"
+        "@@ -0,0 +1 @@\n"
+        "+from the abandoned attempt\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "newfile.txt").write_text("from the abandoned attempt\n")  # the applied residue
+    (tmp_path / "human.txt").write_text("from the resolve session\n")
+    return run_dir, spec, patch
+
+
+def _kinds(run_dir, prefix="stale-restore-"):
+    from bmad_loop.journal import Journal
+
+    return [e for e in Journal(run_dir).entries() if e["kind"].startswith(prefix)]
+
+
+def test_rearm_excludes_stale_restore_residue_from_baseline_snapshot(tmp_path):
+    """The abandoned attempt's applied new files must NOT be blessed as
+    pre-existing, or finalize_commit's `add -A` sweeps them into the corrected
+    story's commit. The resolve session's own untracked file still is."""
+    run_dir, _spec, patch = _stale_restore_tree(tmp_path)
+
+    runs.rearm_escalation(run_dir)  # from-scratch re-arm replaces the latch
+
+    task = load_state(run_dir).tasks["1-1-a"]
+    assert "human.txt" in task.baseline_untracked
+    assert "newfile.txt" not in task.baseline_untracked
+    assert (tmp_path / "newfile.txt").exists()  # rearm deletes nothing; the re-drive's reset does
+    excluded = _kinds(run_dir, "stale-restore-excluded")
+    assert len(excluded) == 1
+    assert excluded[0]["files"] == ["newfile.txt"]
+    assert excluded[0]["patch"] == str(patch)
+
+
+def test_rearm_re_latching_the_same_patch_still_excludes_its_residue(tmp_path):
+    """Re-arming a restore onto the same patch: the first application's files are
+    still residue (and `git apply` would otherwise fail with 'already exists')."""
+    run_dir, _spec, _patch = _stale_restore_tree(tmp_path)
+
+    runs.rearm_escalation(run_dir, restore_patch="artifacts/attempt.patch")
+
+    task = load_state(run_dir).tasks["1-1-a"]
+    assert task.restore_patch == "artifacts/attempt.patch"
+    assert "human.txt" in task.baseline_untracked
+    assert "newfile.txt" not in task.baseline_untracked
+    assert _kinds(run_dir, "stale-restore-excluded")
+
+
+def test_rearm_missing_stale_patch_degrades_loudly_without_raising(tmp_path):
+    """A deleted patch file must never wedge resolve: journal the degrade and fall
+    back to the pre-#90 snapshot (everything untracked counts as pre-existing)."""
+    run_dir, _spec, patch = _stale_restore_tree(tmp_path)
+    patch.unlink()
+    (tmp_path / "committed.txt").write_text("from the escalated attempt\n")
+    git(tmp_path, "add", "committed.txt")
+    git(tmp_path, "commit", "-q", "-m", "attempt commit")
+
+    runs.rearm_escalation(run_dir)  # must not raise RearmError
+
+    task = load_state(run_dir).tasks["1-1-a"]
+    assert {"human.txt", "newfile.txt"} <= set(task.baseline_untracked)  # full snapshot
+    unparseable = _kinds(run_dir, "stale-restore-unparseable")
+    assert len(unparseable) == 1
+    assert "FileNotFoundError" in unparseable[0]["error"]
+    assert not _kinds(run_dir, "stale-restore-excluded")
+    # the unreadable patch must not also cost the human the commits warning
+    assert _kinds(run_dir, "stale-restore-commits")
+
+
+def test_rearm_without_a_stale_latch_journals_no_stale_restore_events(tmp_path):
+    run_dir, _spec = _escalated_run(tmp_path, _SPEC_WITH_ARR, git_project=True)
+    (tmp_path / "human.txt").write_text("from the resolve session\n")
+
+    runs.rearm_escalation(run_dir, restore_patch="artifacts/attempt.patch")
+
+    assert "human.txt" in load_state(run_dir).tasks["1-1-a"].baseline_untracked
+    assert _kinds(run_dir) == []
+
+
+def test_rearm_warns_about_commits_below_the_refreshed_baseline(tmp_path):
+    """The worse variant: commits made above the OLD baseline become the re-drive's
+    permanent starting point. Warn-only — a mechanical revert would claw back the
+    resolve session's own blessed commits, which live in the same range."""
+    run_dir, _spec, _patch = _stale_restore_tree(tmp_path)
+    (tmp_path / "committed.txt").write_text("from the escalated attempt\n")
+    git(tmp_path, "add", "committed.txt")
+    git(tmp_path, "commit", "-q", "-m", "attempt commit")
+    old_baseline = load_state(run_dir).tasks["1-1-a"].baseline_commit
+
+    runs.rearm_escalation(run_dir)
+
+    task = load_state(run_dir).tasks["1-1-a"]
+    assert task.baseline_commit != old_baseline  # baseline advanced past the commit
+    warned = _kinds(run_dir, "stale-restore-commits")
+    assert len(warned) == 1
+    assert warned[0]["old_baseline"] == old_baseline
+    assert warned[0]["commits"] == [git(tmp_path, "rev-parse", "HEAD")]
 
 
 def test_archive_run(tmp_path):

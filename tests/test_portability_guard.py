@@ -31,13 +31,16 @@ ACK = "portability:"
 # *are* the sanctioned spot (their module docstrings say so).
 TMUX_BACKENDS = {"adapters/tmux_base.py", "adapters/tmux_backend.py"}
 
-# Platform-guarded files that may name a bare POSIX path, each on a line carrying
-# a `# portability:` ack (and guarded by a sys.platform branch). process_host.py's
-# Linux identity reader walks `/proc/<pid>/stat`.
+# Files that may name a bare POSIX path, each on a line carrying a `# portability:`
+# ack. process_host.py's Linux identity reader walks `/proc/<pid>/stat` behind a
+# sys.platform branch; the Unity teardown scripts are POSIX-only. verify.py is the
+# one non-platform case: git's *diff format* spells an absent file `/dev/null` on
+# every platform, so `patch_new_files` compares against it as a protocol token.
 PATH_ALLOW = {
     "data/plugins/unity/unity_cleanup.py",
     "data/plugins/unity/unity_teardown.py",
     "process_host.py",
+    "verify.py",
 }
 
 # The two detach helpers that legitimately request POSIX `start_new_session`.
