@@ -566,6 +566,59 @@ class GenericDevAdapter(GenericAdapter):
         except OSError:
             return False
 
+    def _post_kill_reconcile(
+        self, handle: SessionHandle, spec: SessionSpec, result: SessionResult
+    ) -> SessionResult:
+        """Rescue a finished-but-unvouched session once its window is dead (#61).
+
+        A session that wrote its terminal spec but whose final Stop event was
+        lost ends ``stalled`` (nudge-unresponsive under a live window, where
+        the artifact is advisory — the #48/#53 invariant), or ``timeout`` when
+        no hook event ever arrived (hook misconfig, events-dir write failure —
+        that path never arms the stall grace at all). Both verdicts discard
+        the on-disk result solely because the window was alive to distrust;
+        ``run()``'s kill has since settled that the way window death already
+        vouches for the crash path. So: re-probe, and only on a provably dead
+        window re-run the same read-back a delivered Stop would have run.
+
+        The gate is deliberately stricter than the crash path's
+        accept-any-terminal: the synthesis must be self-consistent
+        (``status_consistent`` — "no active disagreement"; a blank frontmatter
+        with prose ``done`` passes, exactly what a delivered Stop would have
+        synthesized, and the engine's reconcile repairs the lag) and a
+        *successful* terminal — ``done``, or the stories plan-halt leg (a
+        deliberate widening of #61's literal done-only wording). A ``blocked``
+        terminal is never rescued: it carries no finished work, and
+        blocked-plus-nudge-unresponsive is weak evidence of anything. Every
+        rescue still runs the engine's full deterministic verify downstream,
+        so a bogus upgrade degrades into an ordinary verify-failed retry. A
+        cap-exhausted injected-workflow stall whose marker landed before the
+        kill is rescued by the same trust model."""
+        if result.status not in ("stalled", "timeout") or result.result_json is not None:
+            return result
+        try:
+            if self._window_alive(handle):
+                # The kill silently failed (best-effort teardown): the window
+                # is still alive, so the live-window invariant still applies.
+                return result
+        except MultiplexerError:
+            return result  # liveness unknowable: unknown is not dead
+        sr = self._synth_result(handle, spec, wait=False)
+        if sr is None or sr.result_json is None or not sr.status_consistent:
+            return result
+        rj = sr.result_json
+        if rj.get("escalations") or not (
+            rj.get("status") == devcontract.DONE or rj.get("plan_halt") is True
+        ):
+            return result
+        rj["post_kill_reconciled"] = True
+        return SessionResult(
+            status="completed",
+            result_json=rj,
+            session_id=result.session_id,
+            transcript_path=result.transcript_path,
+        )
+
 
 # Back-compat alias: the adapter was ``GenericTmuxAdapter`` before tmux moved
 # behind the multiplexer seam. Keeps existing imports stable.

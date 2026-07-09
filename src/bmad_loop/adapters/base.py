@@ -91,6 +91,20 @@ class CodingCLIAdapter(ABC):
     def run(self, spec: SessionSpec) -> SessionResult:
         handle = self.start_session(spec)
         try:
-            return self.wait_for_completion(handle, spec)
+            result = self.wait_for_completion(handle, spec)
         finally:
             self.kill(handle)
+        return self._post_kill_reconcile(handle, spec, result)
+
+    def _post_kill_reconcile(
+        self, handle: SessionHandle, spec: SessionSpec, result: SessionResult
+    ) -> SessionResult:
+        """Last-chance reconcile after the session's window has been torn down.
+
+        Runs only on the normal return path — a raising wait_for_completion
+        still kills the window and propagates without reaching this hook.
+        Base behavior: identity. Adapters whose completion trust keys on
+        window death (see GenericDevAdapter) may re-inspect on-disk state here,
+        now that the kill has settled the liveness question a live-window
+        verdict had to leave open."""
+        return result
