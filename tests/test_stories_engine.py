@@ -1050,7 +1050,12 @@ def test_make_engine_persists_the_launching_scope_for_resume(project):
 
     resumed, _ = resume_engine(project, engine, [])  # no manual seeding anywhere
     assert resumed.state.max_stories == 2
-    # StoriesEngine parks `--story` in its own id filter (a flat list has no E-S refs)
+    # construction must not clobber the durable scope: StoriesEngine nulls the
+    # story_filter/epic_filter *constructor kwargs* (a flat list has no E-S refs),
+    # and the base Engine parks them on itself — never back onto RunState.
+    assert resumed.state.story_filter == "1"
+    assert resumed.state.epic_filter == 7
+    # `--story` instead drives StoriesEngine's own id filter, scanned at pick time
     assert resumed._story_id_filter == "1"
 
 
