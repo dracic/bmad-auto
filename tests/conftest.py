@@ -6,6 +6,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,8 @@ import yaml
 
 from bmad_loop.adapters.base import SessionResult, SessionSpec
 from bmad_loop.bmadconfig import ProjectPaths
+from bmad_loop.journal import save_state
+from bmad_loop.model import PAUSE_ESCALATION, Phase, RunState, SessionRecord, StoryTask
 from bmad_loop.verify import rev_parse_head
 
 # The suite reads/writes UTF-8 files (specs, journals, JSON, reports). Windows'
@@ -155,19 +158,51 @@ def install_bmad_config(paths: ProjectPaths) -> None:
     )
 
 
+def _write_skill_stubs(skills: Path, catalog: dict) -> None:
+    """Stub every skill in `catalog` (an install.py {skill: marker_files} map) under
+    `skills`. Reading the catalog instead of restating it means a newly required
+    skill or marker file fails the scaffolds loudly rather than drifting."""
+    for skill, markers in catalog.items():
+        d = skills / skill
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(f"# {skill}\n", encoding="utf-8")
+        for marker in markers:
+            (d / marker).write_text("x\n", encoding="utf-8")
+
+
+def install_dev_base_skills(root: Path, tree: str = ".claude/skills", *, folder_id: bool) -> Path:
+    """Lay down stubs of the upstream skills the orchestrator drives on every dev run
+    (`install.DEV_BASE_SKILLS`: bmad-dev-auto + the review hunters) under
+    ``root/tree``, so the run-start preflight (`install.missing_base_skills`) passes.
+
+    ``folder_id`` also writes bmad-dev-auto's step-01 carrying the dispatch marker
+    `install.missing_stories_support` content-probes for — stories mode needs a newer
+    bmad-dev-auto than file existence alone can prove. Returns the skills tree root."""
+    from bmad_loop.install import (
+        DEV_BASE_SKILLS,
+        STORIES_PROBE_FILE,
+        STORIES_PROBE_SKILL,
+        STORIES_PROBE_TEXT,
+    )
+
+    skills = Path(root) / tree
+    _write_skill_stubs(skills, DEV_BASE_SKILLS)
+    if folder_id:
+        (skills / STORIES_PROBE_SKILL / STORIES_PROBE_FILE).write_text(
+            f"This is a **{STORIES_PROBE_TEXT}** router.\n", encoding="utf-8"
+        )
+    return skills
+
+
 def install_base_skills(paths: ProjectPaths, trees=(".claude/skills", ".agents/skills")) -> None:
-    """Lay down stubs of the non-bundled upstream skills the orchestrator drives
-    (bmad-dev-auto + the review hunters) so the run-start preflight
-    (`install.missing_base_skills`) passes."""
+    """Stub every non-bundled upstream skill (`install.BASE_SKILLS` — a superset of
+    DEV_BASE_SKILLS that also covers what a worktree mount must copy) in each of a
+    sandbox project's active CLI skill trees. Sprint mode drives any bmad-dev-auto,
+    so no folder+id probe is written."""
     from bmad_loop.install import BASE_SKILLS
 
     for tree in trees:
-        for skill, markers in BASE_SKILLS.items():
-            d = paths.project / tree / skill
-            d.mkdir(parents=True, exist_ok=True)
-            (d / "SKILL.md").write_text(f"# {skill}\n", encoding="utf-8")
-            for marker in markers:
-                (d / marker).write_text("x\n", encoding="utf-8")
+        _write_skill_stubs(paths.project / tree, BASE_SKILLS)
 
 
 def write_sprint(paths: ProjectPaths, statuses: dict[str, str]) -> None:
@@ -212,6 +247,8 @@ def dev_effect(
     final_status: str = "done",
     followup_review: bool = True,
     prose_status: str | None = None,
+    seen: list[str] | None = None,
+    write_src: bool = True,
 ):
     """Simulate a successful bmad-dev-auto session: it self-finalizes the spec
     (no in-review handoff — always straight to ``done``) but never touches the
@@ -223,12 +260,21 @@ def dev_effect(
     ``review.trigger = "recommended"``; set False to exercise the skip path.
     ``prose_status`` appends a terminal ``## Auto Run Result`` block with that
     Status line — pair it with a non-terminal ``final_status`` to reproduce the
-    skill leaving frontmatter behind its prose (the reconcile path)."""
+    skill leaving frontmatter behind its prose (the reconcile path).
+
+    ``seen``, when given, collects `src.txt` as the session found it on entry — the
+    patch-restore tests assert the re-driven session ran against the RESTORED diff.
+    ``write_src=False`` then keeps the session from appending its own line, so what
+    lands in the tree is exactly what the restore laid down (the applied patch is
+    the session's proof of work; a second edit would muddy the assertion)."""
 
     def effect(spec: SessionSpec) -> SessionResult:
         baseline = rev_parse_head(paths.project)
         source = paths.project / "src.txt"
-        source.write_text(source.read_text() + f"change for {story_key}\n")
+        if seen is not None:
+            seen.append(source.read_text())
+        if write_src:
+            source.write_text(source.read_text() + f"change for {story_key}\n")
         sp = spec_path(paths, story_key)
         write_spec(sp, final_status, baseline, prose_status=prose_status)
         # deliberately NO set_sprint: the dev skill does not write sprint-status
@@ -466,3 +512,90 @@ def bundle_dev_escalates(paths: ProjectPaths, name: str, dw_ids, detail: str = "
         )
 
     return effect
+
+
+# --------------------------------------------------------- escalated-run scaffolds
+
+
+@dataclass
+class EscalatedRun:
+    """What `escalated_run` built, so each caller can unpack only what it asserts on."""
+
+    run_dir: Path
+    state: RunState
+    task: StoryTask
+
+
+def escalated_run(
+    project: Path,
+    run_id: str = "r1",
+    *,
+    story_key: str = "s1",
+    epic: int = 1,
+    attempt: int = 1,
+    review_cycle: int = 0,
+    baseline_commit: str | None = None,
+    started_at: str = "now",
+    paused_reason: str = "CRITICAL escalation",
+    source: str = "sprint-status",
+    spec_file: str | None = None,
+    restore_patch: str | None = None,
+    sentinel_kind: str = "",
+    worktree_path: str = "",
+    with_session: bool = False,
+    git_project: bool = False,
+) -> EscalatedRun:
+    """A saved RunState paused at a CRITICAL escalation, with one ESCALATED task —
+    the shared shape behind test_runs / test_resolve / test_cli, whose three local
+    copies had drifted into different defaults, different return tuples, and one
+    unique kwarg each. Parameterized as a superset rather than lowest-common-
+    denominator: every field a caller relied on is still reachable, so no test's
+    fixture-specific assertion is weakened by the dedup.
+
+    ``with_session`` appends the completed review SessionRecord the resolve-context
+    builder reads. ``git_project`` makes ``state.project`` a REAL repo (spec files
+    already written are committed, run state is gitignored) so `rearm_escalation`'s
+    baseline snapshot refresh actually runs and `baseline_commit` defaults to HEAD —
+    in a bare tmp_path its best-effort `except` swallows every git call and the
+    refresh silently no-ops.
+    """
+    project = Path(project)
+    if git_project:
+        (project / ".gitignore").write_text(".bmad-loop/\n")  # keep run state out of the snapshot
+        git(project, "init", "-q", "-b", "main")
+        git(project, "config", "user.email", "test@test")
+        git(project, "config", "user.name", "test")
+        git(project, "add", "-A")
+        git(project, "commit", "-q", "-m", "initial")
+        if baseline_commit is None:
+            baseline_commit = git(project, "rev-parse", "HEAD")
+
+    task = StoryTask(
+        story_key=story_key,
+        epic=epic,
+        phase=Phase.ESCALATED,
+        attempt=attempt,
+        review_cycle=review_cycle,
+        baseline_commit=baseline_commit,
+        spec_file=spec_file,
+        restore_patch=restore_patch,
+        sentinel_kind=sentinel_kind,
+        worktree_path=worktree_path,
+    )
+    if with_session:
+        task.sessions.append(
+            SessionRecord(task_id=f"{story_key}-review-1", role="review", status="completed")
+        )
+    state = RunState(
+        run_id=run_id,
+        project=str(project),
+        started_at=started_at,
+        paused_reason=paused_reason,
+        paused_stage=PAUSE_ESCALATION,
+        paused_story_key=story_key,
+        tasks={story_key: task},
+        source=source,
+    )
+    run_dir = project / ".bmad-loop" / "runs" / run_id
+    save_state(run_dir, state)
+    return EscalatedRun(run_dir=run_dir, state=state, task=task)

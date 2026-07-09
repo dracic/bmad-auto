@@ -1048,8 +1048,7 @@ def verify_dev_exclude_relpaths(
     status flip on the session's own spec count as real work."""
     candidates: list[Path] = [paths.sprint_status, spec_path]
     if restore_patch:
-        p = Path(restore_patch)
-        candidates.append(p if p.is_absolute() else paths.project / p)
+        candidates.append(resolve_restore_path(restore_patch, paths.project))
     out: list[str] = []
     project = paths.project.resolve()
     for path in candidates:
@@ -1096,15 +1095,23 @@ def _verify_shared_gates(
     paths: ProjectPaths,
     *,
     expected_status: str,
-    proof_exclude: tuple[str, ...] | None,
+    extra_exclude: tuple[str, ...] | None,
 ) -> VerifyOutcome | None:
     """The workflow-tag, expected-status, baseline-match, and proof-of-work gates
     shared verbatim by :func:`verify_dev`, :func:`verify_dev_bundle`, and
     :func:`verify_dev_stories` — factored out so the sprint-mode and stories-mode
     gates can't silently drift. Reads frontmatter once (callers must not re-read
     it). Returns a failing :class:`VerifyOutcome`, or ``None`` when every gate
-    passes and the caller may run its mode-specific tail. ``proof_exclude=None``
-    skips the proof-of-work gate (a plan-halt leg produced only its own spec)."""
+    passes and the caller may run its mode-specific tail.
+
+    The proof-of-work exclude is derived here from the `task` this gate already
+    receives (`verify_dev_exclude_relpaths`, which needs the latched restore patch);
+    ``extra_exclude`` carries only what a mode adds on top — ``()`` for sprint and
+    bundle, the story record + manifest for stories. Threading the restore patch in
+    from three call sites instead left a default-None foot-gun for a future fourth
+    mode, which would silently let a restore re-drive pass proof-of-work on the
+    patch file's mere presence. ``extra_exclude=None`` still skips the gate outright
+    (a plan-halt leg produced only its own spec)."""
     workflow = rj.get("workflow")
     if workflow != DEV_WORKFLOW:
         return VerifyOutcome.retry(
@@ -1132,12 +1139,13 @@ def _verify_shared_gates(
                 f"orchestrator-recorded baseline {task.baseline_commit[:12]}"
             )
 
-    if proof_exclude is not None and task.baseline_commit:
+    if extra_exclude is not None and task.baseline_commit:
+        exclude = verify_dev_exclude_relpaths(paths, spec_path, task.restore_patch) + extra_exclude
         try:
             if not has_changes_since(
                 paths.project,
                 task.baseline_commit,
-                exclude=proof_exclude,
+                exclude=exclude,
                 baseline_untracked=task.baseline_untracked,
             ):
                 return VerifyOutcome.retry("no changes in worktree since baseline commit")
@@ -1178,7 +1186,7 @@ def verify_dev(
         task,
         paths,
         expected_status="in-review" if review_enabled else "done",
-        proof_exclude=verify_dev_exclude_relpaths(paths, spec_path, task.restore_patch),
+        extra_exclude=(),
     )
     if gate is not None:
         return gate
@@ -1221,7 +1229,7 @@ def verify_dev_bundle(
         task,
         paths,
         expected_status="in-review" if review_enabled else "done",
-        proof_exclude=verify_dev_exclude_relpaths(paths, spec_path, task.restore_patch),
+        extra_exclude=(),
     )
     if gate is not None:
         return gate
@@ -1319,24 +1327,18 @@ def verify_dev_stories(
         expected = "in-review" if review_enabled else "done"
 
     # A plan-halt leg produced only its own spec (the plan), which proof-of-work
-    # already excludes; skip it (proof_exclude=None) and record the plan spec.
-    # Otherwise proof-of-work uses the file-granular exclude (verify_dev_exclude_
-    # relpaths, matching verify_dev post-#79: only the session's own spec + the
-    # sprint-status ledger) plus the spec folder's stories/ subdir + stories.yaml —
-    # NOT the whole-folder artifact_relpaths, so a story whose entire authorized
-    # scope is ledger/spec reconciliation doesn't register as a false "no changes".
+    # already excludes; skip it (extra_exclude=None) and record the plan spec.
+    # Otherwise stories mode adds the spec folder's stories/ subdir + stories.yaml
+    # on top of the gate's own file-granular exclude — NOT the whole-folder
+    # artifact_relpaths, so a story whose entire authorized scope is ledger/spec
+    # reconciliation doesn't register as a false "no changes".
     gate = _verify_shared_gates(
         spec_path,
         rj,
         task,
         paths,
         expected_status=expected,
-        proof_exclude=(
-            None
-            if plan_halt
-            else verify_dev_exclude_relpaths(paths, spec_path, task.restore_patch)
-            + _stories_relpaths(paths.project, spec_folder)
-        ),
+        extra_exclude=(None if plan_halt else _stories_relpaths(paths.project, spec_folder)),
     )
     if gate is not None:
         return gate
@@ -1526,6 +1528,27 @@ def finalize_commit(repo: Path, baseline: str | None, message: str) -> str | Non
             )
         raise GitError(f"git commit failed: {out}")
     return rev_parse_head(repo)
+
+
+def resolve_restore_path(raw: str, root: Path) -> Path:
+    """The latched intent-gap patch (`StoryTask.restore_patch`) as a concrete path:
+    absolute values pass through, relative ones are anchored on `root`.
+
+    `model.StoryTask.restore_patch` documents the field as repo-relative-or-absolute,
+    and every consumer must resolve it against the base it actually reads the tree
+    from — the engine's live workspace root (the unit worktree under isolation),
+    `paths.project` for the proof-of-work exclude, the CLI's `--project`. Hence the
+    caller-supplied `root` rather than one baked-in base.
+
+    In practice `cli._resolve_restore_patch` always latches an already-`.resolve()`d
+    absolute path, so the relative branch is exercised only by a hand-written state
+    file or a future non-CLI latcher; it is kept because the field's contract
+    promises it. Deliberately does NOT `.resolve()` the result — callers that need
+    symlink/`..` normalization (path containment checks) do it themselves, and the
+    apply/exclude paths match the pre-existing behavior byte-for-byte without it.
+    """
+    p = Path(raw)
+    return p if p.is_absolute() else root / p
 
 
 def apply_patch(repo: Path, patch_path: Path) -> None:

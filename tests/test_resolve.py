@@ -4,7 +4,7 @@ import json
 
 import pytest
 import yaml
-from conftest import git
+from conftest import escalated_run, git
 
 from bmad_loop import devcontract, resolve, runs, verify
 from bmad_loop.journal import load_state, save_state
@@ -12,8 +12,6 @@ from bmad_loop.model import (
     PAUSE_ESCALATION,
     Phase,
     RunState,
-    SessionRecord,
-    StoryTask,
 )
 from bmad_loop.platform_util import safe_segment
 
@@ -40,36 +38,26 @@ def _escalated_run(
     with_session=True,
     source="sprint-status",
     sentinel_kind="",
+    worktree_path="",
 ):
-    task = StoryTask(
+    """conftest's builder with this module's shape: a review-cycle-1 task carrying a
+    completed review session (what `build_context` reads), returning the full triple."""
+    run = escalated_run(
+        project,
+        run_id,
         story_key="6-4-cli-list-command",
         epic=6,
-        phase=Phase.ESCALATED,
-        attempt=1,
         review_cycle=1,
         baseline_commit="abc123",
-        spec_file=spec_file,
-        sentinel_kind=sentinel_kind,
-    )
-    if with_session:
-        task.sessions.append(
-            SessionRecord(
-                task_id="6-4-cli-list-command-review-1", role="review", status="completed"
-            )
-        )
-    state = RunState(
-        run_id=run_id,
-        project=str(project),
         started_at="2026-06-13T11:14:29",
         paused_reason="CRITICAL escalation from review session: names not unique",
-        paused_stage=PAUSE_ESCALATION,
-        paused_story_key="6-4-cli-list-command",
-        tasks={task.story_key: task},
+        spec_file=spec_file,
+        with_session=with_session,
         source=source,
+        sentinel_kind=sentinel_kind,
+        worktree_path=worktree_path,
     )
-    run_dir = project / ".bmad-loop" / "runs" / run_id
-    save_state(run_dir, state)
-    return run_dir, state, task
+    return run.run_dir, run.state, run.task
 
 
 # ----------------------------------------------------------- set_frontmatter_status
@@ -436,6 +424,40 @@ def test_rearm_rejects_restore_patch_without_a_spec_file(tmp_path):
 
     runs.rearm_escalation(run_dir)  # a from-scratch re-arm remains available
     assert load_state(run_dir).tasks["6-4-cli-list-command"].phase == Phase.PENDING
+
+
+def test_rearm_rejects_restore_patch_for_a_worktree_executed_task(tmp_path):
+    """#91: the worktree guard used to live ONLY in `cli._resolve_restore_patch`, so a
+    programmatic caller (TUI restore parity, a script) could latch a patch the
+    re-drive can never honor — it discards the unit's worktree and re-mounts a fresh
+    one. `validate_restore_latch` is now the single seam, enforced here too."""
+    spec = tmp_path / "spec.md"
+    spec.write_text(SPEC, encoding="utf-8")
+    run_dir, _, _ = _escalated_run(
+        tmp_path, spec_file=str(spec), worktree_path=str(tmp_path / "wt" / "s1")
+    )
+
+    with pytest.raises(runs.RearmError, match="worktree-isolation"):
+        runs.rearm_escalation(run_dir, restore_patch="artifacts/attempt.patch")
+
+    task = load_state(run_dir).tasks["6-4-cli-list-command"]
+    assert task.phase == Phase.ESCALATED  # nothing mutated; still armed for a re-resolve
+    assert task.restore_patch is None
+    # a from-scratch re-arm of the same task is unaffected — the guard is latch-only
+    assert runs.rearm_escalation(run_dir) == "6-4-cli-list-command"
+
+
+def test_validate_restore_latch_passes_a_clean_in_place_escalation(tmp_path):
+    """The happy leg of the shared validator, and the one input run state cannot
+    carry: `worktree_isolation` (the LIVE policy, which the CLI passes) rejects even
+    a task that executed in place, so a policy edit between escalation and resolve
+    cannot skew the guard."""
+    _, state, task = _escalated_run(tmp_path, spec_file="/abs/spec.md")
+    key = "6-4-cli-list-command"
+
+    assert runs.validate_restore_latch(state, task, key) is None
+    err = runs.validate_restore_latch(state, task, key, worktree_isolation=True)
+    assert err is not None and "worktree-isolation" in err
 
 
 def test_rearm_restore_patch_on_a_real_stories_spec_is_allowed(tmp_path):

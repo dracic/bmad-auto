@@ -13,7 +13,7 @@ from pathlib import Path
 from . import devcontract, verify
 from .adapters.multiplexer import get_multiplexer
 from .journal import STATE_FILE, Journal, load_state, save_state
-from .model import PAUSE_ESCALATION, Phase
+from .model import PAUSE_ESCALATION, Phase, RunState, StoryTask
 from .platform_util import atomic_replace
 from .process_host import get_process_host
 
@@ -506,6 +506,66 @@ class RearmError(Exception):
     """The run/story is not in a re-armable escalation state."""
 
 
+def validate_restore_latch(
+    state: RunState, task: StoryTask, story_key: str, *, worktree_isolation: bool = False
+) -> str | None:
+    """Every precondition an intent-gap patch-restore latch (BMAD-METHOD #2564) must
+    satisfy, in one place. Returns an operator-facing error string, or None to latch.
+
+    The single seam for both entry points: `rearm_escalation` (which performs the
+    latch, and is also reachable programmatically — a TUI restore, a future caller)
+    and `cli._resolve_restore_patch` (which fails fast *before* the interactive
+    resolve session, so an unhonorable restore doesn't cost an agent conversation).
+    Splitting these let a non-CLI caller bypass the worktree half; keeping them here
+    means a caller cannot latch a patch the engine could never honor.
+
+    The CLI knows one thing this cannot: the *live* policy's isolation mode, which
+    may have been edited between escalation and resolve. It passes that as
+    `worktree_isolation`; the recorded `task.worktree_path` (how the unit actually
+    executed) is checked here either way, so both entry points reject a
+    worktree-isolation restore and the CLI additionally catches a policy flip.
+
+    Path resolution and trusted-roots containment stay CLI-side: they need
+    `--project` and the loaded bmad config, neither of which run state carries.
+    """
+    # A sentinel-wedged story escalated BEFORE planning — there is no attempted
+    # implementation to restore, and its re-arm re-dispatches a planning leg.
+    # Keyed on the recorded detection verdict (task.sentinel_kind), not the on-disk
+    # basename, mirroring rearm_escalation's sentinel-clear branch.
+    if state.source == "stories" and task.sentinel_kind:
+        return (
+            f"story {story_key} is wedged on a pre-planning {task.sentinel_kind} sentinel — "
+            "there is no attempted implementation to restore, and the re-drive starts "
+            "at planning. Re-run resolve without a restore patch for a clean re-plan."
+        )
+    # Same seam, broader shape: a restore only works through the spec's in-review
+    # flip, so an escalation with NO recorded spec (an ambiguous two-file wedge, an
+    # unknown --story selector, a session that died before naming one) has no
+    # routing target — the latch would stick, the flip would be skipped, and the
+    # engine would lay the patch onto the tree before a planning leg.
+    if not task.spec_file:
+        return (
+            f"story {story_key} has no recorded spec file, so a restored patch has no "
+            "review to resume (the re-drive starts at planning). Re-run resolve "
+            "without a restore patch for a from-scratch re-drive."
+        )
+    # Restore is an in-place-only recovery: a worktree-isolation re-drive discards
+    # the unit's worktree (engine._finish_inflight — taking a patch saved inside it
+    # along) and re-mounts a fresh one, so the re-apply could only fail on a
+    # destroyed patch file. Reject up front instead of latching a patch that can
+    # never restore.
+    if worktree_isolation or task.worktree_path:
+        return (
+            "restore patch is unsupported for worktree-isolation runs (the re-drive "
+            "discards and re-mounts the unit's worktree, so an in-place restore has "
+            "nothing durable to land on) — re-arm from scratch instead: drop "
+            "--restore-patch, or if the resolve agent recorded the restore in "
+            "resolution.json, re-run with --no-interactive (which ignores that "
+            "marker) instead of repeating the agent session"
+        )
+    return None
+
+
 def rearm_escalation(
     run_dir: Path, story_key: str | None = None, *, restore_patch: str | None = None
 ) -> str:
@@ -545,13 +605,11 @@ def rearm_escalation(
     Instead preserve a copy under `{run_dir}/sentinels/`, journal `sentinel-cleared`
     with the blocking condition, and delete it, so the re-dispatch resolves to a
     clean PENDING and re-plans from scratch (leg 1 again for a spec_checkpoint id).
-    A patch-restore re-arm is rejected for a sentinel-wedged story: a sentinel is a
-    pre-planning halt, so there is no attempted implementation to restore and the
-    re-dispatch is a planning leg — laying implementation onto the tree before a
-    planning session is never safe.
 
-    Returns the re-armed story key. Raises RearmError when the run is not
-    paused at the escalation stage or the target story is not escalated.
+    Returns the re-armed story key. Raises RearmError when the run is not paused at
+    the escalation stage, the target story is not escalated, or a supplied
+    `restore_patch` fails `validate_restore_latch` (the shared precondition set —
+    sentinel wedge, spec-less escalation, worktree isolation).
     """
     state = load_state(run_dir)
     if state.paused_stage != PAUSE_ESCALATION:
@@ -567,30 +625,15 @@ def rearm_escalation(
         raise RearmError(f"run {run_dir.name} has no task for story {key}")
     if task.phase != Phase.ESCALATED:
         raise RearmError(f"story {key} is not escalated (phase: {task.phase})")
-    # T1 guard (stories x patch-restore): a sentinel-wedged story escalated BEFORE
-    # planning — there is no attempted implementation to restore, and its re-arm
-    # re-dispatches a planning leg. Keyed on the recorded detection verdict
-    # (task.sentinel_kind), not the on-disk basename, mirroring the sentinel-clear
-    # branch below. Rejected here, before any task mutation, so the escalation
-    # stays armed for a corrected resolve.
-    if restore_patch and state.source == "stories" and task.sentinel_kind:
-        raise RearmError(
-            f"story {key} is wedged on a pre-planning {task.sentinel_kind} sentinel — "
-            "there is no attempted implementation to restore, and the re-drive starts "
-            "at planning. Re-run resolve without a restore patch for a clean re-plan."
-        )
-    # Same seam, broader shape: a restore only works through the spec's in-review
-    # flip below, so an escalation with NO recorded spec (an ambiguous two-file
-    # wedge, an unknown --story selector, a session that died before naming one)
-    # has no routing target — the latch would stick, the flip would be skipped,
-    # and the engine would lay the patch onto the tree before a planning leg.
-    # Rejected before any mutation, like the sentinel guard above.
-    if restore_patch and not task.spec_file:
-        raise RearmError(
-            f"story {key} has no recorded spec file, so a restored patch has no "
-            "review to resume (the re-drive starts at planning). Re-run resolve "
-            "without a restore patch for a from-scratch re-drive."
-        )
+    # Patch-restore preconditions (T1 guard + spec-less wedge + worktree isolation),
+    # rejected here before any task mutation so the escalation stays armed for a
+    # corrected resolve. `cli._resolve_restore_patch` runs the same validator ahead
+    # of the interactive session; this call is what makes a programmatic caller
+    # (TUI restore parity, scripts) unable to bypass it.
+    if restore_patch:
+        err = validate_restore_latch(state, task, key)
+        if err is not None:
+            raise RearmError(err)
 
     journal = Journal(run_dir)
     # Read before the unconditional overwrite below: they describe the restore
@@ -752,9 +795,7 @@ def _stale_restore_residue(
     """
     if not old_latch:
         return set()
-    patch_path = Path(old_latch)
-    if not patch_path.is_absolute():
-        patch_path = repo / patch_path
+    patch_path = verify.resolve_restore_path(old_latch, repo)
 
     residue: set[str] = set()
     try:

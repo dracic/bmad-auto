@@ -7,7 +7,7 @@ import sys
 import tarfile
 
 import pytest
-from conftest import git
+from conftest import escalated_run, git
 
 from bmad_loop import runs
 from bmad_loop.adapters import tmux_base
@@ -532,40 +532,21 @@ def test_delete_run(tmp_path):
 
 
 def _escalated_run(tmp_path, spec_text, *, restore_patch_stale=None, git_project=False):
-    """`git_project=True` makes `state.project` a real repo with the spec committed,
-    so rearm's baseline snapshot refresh actually runs — in a bare tmp_path its
-    best-effort `except` swallows every git call and the refresh silently no-ops."""
-    from bmad_loop.model import PAUSE_ESCALATION, Phase, StoryTask
-
+    """conftest's builder with this module's shape: the spec is written first (so
+    `git_project=True` commits it), and only `(run_dir, spec)` comes back."""
     spec = tmp_path / "spec.md"
     spec.write_text(spec_text, encoding="utf-8")
-    baseline = None
-    if git_project:
-        (tmp_path / ".gitignore").write_text(".bmad-loop/\n")  # keep run state out of the snapshot
-        git(tmp_path, "init", "-q", "-b", "main")
-        git(tmp_path, "config", "user.email", "test@test")
-        git(tmp_path, "config", "user.name", "test")
-        git(tmp_path, "add", "-A")
-        git(tmp_path, "commit", "-q", "-m", "initial")
-        baseline = git(tmp_path, "rev-parse", "HEAD")
-    task = StoryTask(
-        story_key="1-1-a",
-        epic=1,
-        phase=Phase.ESCALATED,
-        attempt=2,
-        spec_file=str(spec),
-        restore_patch=restore_patch_stale,
-        baseline_commit=baseline,
-    )
-    run_dir = _make_state_run(
+    run = escalated_run(
         tmp_path,
         "r1",
-        paused_reason="CRITICAL escalation",
-        paused_stage=PAUSE_ESCALATION,
-        paused_story_key="1-1-a",
-        tasks={"1-1-a": task},
+        story_key="1-1-a",
+        attempt=2,
+        started_at="2026-06-11T10:00:00",
+        spec_file=str(spec),
+        restore_patch=restore_patch_stale,
+        git_project=git_project,
     )
-    return run_dir, spec
+    return run.run_dir, spec
 
 
 _SPEC_WITH_ARR = (
