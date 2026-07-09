@@ -183,9 +183,14 @@ def set_sprint(paths: ProjectPaths, key: str, status: str) -> None:
 
 
 def write_spec(path: Path, status: str, baseline: str, *, prose_status: str | None = None) -> None:
+    """Write a spec the way the real bmad-dev-auto skill does. The skill's step-03
+    stamps `baseline_revision` and NEVER `baseline_commit` (that name exists only
+    in the orchestrator's synthesized result.json), so this fixture stamps the
+    same key — a reader that only knows `baseline_commit` must fail a test here,
+    not sail through production (issue #89)."""
     body = (
         f"---\ntitle: 'test'\ntype: 'feature'\nstatus: '{status}'\n"
-        f"baseline_commit: '{baseline}'\n---\n\n## Intent\n\ntest spec\n"
+        f"baseline_revision: '{baseline}'\n---\n\n## Intent\n\ntest spec\n"
     )
     if prose_status is not None:
         # mirror bmad-dev-auto's terminal finalize: it appends a `## Auto Run
@@ -291,8 +296,11 @@ def review_effect(
 
 
 def _spec_baseline(path: Path) -> str:
+    """Read back whichever baseline key a spec carries: `write_spec` stamps
+    `baseline_revision` like the real skill, but hand-rolled fixture specs (and
+    re-arm's re-stamp) may carry either."""
     for line in path.read_text().splitlines():
-        if line.startswith("baseline_commit:"):
+        if line.startswith(("baseline_commit:", "baseline_revision:")):
             return line.split(":", 1)[1].strip().strip("'\"")
     return ""
 

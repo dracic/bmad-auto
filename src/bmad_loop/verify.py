@@ -138,7 +138,13 @@ def same_commit(a: str, b: str) -> bool:
     return a.startswith(b) or b.startswith(a)
 
 
-def has_changes_since(repo: Path, baseline: str, exclude: tuple[str, ...] = ()) -> bool:
+def has_changes_since(
+    repo: Path,
+    baseline: str,
+    exclude: tuple[str, ...] = (),
+    *,
+    baseline_untracked: list[str] | None = None,
+) -> bool:
     """True if tracked changes since baseline OR untracked files exist.
 
     `exclude` is repo-relative posix dir prefixes whose changes don't count —
@@ -146,11 +152,27 @@ def has_changes_since(repo: Path, baseline: str, exclude: tuple[str, ...] = ()) 
     BMAD artifact folders (see `artifact_relpaths`), so a session that only
     rewrites its own spec (e.g. the frontmatter-status reconcile) under those
     folders doesn't register as real implementation work. Mirrors
-    `attempt_dirty`'s exclusion. Default `()` keeps the unscoped behavior."""
+    `attempt_dirty`'s exclusion. Default `()` keeps the unscoped behavior.
+
+    `baseline_untracked` is the untracked-file snapshot taken when the baseline
+    was recorded; when given, those files already existed before the session ran
+    and are subtracted, so pre-session residue (e.g. an earlier halt's saved
+    intent-gap patch, which `_protected_relpaths` shields from every reset) can
+    never masquerade as this session's work.
+
+    `None` means count EVERY untracked file — deliberately the *opposite* of
+    `attempt_dirty`'s `None` = ignore-all, and not an oversight. The two gates
+    fail open in opposite directions: a proof-of-work gate must fail open toward
+    "work happened" (a pre-snapshot run must not have its gate silently
+    weakened into never seeing new files), while a rollback gate must fail open
+    toward "nothing to remove" (never delete a file it cannot prove this attempt
+    created). Keep it that way."""
     rc, _ = _git(repo, "diff", "--quiet", baseline, "--", ".", *_exclude_specs(exclude))
     if rc != 0:
         return True
     created = untracked_files(repo)
+    if baseline_untracked is not None:
+        created -= set(baseline_untracked)
     created = {p for p in created if not _path_under_any(p, exclude)}
     return bool(created)
 
@@ -1091,7 +1113,13 @@ def _verify_shared_gates(
             f"spec status is {status!r}, expected {expected_status!r}: {spec_path}"
         )
 
-    claimed_baseline = str(fm.get("baseline_commit", "")).strip()
+    # The generic bmad-dev-auto skill stamps `baseline_revision`, never
+    # `baseline_commit` — that name exists only in the result.json devcontract
+    # synthesizes, which this gate does not consult (it re-reads frontmatter).
+    # An absent key skips the check below, so reading `baseline_commit` alone
+    # made this gate dead code for every generic-skill session. Read both, the
+    # same idiom as `devcontract.synthesize_result`.
+    claimed_baseline = str(fm.get("baseline_commit", fm.get("baseline_revision", ""))).strip()
     if task.baseline_commit and claimed_baseline not in ("", "NO_VCS"):
         if not same_commit(claimed_baseline, task.baseline_commit):
             return VerifyOutcome.retry(
@@ -1101,7 +1129,12 @@ def _verify_shared_gates(
 
     if proof_exclude is not None and task.baseline_commit:
         try:
-            if not has_changes_since(paths.project, task.baseline_commit, exclude=proof_exclude):
+            if not has_changes_since(
+                paths.project,
+                task.baseline_commit,
+                exclude=proof_exclude,
+                baseline_untracked=task.baseline_untracked,
+            ):
                 return VerifyOutcome.retry("no changes in worktree since baseline commit")
         except GitError as e:
             return VerifyOutcome.escalate(str(e))
