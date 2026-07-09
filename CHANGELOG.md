@@ -42,7 +42,7 @@ breaking changes may land in a minor release.
   marking the run `CRASHED` and abandoning every remaining story. The read-back now degrades an
   undecodable spec to "no result yet" — the session retries or keeps its verdict — and the post-kill
   rescue additionally keeps its verdict on _any_ read fault, so a best-effort rescue can never make
-  things worse. The repair path still raises on purpose. (#95)
+  things worse. The repair path still raises on purpose. (#95, closes #96)
 - **Windows installs now pull `psutil` automatically** — moved from the opt-in `non-linux` extra to a
   platform-scoped core dependency (`sys_platform == 'win32'`), so the TUI liveness column no longer
   shows every run as `?` on a stock install. macOS keeps the `non-linux` extra; Linux stays dep-free.
