@@ -135,6 +135,15 @@ def _setup_mcp_agent_id(profile_name: str) -> str:
     return _SETUP_MCP_AGENT_IDS.get(profile_name, profile_name)
 
 
+def _session_task_id(story_key: str, part: str, seq: int) -> str:
+    """Single composition point for session task ids. Sanitize the whole
+    composition, not the parts: two individually capped parts can still compose
+    past a Windows filename segment limit, and ``safe_segment``'s digest suffix
+    differs between the two orders. ``_resumable_session``'s resume match must
+    be byte-identical to what ``_run_session`` stored, so both MUST call this."""
+    return safe_segment(f"{story_key}-{part}-{seq}")
+
+
 class Engine:
     # The engine that installed the process-wide stop handlers; nested
     # auto-sweep runs (same process) see it set and let RunStopped propagate up.
@@ -1176,7 +1185,7 @@ class Engine:
             role, seq = "review", task.review_cycle
         else:
             return None
-        task_id = f"{safe_segment(task.story_key)}-{role}-{seq}"
+        task_id = _session_task_id(task.story_key, role, seq)
         for record in reversed(task.sessions):
             if record.task_id != task_id:
                 continue
@@ -1993,9 +2002,7 @@ class Engine:
     ) -> SessionResult:
         # ``label`` names a non-standard session (a plugin-provided workflow) so
         # its task_id stays distinct from the role's own dev/review attempts.
-        # Sanitize the whole composition, not the parts: two individually capped
-        # parts can still compose past a Windows filename segment limit.
-        task_id = safe_segment(f"{task.story_key}-{label if label else role}-{seq}")
+        task_id = _session_task_id(task.story_key, label if label else role, seq)
         adapter = self.adapters[role]
         cfg = self.policy.adapter.resolved(role)
         env = {
