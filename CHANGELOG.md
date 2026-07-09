@@ -31,6 +31,10 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **Windows installs now pull `psutil` automatically** — moved from the opt-in `non-linux` extra to a
+  platform-scoped core dependency (`sys_platform == 'win32'`), so the TUI liveness column no longer
+  shows every run as `?` on a stock install. macOS keeps the `non-linux` extra; Linux stays dep-free.
+  (#72, closes #71)
 - **`bmad-loop-setup` no longer deletes live core BMAD config or the installer manifest.** In a
   multi-module BMAD v6 project the setup scripts hardcoded `core` (and `--also-remove _config`) into
   their delete lists, destroying `_bmad/core/config.yaml`, per-module config, and the whole

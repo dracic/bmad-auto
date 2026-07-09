@@ -11,17 +11,20 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "BMad Code, LLC" }]
 requires-python = ">=3.11"
-dependencies = ["pyyaml>=6.0"]
+dependencies = [
+  "pyyaml>=6.0",
+  # win32 liveness needs psutil (no /proc; os.kill(pid,0) is destructive there);
+  # without it the TUI shows every run as `?`. Hard dep so no install path misses it.
+  "psutil>=7.2.2; sys_platform == 'win32'",
+]
 
 [project.scripts]
 bmad-loop = "bmad_loop.cli:main"
 
 [project.optional-dependencies]
 tui = ["textual>=8.0,<9", "tomlkit>=0.13", "pyte>=0.8.2"]
-# Process discovery on non-Linux (no /proc): the Unity plugin's teardown lazily
-# imports psutil whenever it runs off Linux — macOS as well as a native-Windows
-# backend. The core stays dep-free; install with `pip install bmad-loop[non-linux]`
-# on those platforms.
+# macOS opt-in for psutil (identity/force-kill niceties); win32 gets it as a core
+# dep above, Linux stays dep-free. `pip install bmad-loop[non-linux]` on macOS.
 non-linux = ["psutil>=7.2.2"]
 
 [dependency-groups]

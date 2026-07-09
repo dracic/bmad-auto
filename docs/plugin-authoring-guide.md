@@ -634,8 +634,9 @@ seams instead of re-implementing OS primitives. Follow this discipline:
   script runs anywhere the core does. If you genuinely need a third-party package on
   one platform, make it an **optional extra** in `pyproject.toml` and **import it
   lazily** with a clear error if missing — never at module top level. The bundled
-  Unity plugin does exactly this for `psutil`: a `non-linux` extra it imports only on
-  non-Linux process _discovery_, so the dep-free Linux/WSL path never pulls it in.
+  Unity plugin does exactly this for `psutil`: imported only on non-Linux process
+  _discovery_ (a core dependency on Windows, the `non-linux` extra on macOS), so the
+  dep-free Linux/WSL path never pulls it in.
 
 - **Guard the primitives that have no seam.** Anything absent or differently-shaped
   on Windows that isn't behind a seam — `cp`/`--reflink`, symlinks, `/proc` scanning,

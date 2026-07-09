@@ -48,16 +48,17 @@ from bmad_loop.process_host import get_process_host
 
 
 def _psutil():
-    """Lazily import psutil (the optional ``non-linux`` extra), used only for
-    non-Linux process discovery (macOS and Windows). The dep-free core never imports
-    it; raise a clear, actionable error if it's missing on a platform that needs it."""
+    """Lazily import psutil — a core dep on Windows, the ``non-linux`` extra on
+    macOS — used only for non-Linux process discovery (macOS and Windows). The
+    dep-free core never imports it; raise a clear, actionable error if it's missing
+    on a platform that needs it."""
     try:
         import psutil  # noqa: PLC0415  (intentional lazy import — keeps the core dep-free)
     except ImportError as exc:  # pragma: no cover - exercised only off Linux
         raise RuntimeError(
             f"unity_teardown: process discovery on {sys.platform!r} needs psutil; "
-            "install the optional extra (pip install 'bmad-loop[non-linux]') or run "
-            "under Linux/WSL"
+            "on Windows reinstall bmad-loop (psutil is a required dependency there), "
+            "on macOS run `pip install 'bmad-loop[non-linux]'`"
         ) from exc
     return psutil
 
