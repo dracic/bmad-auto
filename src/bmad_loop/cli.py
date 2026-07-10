@@ -60,11 +60,10 @@ def _configure_mux(project: Path) -> None:
     from .adapters.multiplexer import configure_multiplexer
 
     path = _policy_path(project)
-    name: str | None = None
     try:
         name = policy_mod.load(path).mux.backend or None
     except (policy_mod.PolicyError, OSError):
-        pass
+        name = None
     configure_multiplexer(name, origin=path)
 
 
@@ -179,23 +178,23 @@ def _platform_preflight() -> tuple[list[str], list[str]]:
 
     try:
         infos = detect_multiplexers()
-        if len(infos) > 1:  # a lone tmux needs no listing; keep single-backend output stable
-            listed = ", ".join(
-                i.name
-                + ("*" if i.selected else "")
-                + (
-                    " (available" + (f", {i.version}" if i.version else "") + ")"
-                    if i.available
-                    else " (unavailable)"
-                )
-                for i in infos
-            )
-            notes.append(f"mux backends: {listed} — `bmad-loop mux` for details")
-        chosen = next((i for i in infos if i.selected), None)
-        if chosen and chosen.reason in ("env", "policy"):
-            notes.append(f"multiplexer selection {_mux_reason_label(chosen.reason)}")
     except Exception:  # noqa: BLE001 — detection is advisory; never break validate
-        pass
+        infos = []
+    if len(infos) > 1:  # a lone tmux needs no listing; keep single-backend output stable
+        listed = ", ".join(
+            i.name
+            + ("*" if i.selected else "")
+            + (
+                " (available" + (f", {i.version}" if i.version else "") + ")"
+                if i.available
+                else " (unavailable)"
+            )
+            for i in infos
+        )
+        notes.append(f"mux backends: {listed} — `bmad-loop mux` for details")
+    chosen = next((i for i in infos if i.selected), None)
+    if chosen and chosen.reason in ("env", "policy"):
+        notes.append(f"multiplexer selection {_mux_reason_label(chosen.reason)}")
 
     try:
         notes.append(f"process host: {type(get_process_host()).__name__}")
@@ -405,8 +404,7 @@ def _mux_set(project: Path, args: argparse.Namespace) -> int:
         )
     if os.environ.get("BMAD_LOOP_MUX_BACKEND"):
         print(
-            "note: BMAD_LOOP_MUX_BACKEND is set in this shell and outranks the "
-            "persisted choice",
+            "note: BMAD_LOOP_MUX_BACKEND is set in this shell and outranks the " "persisted choice",
             file=sys.stderr,
         )
     policy_mod.write_mux_backend(path, args.name)  # a junk name raises PolicyError → main()

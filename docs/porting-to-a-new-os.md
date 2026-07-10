@@ -11,12 +11,12 @@ The OS-specific work is quarantined behind four seams. Porting to a new OS is
 core `.py` modules or their call sites. Each seam selects its implementation by
 platform from a registry, with an env-var override for tests.
 
-| #   | Seam                 | Contract / registry                                     | Override env var                                      |
-| --- | -------------------- | ------------------------------------------------------- | ----------------------------------------------------- |
+| #   | Seam                 | Contract / registry                                     | Override env var                                        |
+| --- | -------------------- | ------------------------------------------------------- | ------------------------------------------------------- |
 | 1   | Terminal multiplexer | `TerminalMultiplexer` / `register_multiplexer`          | `BMAD_LOOP_MUX_BACKEND` (or `bmad-loop mux set <name>`) |
-| 2   | Process lifecycle    | `ProcessHost` / `register_process_host`                 | `BMAD_LOOP_PROCESS_HOST` |
-| 3   | Hook interpreter     | `ProcessHost.hook_interpreter()`                        | (rides on seam 2)        |
-| 4   | Validate preflight   | `_platform_preflight()` (no new code — reads seams 1–2) | —                        |
+| 2   | Process lifecycle    | `ProcessHost` / `register_process_host`                 | `BMAD_LOOP_PROCESS_HOST`                                |
+| 3   | Hook interpreter     | `ProcessHost.hook_interpreter()`                        | (rides on seam 2)                                       |
+| 4   | Validate preflight   | `_platform_preflight()` (no new code — reads seams 1–2) | —                                                       |
 
 The **one** bundled caveat: a backend you ship _in this repo_ needs its import
 added to the relevant `_load_builtin_*` loader so it self-registers (one line). An

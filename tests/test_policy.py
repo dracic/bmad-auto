@@ -571,9 +571,7 @@ def test_write_mux_backend_replaces_existing_value(tmp_path):
     after = p.read_text(encoding="utf-8")
     assert policy.load(p).mux.backend == "tmux"
     # a targeted line replace: everything but the anchor line is byte-identical
-    diff = [
-        (a, b) for a, b in zip(before.splitlines(), after.splitlines(), strict=True) if a != b
-    ]
+    diff = [(a, b) for a, b in zip(before.splitlines(), after.splitlines(), strict=True) if a != b]
     assert diff == [('backend = "psmux"', 'backend = "tmux"')]
 
 
@@ -606,7 +604,7 @@ def test_write_mux_backend_reinserts_deleted_key_line(tmp_path):
 
 def test_write_mux_backend_preserves_hand_edits(tmp_path):
     p = tmp_path / "policy.toml"
-    hand = "[limits]\nmax_dev_attempts = 7  # keep my comment\n\n[mux]\nbackend = \"old\"\n"
+    hand = '[limits]\nmax_dev_attempts = 7  # keep my comment\n\n[mux]\nbackend = "old"\n'
     p.write_text(hand, encoding="utf-8")
     policy.write_mux_backend(p, "new")
     pol = policy.load(p)

@@ -1859,9 +1859,7 @@ def test_mux_lists_backends_and_selection(mux_registry, tmp_path, capsys):
     mux_registry.register_multiplexer(
         "alpha", lambda p: p == _sys.platform, lambda: _MuxStub(avail=True, version="alpha 1.2")
     )
-    mux_registry.register_multiplexer(
-        "beta", lambda p: False, lambda: _MuxStub(avail=False)
-    )
+    mux_registry.register_multiplexer("beta", lambda p: False, lambda: _MuxStub(avail=False))
     assert cli.main(["mux", "--project", str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert "alpha 1.2" in out

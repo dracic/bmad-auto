@@ -42,12 +42,13 @@ named `tmux`, which is exactly why selection is availability-aware with discrimi
 `available()` probes (psmux → `which("psmux") and which("tmux") and which("pwsh")`;
 tmux-windows → `which("tmux") and not which("psmux")`) and an explicit
 `bmad-loop mux set <name>` tie-break. The seams are designed so each slots in as **new files
-+ one registration line, with no change to the adapters, `runs.py`, `tui/launch.py`,
+plus one registration line, with no change to the adapters, `runs.py`, `tui/launch.py`,
 `probe.py`, `tui/data.py`, or `cli.py`'s `validate`** (`WindowsProcessHost` and its hook
-interpreter are already in place and registered). The end-to-end port path — both build options, the test-override env vars,
-and exactly what a native-Windows port costs — is documented in
-[Porting bmad-loop to a new OS](porting-to-a-new-os.md); the deep transport contract is in
-the [adapter authoring guide](adapter-authoring-guide.md#the-transport-contract-for-a-backend-author).
+interpreter are already in place and registered). The end-to-end port path — both build
+options, the test-override env vars, and exactly what a native-Windows port costs — is
+documented in [Porting bmad-loop to a new OS](porting-to-a-new-os.md); the deep transport
+contract is in the
+[adapter authoring guide](adapter-authoring-guide.md#the-transport-contract-for-a-backend-author).
 
 **Open questions:** what hosts the windows on native Windows (Windows Terminal panes, a
 ConPTY-based manager, a headless process supervisor?); how attach/detach and the parked

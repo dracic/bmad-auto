@@ -12,7 +12,7 @@ breaking changes may land in a minor release.
 - **Dev-choosable multiplexer backend selection (#87).** `get_multiplexer()` now resolves by
   precedence — `BMAD_LOOP_MUX_BACKEND` env var → the new machine-scoped `[mux] backend` key in
   policy.toml → the platform default (win32: `psmux`, elsewhere: `tmux`) when installed → the first
-  registered backend that matches the platform *and* is `available()` — so two same-platform
+  registered backend that matches the platform _and_ is `available()` — so two same-platform
   backends (psmux / tmux-windows) no longer collide by registration order. Forced names are trusted
   (no availability gate) and fail loudly when unregistered, naming the policy file. New
   `bmad-loop mux` lists registered backends (platform / available / version / selected + why);
