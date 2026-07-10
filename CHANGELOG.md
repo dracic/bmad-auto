@@ -9,6 +9,12 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **Resizable dashboard panes.** Every pane boundary is now adjustable by mouse-drag (divider
+  bars, which also carry the Sprint / Deferred Work headings) or a keyboard resize mode (`ctrl+w`,
+  then `←`/`→` for the sidebar, `↑`/`↓` for the active horizontal split, `Tab` to pick it, `Esc` to
+  exit). Sizes persist per-project to a new `[tui]` section in `policy.toml` and re-apply on the
+  next launch; untouched projects keep the previous fixed proportions.
+
 - **Dev-choosable multiplexer backend selection (#87).** `get_multiplexer()` now resolves by
   precedence — `BMAD_LOOP_MUX_BACKEND` env var → the new machine-scoped `[mux] backend` key in
   policy.toml → the platform default (win32: `psmux`, elsewhere: `tmux`) when installed → the first

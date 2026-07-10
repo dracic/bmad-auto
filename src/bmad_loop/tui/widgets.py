@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from rich.segment import Segment
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
+from textual import events
 from textual.selection import Selection
+from textual.strip import Strip
+from textual.widget import Widget
 from textual.widgets import DataTable, RichLog, Static, Tree
 from textual.widgets.option_list import Option
 from textual.widgets.tree import TreeNode
@@ -521,3 +526,113 @@ class SelectableRichLog(RichLog):
 
     def selection_updated(self, selection: Selection | None) -> None:
         self.refresh()
+
+
+class Splitter(Widget):
+    """A draggable divider between two panes, drawn as a thin line so it reads
+    like the static border it replaces (not a filled bar). A ``horizontal``
+    splitter is a 1-row rule between vertically stacked panes (drag up/down); a
+    vertical one is a 1-column ``│`` line between side-by-side panes (drag
+    left/right). A horizontal splitter's ``label`` rides the rule as ``─ Sprint
+    ──`` so the section title that used to sit on the pane's ``border-top``
+    survives its removal.
+
+    The widget only measures a drag as a signed cell ``delta`` along its axis and
+    hands it to ``apply`` — the screen bakes in the sign and which reactive the
+    boundary moves. ``bump`` is the keyboard entry point (resize mode), so mouse
+    and keyboard drive the exact same code path. ``on_release`` fires once a drag
+    ends, for the screen to persist the new geometry.
+    """
+
+    DEFAULT_CSS = """
+    Splitter {
+        color: $primary-darken-2;  /* the line color; matches the old borders */
+        background: transparent;
+    }
+    Splitter.-vertical {
+        width: 1;
+        height: 1fr;
+    }
+    Splitter.-horizontal {
+        height: 1;
+        width: 1fr;
+    }
+    Splitter:hover, Splitter.-active, Splitter.-dragging {
+        color: $accent;  /* brighten the line while hovered / grabbed */
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        horizontal: bool,
+        apply: Callable[[int], None],
+        on_release: Callable[[], None],
+        label: str = "",
+        id: str | None = None,
+    ) -> None:
+        super().__init__(id=id)
+        self._horizontal = horizontal
+        self._apply = apply
+        self._on_release = on_release
+        self._label = label
+        self._last: int | None = None  # last drag coordinate; None = not dragging
+        self.add_class("-horizontal" if horizontal else "-vertical")
+        self.tooltip = "drag to resize (or Ctrl+W)"
+
+    @property
+    def label(self) -> str:
+        return self._label
+
+    def set_label(self, label: str) -> None:
+        if label != self._label:
+            self._label = label
+            self.refresh()
+
+    def render_line(self, y: int) -> Strip:
+        width = self.size.width
+        if width <= 0:
+            return Strip([])
+        base = self.rich_style
+        if not self._horizontal:
+            return Strip([Segment("│", base)], width)
+        if self._label:
+            # `─ Label ───…` — a left-set title on a box-drawing rule, echoing the
+            # old border-title. The label is bold so it reads as a heading.
+            head = f"─ {self._label} "[:width]
+            tail = "─" * max(0, width - len(head))
+            return Strip([Segment(head, base + Style(bold=True)), Segment(tail, base)], width)
+        return Strip([Segment("─" * width, base)], width)
+
+    def _coord(self, event: events.MouseEvent) -> int:
+        return event.screen_y if self._horizontal else event.screen_x
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        self._last = self._coord(event)
+        self.capture_mouse()
+        self.add_class("-dragging")
+        event.stop()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if self._last is None:
+            return  # hover, not a drag
+        pos = self._coord(event)
+        delta = pos - self._last
+        if delta:
+            self._last = pos
+            self._apply(delta)
+        event.stop()
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if self._last is None:
+            return
+        self._last = None
+        self.release_mouse()
+        self.remove_class("-dragging")
+        self._on_release()
+        event.stop()
+
+    def bump(self, delta: int) -> None:
+        """Keyboard-driven nudge (resize mode). Persistence is handled by the
+        screen when the mode exits, so this does not call ``on_release``."""
+        self._apply(delta)

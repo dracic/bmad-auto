@@ -92,6 +92,12 @@ HIDDEN = {
     ("adapter", "review"),  # rendered as the adapter.review section
     ("adapter", "triage"),  # rendered as the adapter.triage section
     ("dev", "skill"),  # internal dev-skill seam; DEV_SKILLS has one legal value, no UI knob
+    # Dashboard pane geometry — set by mouse-drag / the Ctrl+W resize mode, not a
+    # form field, so no settings-screen control.
+    ("tui", "left_width"),
+    ("tui", "runs_height"),
+    ("tui", "deferred_height"),
+    ("tui", "tasks_height"),
 }
 
 

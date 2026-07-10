@@ -68,29 +68,29 @@ class BmadLoopApp(App[None]):
     CSS = """
     #left {
         width: 34;
-        border-right: solid $primary-darken-2;
+        /* the divider to #detail is the draggable #split-main bar, not a border */
     }
     #runs {
         height: 2fr;
         min-height: 4;
         border-top: solid $primary-darken-2;
     }
-    #runs, #sprint-tree, #stories-table, #deferred {
+    #runs {
         border-title-color: $text;
         border-title-style: bold;
     }
     #sprint-tree, #stories-table {
+        /* the dividers above these panes are the draggable splitter bars, which
+           also carry the section title that used to ride the border-top */
         height: 3fr;
         min-height: 4;
-        border-top: solid $primary-darken-2;
     }
     #deferred {
         height: 2fr;
         min-height: 4;
         /* strip OptionList's default tall border + padding so the pane sits
-           flush with the runs table and sprint tree above it */
+           flush with the splitter bar above it */
         border: none;
-        border-top: solid $primary-darken-2;
         padding: 0;
         text-wrap: nowrap;
         text-overflow: ellipsis;

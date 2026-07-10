@@ -141,13 +141,14 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 ### Configuration (`.bmad-loop/policy.toml`)
 
 - Single policy file written by `init`, snapshotted at run start (applies to new runs and resumes; editable live from the TUI).
-- Sections: `[gates]`, `[limits]`, `[verify]`, `[notify]`, `[review]`, `[adapter]` (+ per-stage), `[sweep]`, `[scm]` (worktree isolation + merge-back), `[cleanup]` (run-dir retention + disk reclamation), `[plugins]` (trust allowlist + per-plugin `[plugins.<name>]` config — e.g. the opt-in game-engine layer via `[plugins.unity]`, off by default), `[tui]` (`low_frame_rate` for slow/SSH links).
+- Sections: `[gates]`, `[limits]`, `[verify]`, `[notify]`, `[review]`, `[adapter]` (+ per-stage), `[sweep]`, `[scm]` (worktree isolation + merge-back), `[cleanup]` (run-dir retention + disk reclamation), `[plugins]` (trust allowlist + per-plugin `[plugins.<name>]` config — e.g. the opt-in game-engine layer via `[plugins.unity]`, off by default), `[tui]` (`low_frame_rate` for slow/SSH links; persisted dashboard pane sizes).
 - Tunable limits: `max_review_cycles`, `max_dev_attempts`, `session_timeout_min`, `stop_without_result_nudges`, `dev_stall_grace_s`, `dev_stall_nudges`, `max_tokens_per_story`.
 
 ### TUI dashboard
 
 - Read-only observer + launcher (`bmad-loop tui`): runs table, expandable sprint tree (epics → stories/retro), severity-colored deferred-work ledger, per-story phase table (phase · dev attempts · review cycles · tokens · commit/defer), tabs tailing journal / pane log / `ATTENTION`.
 - Launch & manage from keys: start run/sweep (`r`/`s`), resume (`e`), resolve escalation (`R`), answer missed decisions (`d`), attach (`a`), cleanup (`c`), validate (`v`), settings editor (`g`), theme/mode toggle (`M`), quit (`q`).
+- Resizable panes: every boundary is drag-adjustable by mouse (the divider bars double as the Sprint / Deferred Work section headings) or a `ctrl+w` keyboard resize mode; sizes persist per-project to `[tui]` in `policy.toml` and re-apply on the next launch.
 - Survives TUI exit/crash: runs launched from the TUI are detached `bmad-loop` processes in a dedicated `bmad-loop-ctl` tmux session; the dashboard watches purely via run-dir artifacts, so shell-started runs appear identically.
 - Comment-preserving policy editor (`g`): grouped form, sections collapsed by default with one-line descriptions (`ctrl+e` toggles all), validated with the engine's own parser, unset keys show defaults as placeholders.
 

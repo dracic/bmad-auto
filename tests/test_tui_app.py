@@ -14,6 +14,7 @@ import pytest
 from conftest import install_bmad_config, write_sprint
 from rich.console import Console
 from rich.text import Text
+from textual.events import MouseMove
 from textual.geometry import Offset
 from textual.selection import Selection
 from textual.widgets import (
@@ -28,12 +29,18 @@ from textual.widgets import (
     TabbedContent,
 )
 
+from bmad_loop import policy as policy_mod
 from bmad_loop.journal import Journal, save_state
 from bmad_loop.model import Phase, RunState, StoryTask, TokenUsage
 from bmad_loop.runs import RUNS_DIR
 from bmad_loop.tui import data, launch
 from bmad_loop.tui.app import BmadLoopApp
-from bmad_loop.tui.screens.dashboard import DashboardScreen, _Snapshot
+from bmad_loop.tui.screens.dashboard import (
+    _MIN_DETAIL,
+    _MIN_SIDEBAR,
+    DashboardScreen,
+    _Snapshot,
+)
 from bmad_loop.tui.screens.modals import (
     ConfirmModal,
     ConfirmResumeModal,
@@ -52,6 +59,7 @@ from bmad_loop.tui.widgets import (
     _JOURNAL_KIND_WIDTH,
     RunHeader,
     SelectableRichLog,
+    Splitter,
     SprintTree,
     StoriesTable,
     journal_line,
@@ -1895,3 +1903,230 @@ async def test_start_run_modal_stories_source_blank_folder_errors(project, monke
         await pilot.click("#ok")
         await until(pilot, lambda: any("needs a spec folder" in m for m in notifications(app)))
         assert not calls
+
+
+# --------------------------------------------------------------- pane resizing
+
+
+async def _seeded(pilot, app: BmadLoopApp) -> DashboardScreen:
+    """Mount the dashboard and wait for the first-layout geometry seed."""
+    await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+    screen = dashboard(app)
+    await until(pilot, lambda: screen._seeded)
+    return screen
+
+
+async def _drag(pilot, selector: str, dx: int, dy: int) -> None:
+    """Mouse-drag a splitter by (dx, dy) cells: down on it, one move offset from
+    its own origin, then up. Capture routes the move to the splitter regardless."""
+    await pilot.mouse_down(selector)
+    await pilot._post_mouse_events([MouseMove], selector, offset=(dx, dy))
+    await pilot.mouse_up(selector)
+    await pilot.pause()
+
+
+async def test_resize_mode_widens_and_narrows_sidebar(project):
+    app = BmadLoopApp(project.project)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _seeded(pilot, app)
+        left = screen.query_one("#left")
+        detail = screen.query_one("#detail")
+        w0, d0 = left.size.width, detail.size.width
+        await pilot.press("ctrl+w")
+        assert screen._resize_mode
+        for _ in range(5):
+            await pilot.press("right")
+        await pilot.pause()
+        assert left.size.width == w0 + 5
+        assert detail.size.width == d0 - 5  # #detail (1fr) absorbs the change
+        for _ in range(3):
+            await pilot.press("left")
+        await pilot.pause()
+        assert left.size.width == w0 + 2
+        await pilot.press("escape")
+        assert not screen._resize_mode
+
+
+async def test_resize_mode_grows_left_panes_and_cycles(project):
+    app = BmadLoopApp(project.project)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _seeded(pilot, app)
+        runs = screen.query_one("#runs")
+        deferred = screen.query_one("#deferred")
+        r0, f0 = runs.size.height, deferred.size.height
+        await pilot.press("ctrl+w")
+        # Down on the Runs|Sprint boundary grows Runs; Sprint (the flex) shrinks.
+        for _ in range(3):
+            await pilot.press("down")
+        await pilot.pause()
+        assert screen._left_frozen
+        assert runs.size.height == r0 + 3
+        assert deferred.size.height == f0  # untouched boundary stays put
+        # Tab moves the active boundary to Sprint|Deferred; Up grows Deferred.
+        await pilot.press("tab")
+        assert screen._active_hsplit == 1
+        for _ in range(2):
+            await pilot.press("up")
+        await pilot.pause()
+        assert deferred.size.height == f0 + 2
+        assert runs.size.height == r0 + 3  # Runs boundary unaffected
+
+
+async def test_arrows_and_tab_untouched_outside_resize_mode(project):
+    root = project.project
+    make_run(root, "20260611-100000-aaaa", finished=True)
+    make_run(root, "20260611-110000-bbbb", finished=True)
+    app = BmadLoopApp(root)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _seeded(pilot, app)
+        runs = screen.query_one("#runs", DataTable)
+        await until(pilot, lambda: runs.row_count == 2)
+        runs.focus()
+        await pilot.pause()
+        assert runs.cursor_row == 1  # newest auto-selected (bottom row)
+        await pilot.press("up")  # not resizing: arrow drives the table cursor
+        await pilot.pause()
+        assert runs.cursor_row == 0
+        assert screen.query_one("#left").size.width == 34  # geometry untouched
+        await pilot.press("tab")  # not resizing: tab moves focus
+        await pilot.pause()
+        assert screen.focused is not runs
+
+
+async def test_mouse_drag_resizes_sidebar_and_left_pane(project):
+    app = BmadLoopApp(project.project)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _seeded(pilot, app)
+        w0 = screen.query_one("#left").size.width
+        await _drag(pilot, "#split-main", 6, 0)
+        assert screen.query_one("#left").size.width == w0 + 6
+        r0 = screen.query_one("#runs").size.height
+        await _drag(pilot, "#split-runs", 0, 2)  # drag the bar down: Runs grows
+        assert screen._left_frozen
+        assert screen.query_one("#runs").size.height == r0 + 2
+
+
+async def test_mouse_drag_resizes_tasks_and_tabs(project):
+    """The detail-column boundary: dragging #split-tasks grows Tasks and shrinks
+    the Tabs pane (which flexes). Regressed the whole boundary being unusable."""
+    app = BmadLoopApp(project.project)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _seeded(pilot, app)
+        tasks = screen.query_one("#tasks", DataTable)
+        tabs = screen.query_one("#tabs", TabbedContent)
+        # First drag freezes the column and pins Tasks to an explicit height (an
+        # empty table's `auto` height sits below _MIN_TASKS, so the seed floors it
+        # rather than matching the rendered height — measure after it settles).
+        await _drag(pilot, "#split-tasks", 0, 2)
+        assert screen._detail_frozen
+        t0, b0 = tasks.size.height, tabs.size.height
+        await _drag(pilot, "#split-tasks", 0, 3)  # drag the bar down: Tasks grows
+        assert tasks.size.height == t0 + 3
+        assert tabs.size.height == b0 - 3  # #tabs (1fr) absorbs the change
+
+
+async def test_persisted_tall_tasks_height_survives_max_height_cap(project):
+    """Regression: a persisted tasks_height above the CSS `max-height: 35%`
+    default must render at full height, not be silently re-clamped to 35% —
+    which froze the boundary (story-maker: tasks_height=30, no run selected)."""
+    root = project.project
+    bmad = root / ".bmad-loop"
+    bmad.mkdir(parents=True, exist_ok=True)
+    # No run selected: the detail column is in its empty state, so the CSS 35%
+    # cap is the only thing that could clamp the persisted height.
+    (bmad / "policy.toml").write_text("[tui]\ntasks_height = 30\n", encoding="utf-8")
+    app = BmadLoopApp(root)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _seeded(pilot, app)
+        await pilot.pause()
+        assert screen.selected_run_id is None
+        assert screen._detail_frozen
+        tasks = screen.query_one("#tasks", DataTable)
+        detail_h = screen.query_one("#detail").size.height
+        # The pane renders at the governed height, well past 35% of the column.
+        assert tasks.size.height == screen.tasks_height
+        assert tasks.size.height > 0.35 * detail_h
+        # And the boundary is live: dragging the bar up shrinks Tasks / grows Tabs.
+        tabs = screen.query_one("#tabs", TabbedContent)
+        b0 = tabs.size.height
+        await _drag(pilot, "#split-tasks", 0, -5)
+        assert tabs.size.height > b0
+
+
+async def test_sidebar_width_is_clamped(project):
+    app = BmadLoopApp(project.project)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _seeded(pilot, app)
+        screen.left_width = 9999  # absurd: clamps to width - _MIN_DETAIL - splitter
+        await pilot.pause()
+        hi = 120 - _MIN_DETAIL - 1
+        assert screen.left_width == hi
+        assert screen.query_one("#left").size.width == hi
+        assert screen.query_one("#detail").size.width >= _MIN_DETAIL
+        screen.left_width = 1  # below the floor
+        await pilot.pause()
+        assert screen.left_width == _MIN_SIDEBAR
+
+
+async def test_geometry_persists_and_restores(project):
+    root = project.project
+    policy_path = root / ".bmad-loop" / "policy.toml"
+    assert not policy_path.is_file()
+    app = BmadLoopApp(root)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _seeded(pilot, app)
+        await pilot.press("ctrl+w")
+        for _ in range(4):
+            await pilot.press("right")  # widen sidebar
+        for _ in range(2):
+            await pilot.press("down")  # grow Runs (freezes the left column)
+        await pilot.press("escape")  # exits resize mode -> persists
+        await pilot.pause()
+        want = (
+            screen.query_one("#left").size.width,
+            screen.query_one("#runs").size.height,
+            screen.query_one("#deferred").size.height,
+        )
+    assert policy_path.is_file()
+    saved = policy_mod.load(policy_path).tui
+    assert saved.left_width > 34 and saved.runs_height > 0 and saved.deferred_height > 0
+
+    # A fresh app in the same project restores the identical rendered geometry.
+    app2 = BmadLoopApp(root)
+    async with app2.run_test(size=(120, 40)) as pilot:
+        screen2 = await _seeded(pilot, app2)
+        got = (
+            screen2.query_one("#left").size.width,
+            screen2.query_one("#runs").size.height,
+            screen2.query_one("#deferred").size.height,
+        )
+    assert got == want
+
+
+async def test_untouched_layout_writes_nothing_and_keeps_defaults(project):
+    """No resize -> no policy file, panes at their CSS defaults, columns still
+    flex (unfrozen)."""
+    root = project.project
+    app = BmadLoopApp(root)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _seeded(pilot, app)
+        assert screen.query_one("#left").size.width == 34
+        assert not screen._left_frozen and not screen._detail_frozen
+        # Entering and leaving resize mode with no change must not create a file.
+        await pilot.press("ctrl+w")
+        await pilot.press("escape")
+        await pilot.pause()
+    assert not (root / ".bmad-loop" / "policy.toml").is_file()
+
+
+async def test_split_runs_label_tracks_sprint_vs_stories(project):
+    """The splitter above the middle slot carries its section title, swapping
+    Sprint<->Stories with the selected run's board mode."""
+    app = BmadLoopApp(project.project)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _seeded(pilot, app)
+        bar = screen.query_one("#split-runs", Splitter)
+        assert bar.label == "Sprint"
+        screen._apply_board(_Snapshot(generation=screen._generation, stories_mode=True, stories=[]))
+        await pilot.pause()
+        assert bar.label == "Stories"
