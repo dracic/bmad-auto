@@ -11,12 +11,12 @@ The OS-specific work is quarantined behind four seams. Porting to a new OS is
 core `.py` modules or their call sites. Each seam selects its implementation by
 platform from a registry, with an env-var override for tests.
 
-| #   | Seam                 | Contract / registry                                     | Override env var         |
-| --- | -------------------- | ------------------------------------------------------- | ------------------------ |
-| 1   | Terminal multiplexer | `TerminalMultiplexer` / `register_multiplexer`          | `BMAD_LOOP_MUX_BACKEND`  |
-| 2   | Process lifecycle    | `ProcessHost` / `register_process_host`                 | `BMAD_LOOP_PROCESS_HOST` |
-| 3   | Hook interpreter     | `ProcessHost.hook_interpreter()`                        | (rides on seam 2)        |
-| 4   | Validate preflight   | `_platform_preflight()` (no new code — reads seams 1–2) | —                        |
+| #   | Seam                 | Contract / registry                                     | Override env var                                        |
+| --- | -------------------- | ------------------------------------------------------- | ------------------------------------------------------- |
+| 1   | Terminal multiplexer | `TerminalMultiplexer` / `register_multiplexer`          | `BMAD_LOOP_MUX_BACKEND` (or `bmad-loop mux set <name>`) |
+| 2   | Process lifecycle    | `ProcessHost` / `register_process_host`                 | `BMAD_LOOP_PROCESS_HOST`                                |
+| 3   | Hook interpreter     | `ProcessHost.hook_interpreter()`                        | (rides on seam 2)                                       |
+| 4   | Validate preflight   | `_platform_preflight()` (no new code — reads seams 1–2) | —                                                       |
 
 The **one** bundled caveat: a backend you ship _in this repo_ needs its import
 added to the relevant `_load_builtin_*` loader so it self-registers (one line). An
@@ -51,9 +51,24 @@ register_multiplexer("psmux", lambda platform: platform == "win32", PsmuxMultipl
 - `matches(sys.platform) -> bool` — decides automatic selection.
 - `factory() -> TerminalMultiplexer` — builds the backend.
 
-`get_multiplexer()` returns the first backend whose `matches(sys.platform)` is
-true, unless `BMAD_LOOP_MUX_BACKEND` forces one by name; tmux is the default
-fallback, so POSIX behavior is unchanged. (The result is cached — see
+`get_multiplexer()` resolves by precedence:
+
+1. `BMAD_LOOP_MUX_BACKEND` — forces a backend by name (per-invocation).
+2. `[mux] backend` in `.bmad-loop/policy.toml` — the persisted, machine-scoped
+   choice (`bmad-loop init` gitignores policy.toml, so it never reaches
+   teammates). Set it with `bmad-loop mux set <name>`.
+3. The **platform default** — win32: `psmux`, everywhere else: `tmux` — when
+   that backend is registered _and_ `available()`.
+4. The first registered backend whose `matches(sys.platform)` is true _and_
+   whose `available()` reports usable (registration order breaks ties).
+5. The historical fallback: first platform match regardless of availability,
+   bottoming out at tmux — so a POSIX host without tmux still selects
+   `TmuxMultiplexer` and `validate` reports it unavailable.
+
+A forced name (1–2) bypasses both the platform predicate and `available()` — an
+explicit choice is trusted — and fails loudly when it matches no registered
+backend. `bmad-loop mux` lists every registered backend with its availability,
+version, and the current selection. (The result is cached — see
 [Testing a port](#testing-a-port).)
 
 ### Two build paths
@@ -77,6 +92,36 @@ fallback, so POSIX behavior is unchanged. (The result is cached — see
 `available()` gates whether the backend is usable on the current host (e.g. its
 binary is on PATH); the optional `version()` feeds the diagnostic dump and the
 validate preflight (seam 4).
+
+### Availability discriminators (same-platform backends)
+
+Selection consults `available()`, so it must be a **cheap, side-effect-free
+probe** (PATH lookups — never a spawn), and `factory()` must be a plain
+constructor: `detect_multiplexers()` instantiates every registered backend just
+to list it. When two backends claim the same platform, their `available()`
+probes should be **pairwise discriminating** — otherwise both report usable and
+only the platform default / registration order separates them in listings and
+selection. The contract for the two native-Windows tmux-family backends in
+flight (both drive a binary literally named `tmux`, and `tmux -V` cannot tell
+them apart):
+
+```python
+# psmux ships a distinctly-named psmux.exe alongside its tmux shim:
+class PsmuxMultiplexer(BaseTmuxBackend):
+    def available(self) -> bool:
+        return all(shutil.which(b) for b in ("psmux", "tmux", "pwsh"))
+
+# tmux-windows has no marker binary of its own — it is "tmux without psmux":
+class WindowsTmuxMultiplexer(BaseTmuxBackend):
+    def available(self) -> bool:
+        return shutil.which("tmux") is not None and shutil.which("psmux") is None
+```
+
+Do **not** inherit `BaseTmuxBackend.available()` (`which("tmux")` alone) for a
+same-platform sibling: selection would still break the tie via the platform
+default, but `bmad-loop mux` and the validate preflight would list both as
+available when only one actually drives the installed binary. A host with an
+ambiguous install resolves it explicitly: `bmad-loop mux set <name>`.
 
 **Deep contract →** [adapter authoring guide: the transport contract for a backend
 author](adapter-authoring-guide.md#the-transport-contract-for-a-backend-author).
@@ -208,7 +253,11 @@ keys off `sys.platform`. To exercise a not-yet-default backend on your dev box:
 | a process host | `BMAD_LOOP_PROCESS_HOST=windows` | `get_process_host.cache_clear()` |
 
 The env var picks the registered backend by `name`; `cache_clear()` is required
-because the first call memoizes the selection for the process.
+because the first call memoizes the selection for the process. To make a
+multiplexer choice stick across invocations instead, persist it with
+`bmad-loop mux set <name>` (writes `[mux] backend` into the machine-local
+policy.toml; the env var still outranks it, and `configure_multiplexer` /
+`register_multiplexer` clear the cache themselves).
 
 ---
 

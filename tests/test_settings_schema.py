@@ -28,6 +28,7 @@ from bmad_loop.policy import (
     CleanupPolicy,
     GatesPolicy,
     LimitsPolicy,
+    MuxPolicy,
     NotifyPolicy,
     Policy,
     ReviewPolicy,
@@ -58,6 +59,7 @@ SECTION_DC = {
     "scm": ScmPolicy,
     "cleanup": CleanupPolicy,
     "tui": TuiPolicy,
+    "mux": MuxPolicy,
 }
 
 # select fields whose options are an enum set.

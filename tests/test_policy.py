@@ -522,3 +522,135 @@ def test_to_dict_roundtrips_for_snapshot():
     pol = policy.load(None)
     snapshot = pol.to_dict()
     assert snapshot["limits"]["max_review_cycles"] == 3
+
+
+# ---------------------------------------------------------------------------
+# [mux] — machine-scoped terminal-multiplexer backend choice (issue #87)
+
+
+def test_mux_defaults_to_auto():
+    pol = policy.loads("")
+    assert pol.mux.backend == ""
+
+
+def test_mux_backend_parses_and_strips():
+    pol = policy.loads('[mux]\nbackend = " psmux "\n')
+    assert pol.mux.backend == "psmux"
+
+
+def test_mux_backend_rejects_junk():
+    with pytest.raises(policy.PolicyError, match="mux.backend"):
+        policy.loads('[mux]\nbackend = "not a name!"\n')
+
+
+def test_mux_scalar_section_rejected():
+    with pytest.raises(policy.PolicyError, match=r"\[mux\] must be a table"):
+        policy.loads('mux = "tmux"\n')
+
+
+def test_template_mux_block_parses_to_defaults():
+    pol = policy.loads(policy.POLICY_TEMPLATE)
+    assert pol.mux.backend == ""  # the anchor line ships commented out
+
+
+def test_write_mux_backend_uncomments_template_anchor(tmp_path):
+    p = tmp_path / "policy.toml"
+    policy.write_mux_backend(p, "psmux")
+    text = p.read_text(encoding="utf-8")
+    assert 'backend = "psmux"' in text
+    assert policy.load(p).mux.backend == "psmux"
+    # created from the template: full documentation retained
+    assert "[gates]" in text and "[scm]" in text
+
+
+def test_write_mux_backend_replaces_existing_value(tmp_path):
+    p = tmp_path / "policy.toml"
+    policy.write_mux_backend(p, "psmux")
+    before = p.read_text(encoding="utf-8")
+    policy.write_mux_backend(p, "tmux")
+    after = p.read_text(encoding="utf-8")
+    assert policy.load(p).mux.backend == "tmux"
+    # a targeted line replace: everything but the anchor line is byte-identical
+    diff = [(a, b) for a, b in zip(before.splitlines(), after.splitlines(), strict=True) if a != b]
+    assert diff == [('backend = "psmux"', 'backend = "tmux"')]
+
+
+def test_write_mux_backend_clear_recomments(tmp_path):
+    p = tmp_path / "policy.toml"
+    policy.write_mux_backend(p, "psmux")
+    policy.write_mux_backend(p, None)
+    assert policy.load(p).mux.backend == ""
+    assert '# backend = "tmux"' in p.read_text(encoding="utf-8")
+
+
+def test_write_mux_backend_appends_table_to_legacy_file(tmp_path):
+    p = tmp_path / "policy.toml"
+    legacy = '# my notes\n[gates]\nmode = "none"\n'
+    p.write_text(legacy, encoding="utf-8")
+    policy.write_mux_backend(p, "herdr")
+    text = p.read_text(encoding="utf-8")
+    assert text.startswith(legacy)  # untouched prefix, table appended at EOF
+    pol = policy.load(p)
+    assert pol.mux.backend == "herdr"
+    assert pol.gates.mode == "none"
+
+
+def test_write_mux_backend_reinserts_deleted_key_line(tmp_path):
+    p = tmp_path / "policy.toml"
+    p.write_text("[mux]\n# hand-trimmed file: no key line\n", encoding="utf-8")
+    policy.write_mux_backend(p, "tmux")
+    assert policy.load(p).mux.backend == "tmux"
+
+
+def test_write_mux_backend_preserves_hand_edits(tmp_path):
+    p = tmp_path / "policy.toml"
+    hand = '[limits]\nmax_dev_attempts = 7  # keep my comment\n\n[mux]\nbackend = "old"\n'
+    p.write_text(hand, encoding="utf-8")
+    policy.write_mux_backend(p, "new")
+    pol = policy.load(p)
+    assert pol.mux.backend == "new"
+    assert pol.limits.max_dev_attempts == 7
+    assert "# keep my comment" in p.read_text(encoding="utf-8")
+
+
+def test_write_mux_backend_preserves_trailing_comment_on_anchor_line(tmp_path):
+    """A hand-added comment on the backend line itself survives a replace —
+    'preserving every other byte' includes the anchor line's own comment."""
+    p = tmp_path / "policy.toml"
+    p.write_text('[mux]\nbackend = "old"  # pinned per teammate X\n', encoding="utf-8")
+    policy.write_mux_backend(p, "new")
+    text = p.read_text(encoding="utf-8")
+    assert 'backend = "new"  # pinned per teammate X\n' in text
+    assert policy.load(p).mux.backend == "new"
+
+
+def test_write_mux_backend_clear_preserves_trailing_comment(tmp_path):
+    """Clearing re-comments the line but keeps the hand-added trailing comment."""
+    p = tmp_path / "policy.toml"
+    p.write_text('[mux]\nbackend = "old"  # pinned per teammate X\n', encoding="utf-8")
+    policy.write_mux_backend(p, None)
+    text = p.read_text(encoding="utf-8")
+    assert '# backend = "tmux"  # pinned per teammate X\n' in text
+    assert policy.load(p).mux.backend == ""
+
+
+def test_write_mux_backend_preserves_crlf_line_ending(tmp_path):
+    p = tmp_path / "policy.toml"
+    p.write_bytes(b'[mux]\r\nbackend = "old"\r\n')
+    policy.write_mux_backend(p, "new")
+    assert b'backend = "new"\r\n' in p.read_bytes()
+
+
+def test_write_mux_backend_rejects_bad_name(tmp_path):
+    p = tmp_path / "policy.toml"
+    with pytest.raises(policy.PolicyError, match="mux.backend"):
+        policy.write_mux_backend(p, "bad name!")
+    assert not p.exists()  # rejected before any write
+
+
+def test_write_mux_backend_refuses_broken_file(tmp_path):
+    p = tmp_path / "policy.toml"
+    p.write_text("[gates\nmode = ", encoding="utf-8")
+    with pytest.raises(policy.PolicyError):
+        policy.write_mux_backend(p, "tmux")
+    assert p.read_text(encoding="utf-8") == "[gates\nmode = "  # never half-writes

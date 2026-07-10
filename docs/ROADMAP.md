@@ -17,8 +17,11 @@ obtained from `get_multiplexer()`; the tmux backend — argv + spawn primitive i
 `BaseTmuxBackend` (`adapters/tmux_base.py`), POSIX leaf `TmuxMultiplexer`
 (`adapters/tmux_backend.py`) — is the **only** place allowed to shell out to `tmux`, and it
 quarantines the POSIX `sh -c` parked-window trailer. Backends now self-**register**
-(`register_multiplexer`, selected by platform with a `BMAD_LOOP_MUX_BACKEND` override) rather
-than being hardcoded into `get_multiplexer()`. The process-lifecycle POSIX-isms moved behind a
+(`register_multiplexer`) rather than being hardcoded into `get_multiplexer()`, and selection
+(#87) is availability-aware with a dev-choosable persisted pick: `BMAD_LOOP_MUX_BACKEND` env
+var → the machine-scoped `[mux] backend` policy key (`bmad-loop mux set <name>`; policy.toml
+is gitignored) → the platform default (win32: `psmux`, elsewhere: `tmux`) when installed →
+the first registered platform match that is `available()`. The process-lifecycle POSIX-isms moved behind a
 matching seam, `ProcessHost` (`src/bmad_loop/process_host.py`): `terminate` / `force_kill` /
 `is_alive` / `identity` (a PID-reuse guard) plus `hook_interpreter()` (so hook registration
 never branches on platform), registered the same way (`register_process_host`,
@@ -31,15 +34,21 @@ held by a CI portability guard (`tests/test_portability_guard.py`). **WSL alread
 — it _is_ Linux, so it takes every fast path unchanged; this is purely about a future _native_
 Windows host.
 
-The remaining work is a real non-tmux backend (a "psmux"-style multiplexer) that implements
-the `TerminalMultiplexer` contract on native Windows and registers itself for `win32`. The
-seams are designed so this slots in as **new files + one registration line each, with no
-change to the adapters, `runs.py`, `tui/launch.py`, `probe.py`, `tui/data.py`, or
-`cli.py`'s `validate`** (`WindowsProcessHost` and its hook interpreter are already in place
-and registered). The end-to-end port path — both build options, the test-override env vars,
-and exactly what a native-Windows port costs — is documented in
-[Porting bmad-loop to a new OS](porting-to-a-new-os.md); the deep transport contract is in
-the [adapter authoring guide](adapter-authoring-guide.md#the-transport-contract-for-a-backend-author).
+The remaining work is the native-Windows backend itself. Two candidates are in flight, and
+they are **sibling tmux-family backends**, not stages of one plan: `psmux` (drives psmux's
+tmux-compatible shim via pwsh) and `tmux-windows` (#85; drives the tmux-windows port) — both
+subclass `BaseTmuxBackend`, both register for `win32`, and both invoke a binary literally
+named `tmux`, which is exactly why selection is availability-aware with discriminating
+`available()` probes (psmux → `which("psmux") and which("tmux") and which("pwsh")`;
+tmux-windows → `which("tmux") and not which("psmux")`) and an explicit
+`bmad-loop mux set <name>` tie-break. The seams are designed so each slots in as **new files
+plus one registration line, with no change to the adapters, `runs.py`, `tui/launch.py`,
+`probe.py`, `tui/data.py`, or `cli.py`'s `validate`** (`WindowsProcessHost` and its hook
+interpreter are already in place and registered). The end-to-end port path — both build
+options, the test-override env vars, and exactly what a native-Windows port costs — is
+documented in [Porting bmad-loop to a new OS](porting-to-a-new-os.md); the deep transport
+contract is in the
+[adapter authoring guide](adapter-authoring-guide.md#the-transport-contract-for-a-backend-author).
 
 **Open questions:** what hosts the windows on native Windows (Windows Terminal panes, a
 ConPTY-based manager, a headless process supervisor?); how attach/detach and the parked

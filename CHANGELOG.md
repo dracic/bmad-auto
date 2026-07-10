@@ -9,6 +9,19 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **Dev-choosable multiplexer backend selection (#87).** `get_multiplexer()` now resolves by
+  precedence — `BMAD_LOOP_MUX_BACKEND` env var → the new machine-scoped `[mux] backend` key in
+  policy.toml → the platform default (win32: `psmux`, elsewhere: `tmux`) when installed → the first
+  registered backend that matches the platform _and_ is `available()` — so two same-platform
+  backends (psmux / tmux-windows) no longer collide by registration order. Forced names are trusted
+  (no availability gate) and fail loudly when unregistered, naming the policy file. New
+  `bmad-loop mux` lists registered backends (platform / available / version / selected + why);
+  `bmad-loop mux set <name>` persists the choice (`--clear` reverts to auto, `--force` allows a
+  name that only registers on the target machine); no interactive prompts anywhere. `validate`'s
+  preflight lists all detected backends when more than one is registered and notes an env/policy
+  forced selection. A tmux-less POSIX host still selects `TmuxMultiplexer` and reports it
+  unavailable, exactly as before.
+
 - **Stories mode — a second planning pipeline that drives the loop off a typed `stories.yaml` (folder+id dispatch) instead of `sprint-status.yaml`.** Opt in with `[stories] source = "stories"` + `spec_folder`, or per run with `bmad-loop run --spec <folder>` (overrides policy); `--story` then filters by story id. Each entry dispatches by folder + id — the dev skill creates-or-resumes the story spec at `<folder>/stories/<id>-<slug>.md` and the orchestrator reads that id-keyed path back deterministically (no shared board to line-edit, no result-artifact mtime-scan). Strictly linear schedule (list order, no `depends_on`); `bmad-loop run --dry-run --spec <folder>` and `bmad-loop status` print the board (id · live disk state · checkpoint markers · title). Sprint mode is unchanged and remains the default. Requires a `bmad-dev-auto` new enough for folder+id dispatch — the run preflight checks and remediates.
 - **Per-story human checkpoints (stories mode).** Independent `spec_checkpoint` (pause before code to review the plan — dev halts at `ready-for-dev`; approve to implement, or request a replan that resets the spec to `draft`) and `done_checkpoint` (pause after the story commits, skipped when it is the last story); both additive to `gates.mode`. A blocked story escalates + resolves as in sprint mode, with a pre-planning-halt sentinel auto-deleted (a copy preserved under the run dir) on re-arm.
 - **TUI human-in-the-loop surface for stories mode.** The sprint tree is replaced by a stories board (id · live disk state · spec/done checkpoint markers · title) when a stories-mode run is selected; paused runs carry a per-run pause-kind badge and the run list shows a global _⚑ N need attention_ count; `p` opens the stage-appropriate viewer — plan-checkpoint spec review (Approve & resume / Request replan), story-checkpoint summary card (Continue / Stop), escalation with story context (Resolve / Re-arm & resume), and a gate spec viewer that the existing spec-approval/epic pauses reuse. The start-run modal gains a source select + spec-folder field with a live schedule preview. Every TUI action calls the same code paths as the CLI.
@@ -31,6 +44,13 @@ breaking changes may land in a minor release.
 
 ### Changed
 
+- **`bmad-loop init` now gitignores `.bmad-loop/policy.toml`.** Policy is per-machine-per-repo —
+  it carries the machine-specific `[mux] backend` choice (and the TUI settings editor rewrites
+  it), so it must not travel to teammates on other machines or OSes. A `.gitignore` entry does not
+  untrack an already-committed file: existing repos run `git rm --cached .bmad-loop/policy.toml`
+  once (the local copy is kept; `init` prints this hint when it detects a tracked policy).
+  bmad-loop's own worktree-clean preflight already exempted policy.toml — this additionally stops
+  inner dev sessions and plain `git status` from reading a policy edit as a dirty tree.
 - **The patch-restore seam is now one validator, one path normalizer, and one exclusion site.**
   `runs.validate_restore_latch` holds every latch precondition (sentinel wedge, spec-less escalation,
   worktree isolation) — the worktree check lived only in the CLI, so `rearm_escalation` called

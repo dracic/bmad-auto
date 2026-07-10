@@ -50,10 +50,15 @@ only `shutil.which("tmux")` presence checks, never an invocation.
 
 To add a backend, build a `TerminalMultiplexer` (`adapters/multiplexer.py`) and
 **register** it — `register_multiplexer(name, matches, factory)`, where
-`matches(sys.platform)` decides automatic selection and `name` is the key the
-`BMAD_LOOP_MUX_BACKEND` env var forces (for tests / overrides). `get_multiplexer()`
-returns the first backend whose `matches` is true, with tmux as the default
-fallback. There are two build paths: extend `BaseTmuxBackend` (`adapters/tmux_base.py`)
+`matches(sys.platform)` decides automatic selection and `name` is the key both
+the `BMAD_LOOP_MUX_BACKEND` env var and the persisted `[mux] backend` policy key
+force. `get_multiplexer()` resolves by precedence: env var → `[mux] backend`
+(set with `bmad-loop mux set <name>`, machine-scoped — policy.toml is
+gitignored) → the platform default when registered and `available()` → the
+first available platform match → the historical tmux fallback. `bmad-loop mux`
+lists every registered backend and the selection; same-platform backends need
+discriminating `available()` probes (see the
+[porting guide](porting-to-a-new-os.md#availability-discriminators-same-platform-backends)). There are two build paths: extend `BaseTmuxBackend` (`adapters/tmux_base.py`)
 for a tmux-family backend — overriding only its single spawn primitive `_run()`
 plus the shell-dialect hooks (`_shell_wrap`, `_join_argv`, `_parked_trailer`,
 `_source_prefix`, `_window_launch` and the `_EXIT_CAPTURE`/`_ECHO`/`_PARK`

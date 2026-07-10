@@ -503,6 +503,7 @@ behavior.
 | `plugins.unity.ready_timeout_sec`     | int ≥ 1                | 600                | readiness-gate budget for the Editor + MCP to come up                                                                                                   |
 | `plugins.unity.ready_grace_sec`       | int ≥ -1               | -1                 | pre-probe delay; `-1` = auto (120s cold `per_worktree`, 0s warm `shared`)                                                                               |
 | `tui.low_frame_rate`                  | switch                 | off                | cap to 15fps + disable animations (slow/SSH links); applies next launch                                                                                 |
+| `mux.backend`                         | text                   | (auto-select)      | force a registered terminal-multiplexer backend by name (see `bmad-loop mux`); machine-specific — policy.toml is gitignored; applies next invocation    |
 
 (`scm.max_parallel` is intentionally **not** exposed in the editor — it stays
 inert, clamped to 1, until parallel fan-out is built.)
