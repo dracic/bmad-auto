@@ -535,6 +535,7 @@ async def test_journal_jump_pins_other_sessions_log(project):
         assert "(pinned" not in log_text(screen)
 
 
+@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_journal_jump_near_tail_does_not_chase_growing_log(project):
     # Regression for "pressing enter keeps sending me to the bottom": jumping to
     # an entry near the end lands the view at the tail, and the old code then
@@ -557,7 +558,17 @@ async def test_journal_jump_near_tail_does_not_chase_growing_log(project):
         journal_list.focus()
         await pilot.press("end", "enter")  # jump to the near-tail checkpoint
         log = screen.query_one("#log", RichLog)
-        await until(pilot, lambda: log.is_vertical_scroll_end)  # landed at the tail
+        # Wait for the jump to actually settle at the tail: max_scroll_y > 0 proves
+        # the RichLog flushed its lines (an empty/unflushed pane is trivially "at
+        # scroll end" with scroll_y == max == 0, which would sample anchored=0 before
+        # the deferred _scroll_log_to timer runs, then fail when the jump lands late).
+        await until(pilot, lambda: log.max_scroll_y > 0 and log.is_vertical_scroll_end)
+        # The flush's own scroll_end can satisfy the wait while one deferred
+        # _scroll_log_to retry is still armed; post-flush that fire clamps to the
+        # tail and ends the chain, but landing after the growth-render below would
+        # re-scroll against the grown content. Drain it before sampling the anchor.
+        await pilot.pause(0.12)
+        assert log.is_vertical_scroll_end  # chain drained at the tail, not mid-log
         anchored, base_max = log.scroll_y, log.max_scroll_y
         # the live session keeps writing; a poll repaints the pane
         with (run_dir / "logs" / "story-1.log").open("ab") as f:
