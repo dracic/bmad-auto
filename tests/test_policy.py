@@ -615,9 +615,9 @@ def test_write_mux_backend_preserves_hand_edits(tmp_path):
 
 def test_write_mux_backend_preserves_crlf_line_ending(tmp_path):
     p = tmp_path / "policy.toml"
-    p.write_text('[mux]\r\nbackend = "old"\r\n', encoding="utf-8", newline="")
+    p.write_bytes(b'[mux]\r\nbackend = "old"\r\n')
     policy.write_mux_backend(p, "new")
-    assert 'backend = "new"\r\n' in p.read_text(encoding="utf-8", newline="")
+    assert b'backend = "new"\r\n' in p.read_bytes()
 
 
 def test_write_mux_backend_rejects_bad_name(tmp_path):
