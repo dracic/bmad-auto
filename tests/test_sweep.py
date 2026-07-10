@@ -2,7 +2,9 @@
 
 import json
 import re
+from pathlib import Path
 
+import pytest
 from conftest import (
     bundle_dev_effect,
     bundle_dev_escalates,
@@ -18,7 +20,7 @@ from conftest import (
 from bmad_loop import deferredwork, runs, verify
 from bmad_loop.adapters.base import SessionResult
 from bmad_loop.adapters.mock import MockAdapter
-from bmad_loop.journal import Journal, load_state
+from bmad_loop.journal import Journal, load_state, save_state
 from bmad_loop.model import Phase, RunState, StoryTask, TokenUsage
 from bmad_loop.policy import (
     DevPolicy,
@@ -1719,3 +1721,231 @@ def test_sweep_bundle_budget_followup_not_refiled_twice(project):
     assert open_followups == []  # no second follow-up entry created
     capped = [e for e in engine.journal.entries() if e["kind"] == "review-budget-committed"]
     assert len(capped) == 1 and capped[0]["re_review_capped"] is True
+
+
+# ------------------------------ in-flight bundle recovery on resume (#94)
+
+
+def _lose_triage(run_dir, corruption="missing"):
+    """Make the cached triage plan unusable the three ways a real run can: the
+    file vanished, it was truncated mid-write, or it holds something that is not
+    a triage result."""
+    path = run_dir / "triage.json"
+    if corruption == "missing":
+        path.unlink()
+    elif corruption == "invalid-json":
+        path.write_text("{{{", encoding="utf-8")
+    else:
+        path.write_text("{}", encoding="utf-8")
+
+
+def _run_two_bundle_dev_escalation(project):
+    """Drive a two-bundle sweep until the first bundle's dev session escalates.
+    Returns the paused engine; `dw-fix` is ESCALATED, `dw-other` never started,
+    both dw ids still open."""
+    write_ledger(project, {"DW-1": "open", "DW-2": "open"})
+    plan = triage_result(
+        ["DW-1", "DW-2"],
+        bundles=[
+            {"name": "fix", "dw_ids": ["DW-1"], "intent": "resolve DW-1"},
+            {"name": "other", "dw_ids": ["DW-2"], "intent": "resolve DW-2"},
+        ],
+    )
+    engine, _ = make_sweep(
+        project, [triage_effect(plan), bundle_dev_escalates(project, "fix", ["DW-1"])]
+    )
+    assert engine.run().paused
+    assert engine.state.tasks["dw-fix"].phase == Phase.ESCALATED
+    assert "dw-other" not in engine.state.tasks
+    return engine
+
+
+def _redrive_script(project):
+    return [bundle_dev_effect(project, "fix", ["DW-1"]), bundle_review_effect(project, "fix")]
+
+
+def test_rearmed_bundle_redrives_when_triage_json_lost(project):
+    # The regression: a human-resolved bundle used to re-drive only because the
+    # cached triage plan reloaded and re-emitted its name. Recovery now keys on
+    # the persisted task, so losing the cache changes nothing.
+    engine = _run_to_dev_escalation(project)
+    runs.rearm_escalation(engine.run_dir, "dw-fix")
+    _lose_triage(engine.run_dir)
+
+    resumed, adapter = resume_sweep(project, engine, _redrive_script(project))
+    summary = resumed.run()
+
+    assert not summary.paused
+    assert resumed.state.tasks["dw-fix"].phase == Phase.DONE
+    # no triage session: the re-drive never consulted a plan
+    assert [s.role for s in adapter.sessions] == ["dev", "review"]
+    journal = journal_text(resumed)
+    assert "sweep-inflight-redrive" in journal
+    assert "sweep-nothing-open" in journal  # recovery closed the only open id
+    assert ledger_entries(project)["DW-1"].status.startswith("done")
+
+
+@pytest.mark.parametrize("corruption", ["missing", "invalid-json", "wrong-shape"])
+def test_fresh_triage_different_bundle_name_no_double_drive(project, corruption):
+    # The fresh triage renames the surviving bundle, so a name-matched recovery
+    # would orphan the re-armed one. It must re-drive by identity, and its ids
+    # must have left the open set before the fresh triage sees them.
+    engine = _run_two_bundle_dev_escalation(project)
+    runs.rearm_escalation(engine.run_dir, "dw-fix")
+    _lose_triage(engine.run_dir, corruption)
+
+    fresh = triage_result(
+        ["DW-2"], bundles=[{"name": "renamed-fix", "dw_ids": ["DW-2"], "intent": "resolve DW-2"}]
+    )
+    resumed, adapter = resume_sweep(
+        project,
+        engine,
+        [
+            *_redrive_script(project),
+            triage_effect(fresh),
+            bundle_dev_effect(project, "renamed-fix", ["DW-2"]),
+            bundle_review_effect(project, "renamed-fix"),
+        ],
+    )
+    summary = resumed.run()
+
+    assert not summary.paused
+    assert [s.role for s in adapter.sessions] == ["dev", "review", "triage", "dev", "review"]
+    assert resumed.state.tasks["dw-fix"].phase == Phase.DONE
+    assert resumed.state.tasks["dw-renamed-fix"].phase == Phase.DONE
+    # each id was closed exactly once, by the bundle that owned it
+    closed = [e for e in resumed.journal.entries() if e["kind"] == "sweep-bundle-closed"]
+    owners = [(i, e["story_key"]) for e in closed for i in e["dw_ids"]]
+    assert sorted(owners) == [("DW-1", "dw-fix"), ("DW-2", "dw-renamed-fix")]
+    if corruption != "missing":
+        # a truncated / wrong-shape cache degrades to a fresh triage, never a crash
+        assert "sweep-triage-reload-failed" in journal_text(resumed)
+
+
+def test_restore_patch_latch_honored_when_triage_json_lost(project, monkeypatch):
+    monkeypatch.setattr(verify, "apply_patch", lambda repo, patch: None)
+    engine = _run_to_dev_escalation(project)
+    patch = project.implementation_artifacts / "attempt-dw-fix.patch"
+    patch.parent.mkdir(parents=True, exist_ok=True)
+    patch.write_text("dummy\n")
+    runs.rearm_escalation(engine.run_dir, "dw-fix", restore_patch=str(patch))
+    _lose_triage(engine.run_dir)
+
+    resumed, adapter = resume_sweep(project, engine, _redrive_script(project))
+    summary = resumed.run()
+
+    assert not summary.paused
+    task = resumed.state.tasks["dw-fix"]
+    assert task.phase == Phase.DONE
+    # the recovery pass preserved the restore semantics _run_bundle used to own
+    assert "Resume review of the in-review spec" in adapter.sessions[0].prompt
+    assert "attempt-restored" in journal_text(resumed)
+    assert task.restore_patch is None and task.resolved_redrive is False
+    assert ledger_entries(project)["DW-1"].status.startswith("done")
+
+
+def test_escalated_unresolved_still_skipped_when_triage_json_lost(project):
+    # An escalation nobody resolved is terminal: recovery must not touch it, and
+    # the fresh triage's overlapping bundle is still dropped by the failed-ids filter.
+    engine = _run_two_bundle_dev_escalation(project)
+    _lose_triage(engine.run_dir)
+
+    fresh = triage_result(
+        ["DW-1", "DW-2"],
+        bundles=[
+            {"name": "retry-fix", "dw_ids": ["DW-1"], "intent": "a"},
+            {"name": "other", "dw_ids": ["DW-2"], "intent": "b"},
+        ],
+    )
+    resumed, adapter = resume_sweep(
+        project,
+        engine,
+        [
+            triage_effect(fresh),
+            bundle_dev_effect(project, "other", ["DW-2"]),
+            bundle_review_effect(project, "other"),
+        ],
+    )
+    summary = resumed.run()
+
+    assert not summary.paused
+    assert "sweep-inflight-redrive" not in journal_text(resumed)
+    assert [s.role for s in adapter.sessions] == ["triage", "dev", "review"]
+    assert resumed.state.tasks["dw-fix"].phase == Phase.ESCALATED
+    assert "dw-retry-fix" not in resumed.state.tasks
+    assert "sweep-bundle-skipped" in journal_text(resumed)
+    entries = ledger_entries(project)
+    assert entries["DW-1"].open  # escalated bundle untouched
+    assert entries["DW-2"].status.startswith("done")
+
+
+def test_interrupted_bundle_redrives_by_identity_after_triage_loss(project):
+    # Not a re-arm: the host just died mid-dev. The restart arm rolls the attempt
+    # back against its own baseline (cause="stopped") and re-runs the bundle.
+    engine = _run_to_dev_escalation(project)
+    state = load_state(engine.run_dir)
+    task = state.tasks["dw-fix"]
+    assert task.baseline_commit
+    task.phase = Phase.DEV_RUNNING
+    save_state(engine.run_dir, state)
+    _lose_triage(engine.run_dir)
+
+    resumed, adapter = resume_sweep(project, engine, _redrive_script(project))
+    summary = resumed.run()
+
+    assert not summary.paused
+    assert resumed.state.tasks["dw-fix"].phase == Phase.DONE
+    assert [s.role for s in adapter.sessions] == ["dev", "review"]
+    redrive = [e for e in resumed.journal.entries() if e["kind"] == "sweep-inflight-redrive"]
+    assert len(redrive) == 1
+    assert redrive[0]["phase"] == "dev-running" and redrive[0]["rearmed"] is False
+    journal = journal_text(resumed)
+    assert "rollback-auto" in journal  # a stopped attempt, rolled back to baseline
+    assert "attempt-restored" not in journal  # not a resolved re-drive
+    assert ledger_entries(project)["DW-1"].status.startswith("done")
+
+
+def test_regenerated_intent_when_bundle_file_missing(project):
+    # The triage session's authored prose is the one unrecoverable piece; the
+    # verbatim ledger entries are re-attached and become the contract.
+    engine = _run_to_dev_escalation(project)
+    runs.rearm_escalation(engine.run_dir, "dw-fix")
+    _lose_triage(engine.run_dir)
+    intent = Path(engine.state.tasks["dw-fix"].bundle_file)
+    intent.unlink()
+
+    resumed, adapter = resume_sweep(project, engine, _redrive_script(project))
+    summary = resumed.run()
+
+    assert not summary.paused
+    assert resumed.state.tasks["dw-fix"].phase == Phase.DONE
+    regen = [e for e in resumed.journal.entries() if e["kind"] == "sweep-intent-regenerated"]
+    assert len(regen) == 1 and regen[0]["dw_ids"] == ["DW-1"]
+    assert regen[0]["path"] == str(intent)
+    text = intent.read_text(encoding="utf-8")
+    assert "bundle_name: fix" in text
+    assert "### DW-1" in text and "reason: test entry." in text  # verbatim ledger entry
+    assert "authoritative" in text
+    assert str(intent) in adapter.sessions[0].prompt  # the dev session got the rebuilt file
+
+
+def test_stranded_bundle_task_warns_loudly(project):
+    write_ledger(project, {"DW-1": "open"})
+    engine, _ = make_sweep(project, [])
+    engine.state.tasks["dw-ghost"] = StoryTask(
+        story_key="dw-ghost", epic=0, dw_ids=["DW-1"], phase=Phase.DEV_RUNNING
+    )
+
+    engine._warn_stranded_bundles()
+
+    stranded = [e for e in engine.journal.entries() if e["kind"] == "sweep-inflight-stranded"]
+    assert len(stranded) == 1 and stranded[0]["story_keys"] == ["dw-ghost"]
+    assert "dw-ghost" in (engine.run_dir / "ATTENTION").read_text(encoding="utf-8")
+
+    # a terminal bundle and a non-bundle task are not stranded
+    engine.state.tasks["dw-ghost"].phase = Phase.DONE
+    engine.state.tasks["sweep-triage"] = StoryTask(
+        story_key="sweep-triage", epic=0, phase=Phase.TRIAGE_RUNNING
+    )
+    engine._warn_stranded_bundles()
+    assert len([e for e in engine.journal.entries() if e["kind"] == "sweep-inflight-stranded"]) == 1

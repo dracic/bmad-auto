@@ -36,6 +36,10 @@ TRIAGE_WORKFLOW = "deferred-sweep-triage"
 MIGRATE_KEY = "sweep-migrate"
 MIGRATE_WORKFLOW = "deferred-sweep-migrate"
 BUNDLE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")
+# the inverse of SweepEngine._bundle_key: "dw-<name>" (cycle 1) / "dw<N>-<name>".
+# A cycle-1 key always has "-" straight after "dw", so the cycle group matches
+# empty and the split stays unambiguous even for a bundle named "2fix".
+BUNDLE_KEY_RE = re.compile(r"^dw(\d*)-(.+)$")
 DECISION_EFFECTS = ("build", "close", "keep-open")
 
 
@@ -408,6 +412,11 @@ class SweepEngine(Engine):
     def _loop(self) -> None:
         ledger = self.workspace.paths.deferred_work
         cycle = max(1, self.state.sweep_cycle)
+        if self._finish_inflight_bundles():
+            # a recovered bundle's ledger restore can leave the tree dirty, and
+            # triage plus the first bundle baseline need a clean one. Guarded on
+            # a non-empty pass so a fresh sweep never commits the user's dirt.
+            self._commit_ledger("chore(sweep): commit ledger after recovering in-flight bundles")
         while True:
             self.state.sweep_cycle = cycle
             self._save()
@@ -451,6 +460,62 @@ class SweepEngine(Engine):
             self._commit_ledger("chore(sweep): commit ledger before next sweep cycle")
             cycle += 1
 
+    def _finish_inflight_bundles(self) -> int:
+        """Re-drive every bundle this run left in flight, keyed on the task's own
+        persisted story_key. Returns how many were recovered.
+
+        The base Engine._loop opens with _finish_inflight for exactly this reason;
+        the sweep loop used to recover a bundle only from inside _run_bundle, which
+        a cycle reaches only after re-deriving the bundle's key from the *current*
+        triage plan. A re-armed bundle therefore survived a resume solely because
+        the cached triage.json reloaded and re-emitted the same bundle name — lose
+        that cache and a fresh triage partitions the ids under new names, silently
+        orphaning the human's resolution (#94).
+
+        Runs before the ledger is read, so a bundle it closes leaves the open set
+        and no fresh triage can re-bundle those ids (validate_triage rejects a plan
+        whose open_ids disagree with the ledger). A recovered bundle that defers or
+        escalates keeps its ids open, where the existing failed_ids filter drops the
+        fresh plan's overlapping bundle."""
+        recovered = 0
+        for task in list(self.state.tasks.values()):
+            if task.terminal or not BUNDLE_KEY_RE.match(task.story_key):
+                continue
+            recovered += 1
+            self.journal.append(
+                "sweep-inflight-redrive",
+                story_key=task.story_key,
+                phase=str(task.phase),
+                rearmed=task.rearmed,  # read before the recovery clears the latch
+            )
+            if self._recover_inflight_bundle(task):
+                continue
+            self._ensure_bundle_intent(task)
+            self._save()
+            self._emit("pre_bundle", task)
+            self._run_story(task)
+            self._emit("post_bundle", task)
+        return recovered
+
+    def _warn_stranded_bundles(self) -> None:
+        """Invariant: _finish_inflight_bundles has driven every persisted bundle to
+        a terminal phase before a cycle picks new work. A survivor means a bundle
+        would be silently dropped — say so loudly rather than sweep past it."""
+        stranded = [
+            t.story_key
+            for t in self.state.tasks.values()
+            if BUNDLE_KEY_RE.match(t.story_key) and not t.terminal
+        ]
+        if not stranded:
+            return
+        self.journal.append("sweep-inflight-stranded", story_keys=stranded)
+        gates.notify(
+            self.policy,
+            self.run_dir,
+            f"{len(stranded)} sweep bundle(s) left in flight",
+            "not re-driven by this cycle: " + ", ".join(stranded),
+        )
+
     def _cycle(self, cycle: int, open_now: set[str]) -> bool:
         """One triage -> close -> decide -> bundle pass. Returns whether the
         cycle completed any addressable work — the repeat loop's progress
@@ -458,6 +523,7 @@ class SweepEngine(Engine):
         already-resolved closes, the replayed (idempotent) closes report 0 and
         the run stops with no-progress; errs toward stopping, never loops."""
         self._emit("pre_sweep_cycle", phase=str(cycle))
+        self._warn_stranded_bundles()
         plan = self._ensure_triage(open_now, cycle)
         closed = self._close_resolved(plan)
         answers, decisions_closed = self._decisions_phase(plan)
@@ -515,47 +581,61 @@ class SweepEngine(Engine):
             task = StoryTask(story_key=key, epic=0, dw_ids=list(bundle.dw_ids))
             self.state.tasks[key] = task
             self.journal.append("bundle-start", story_key=key, dw_ids=list(bundle.dw_ids))
-        else:
-            # interrupted mid-bundle (or a re-armed escalation resolved via
-            # `bmad-loop resolve`): same recovery as Engine._finish_inflight,
-            # including the re-drive latch so a human-resolved escalation is
-            # protected through every reset (mirrors engine.py:1151-1157).
-            self.journal.append("resume-restart", story_key=key, phase=str(task.phase))
-            isolated = self._isolated and task.worktree_path
-            if task.phase == Phase.DEV_VERIFY and task.spec_file:
-                self._save()
-                if isolated:
-                    unit = self._reopen_unit(task)
-                    prev = self.workspace
-                    self.workspace = unit.workspace
-                    try:
-                        self._review_and_commit(task)
-                    finally:
-                        self.workspace = prev
-                    self._integrate_unit(task, unit)
-                else:
-                    self._review_and_commit(task)
-                return
-            if isolated:
-                # drop the half-built worktree; _run_story mounts a fresh one
-                discard_worktree(self.paths.repo_root, task.worktree_path, task.branch)
-                task.worktree_path = ""
-                task.branch = ""
-            elif task.baseline_commit:
-                # latch resolved_redrive so the corrected spec + restored diff stay
-                # protected through every reset of this re-drive, not just this
-                # first one; cause="resolved" keeps a human-initiated re-arm
-                # pause-free regardless of scm.rollback_on_failure
-                task.resolved_redrive = task.resolved_redrive or task.rearmed
-                self._rollback_or_pause(task, cause="resolved" if task.rearmed else "stopped")
-            task.rearmed = False  # past rollback (only reached when not paused)
-            task.phase = Phase.PENDING  # deliberate reset, not a normal transition
+        elif self._recover_inflight_bundle(task):
+            return
         dirname = bundle.name if cycle == 1 else f"c{cycle}-{bundle.name}"
         task.bundle_file = str(self._write_intent(bundle, dirname))
         self._save()
         self._emit("pre_bundle", task)
         self._run_story(task)
         self._emit("post_bundle", task)
+
+    def _recover_inflight_bundle(self, task: StoryTask) -> bool:
+        """Recover a bundle task interrupted mid-flight (or re-armed after a
+        human resolved its escalation via `bmad-loop resolve`): the same recovery
+        as Engine._finish_inflight, including the re-drive latch so a
+        human-resolved escalation is protected through every reset (mirrors
+        engine.py:1163-1169).
+
+        Returns True when the dev-verified arm carried the bundle all the way
+        through review and commit — the caller is done. Returns False once the
+        task has been reset to PENDING, leaving the caller to dispatch it.
+
+        Deliberately narrower than the base _finish_inflight: no
+        `_resumable_session` arm, so a bundle whose host died in the
+        post-session window still restarts rather than replaying its recorded
+        result. Lifting that is a resume-fidelity change of its own."""
+        self.journal.append("resume-restart", story_key=task.story_key, phase=str(task.phase))
+        isolated = self._isolated and task.worktree_path
+        if task.phase == Phase.DEV_VERIFY and task.spec_file:
+            self._save()
+            if isolated:
+                unit = self._reopen_unit(task)
+                prev = self.workspace
+                self.workspace = unit.workspace
+                try:
+                    self._review_and_commit(task)
+                finally:
+                    self.workspace = prev
+                self._integrate_unit(task, unit)
+            else:
+                self._review_and_commit(task)
+            return True
+        if isolated:
+            # drop the half-built worktree; _run_story mounts a fresh one
+            discard_worktree(self.paths.repo_root, task.worktree_path, task.branch)
+            task.worktree_path = ""
+            task.branch = ""
+        elif task.baseline_commit:
+            # latch resolved_redrive so the corrected spec + restored diff stay
+            # protected through every reset of this re-drive, not just this
+            # first one; cause="resolved" keeps a human-initiated re-arm
+            # pause-free regardless of scm.rollback_on_failure
+            task.resolved_redrive = task.resolved_redrive or task.rearmed
+            self._rollback_or_pause(task, cause="resolved" if task.rearmed else "stopped")
+        task.rearmed = False  # past rollback (only reached when not paused)
+        task.phase = Phase.PENDING  # deliberate reset, not a normal transition
+        return False
 
     # ------------------------------------------------------------ migration
 
@@ -678,11 +758,21 @@ class SweepEngine(Engine):
         triage_key = TRIAGE_KEY + suffix
         if triage_path.is_file():
             # already validated this run; the ledger has moved since (closes,
-            # decisions), so skip the open-set equality re-check
-            plan, errors = validate_triage(_read_json(triage_path), None)
-            if plan is not None:
-                return plan
-            self.journal.append("sweep-triage-reload-failed", errors=errors)
+            # decisions), so skip the open-set equality re-check. A cache we
+            # cannot read or that is not a JSON object degrades to a fresh
+            # triage — a truncated file must not crash the whole run.
+            try:
+                cached = _read_json(triage_path)
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+                self.journal.append("sweep-triage-reload-failed", errors=[f"unreadable: {exc}"])
+            else:
+                if isinstance(cached, dict):
+                    plan, errors = validate_triage(cached, None)
+                else:
+                    plan, errors = None, [f"not a JSON object: {type(cached).__name__}"]
+                if plan is not None:
+                    return plan
+                self.journal.append("sweep-triage-reload-failed", errors=errors)
 
         task = self.state.tasks.get(triage_key)
         if task is None:
@@ -978,6 +1068,41 @@ class SweepEngine(Engine):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines), encoding="utf-8")
         return path
+
+    def _ensure_bundle_intent(self, task: StoryTask) -> None:
+        """Guarantee a recovered bundle has the intent file its dev prompt points
+        at. The rendered intent.md persists in the run dir and the prompt consumes
+        nothing else from the plan, so the normal case is to reuse it untouched.
+
+        Only when it is gone do we rebuild a degraded one from the task itself.
+        The triage session's authored intent prose is the single unrecoverable
+        piece; the verbatim ledger entries _write_intent re-attaches carry the
+        actual work, so say plainly that they are now the contract."""
+        if task.bundle_file and Path(task.bundle_file).is_file():
+            return
+        match = BUNDLE_KEY_RE.match(task.story_key)
+        if match is None:  # pragma: no cover - callers filter on BUNDLE_KEY_RE
+            return
+        cycle = int(match.group(1)) if match.group(1) else 1
+        name = match.group(2)
+        bundle = Bundle(
+            name=name,
+            dw_ids=tuple(task.dw_ids),
+            intent=(
+                "Resolve the deferred-work entries reproduced below. This bundle's "
+                "original triage intent did not survive the run it was written in, "
+                "so the verbatim ledger entries are the authoritative statement of "
+                "the work."
+            ),
+        )
+        dirname = name if cycle == 1 else f"c{cycle}-{name}"
+        task.bundle_file = str(self._write_intent(bundle, dirname))
+        self.journal.append(
+            "sweep-intent-regenerated",
+            story_key=task.story_key,
+            dw_ids=list(task.dw_ids),
+            path=task.bundle_file,
+        )
 
     # ------------------------------------------------------ override seams
 
