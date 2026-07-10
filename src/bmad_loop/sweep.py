@@ -604,9 +604,28 @@ class SweepEngine(Engine):
         Deliberately narrower than the base _finish_inflight: no
         `_resumable_session` arm, so a bundle whose host died in the
         post-session window still restarts rather than replaying its recorded
-        result. Lifting that is a resume-fidelity change of its own."""
-        self.journal.append("resume-restart", story_key=task.story_key, phase=str(task.phase))
+        result. Lifting that is a resume-fidelity change of its own. The
+        COMMITTING window IS recovered, though — same as the base engine's
+        resume-commit arm (#115)."""
         isolated = self._isolated and task.worktree_path
+        if task.phase == Phase.COMMITTING:
+            # the gate+advance save landed pre-death; finish the commit
+            # instead of rolling verified bundle work back (see
+            # Engine._finalize_commit_phase for the re-drive contract).
+            self.journal.append("resume-commit", story_key=task.story_key)
+            if isolated:
+                unit = self._reopen_unit(task)
+                prev = self.workspace
+                self.workspace = unit.workspace
+                try:
+                    self._finalize_commit_phase(task)
+                finally:
+                    self.workspace = prev
+                self._integrate_unit(task, unit)
+            else:
+                self._finalize_commit_phase(task)
+            return True
+        self.journal.append("resume-restart", story_key=task.story_key, phase=str(task.phase))
         if task.phase == Phase.DEV_VERIFY and task.spec_file:
             self._save()
             if isolated:

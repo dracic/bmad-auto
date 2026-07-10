@@ -46,6 +46,15 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **Resume no longer discards a story that already passed its pre-commit gates.** A host death in
+  the COMMITTING window (phase persisted before `finalize_commit` ran and the DONE save stamped
+  `commit_sha`) matched no resume arm — there is no COMMITTING-keyed session record to replay — and
+  fell through to resume-restart, rolling back or pausing over fully-verified work. Resume now
+  finishes the commit in place: the `pre_commit_gate` workflows are not re-charged (the persisted
+  phase is durable proof they passed), the `pre_commit` hook re-fires (message regeneration and
+  pause veto honored), and `finalize_commit`'s content-idempotence covers both the pre- and
+  post-squash crash states. Sweep bundles get the same recovery in `_recover_inflight_bundle` (#115).
+
 - **Resume no longer asks for a rollback of a completed session's committed work.** A host death
   in the post-verify decision window left the task persisted at `DEV_VERIFY`/`REVIEW_VERIFY`,
   where the resume replay matcher (which only knew the `*_RUNNING` phases) missed the

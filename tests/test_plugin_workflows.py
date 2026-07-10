@@ -19,13 +19,13 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from conftest import dev_effect, git, review_effect, write_sprint
+from conftest import committing_crash_state, dev_effect, git, review_effect, write_sprint
 
 from bmad_loop.adapters.base import SessionResult
 from bmad_loop.adapters.mock import MockAdapter
 from bmad_loop.engine import Engine
-from bmad_loop.journal import Journal
-from bmad_loop.model import RunState, TokenUsage
+from bmad_loop.journal import Journal, load_state
+from bmad_loop.model import Phase, RunState, TokenUsage
 from bmad_loop.plugins import PluginRegistry
 from bmad_loop.plugins.model import (
     LoadedPlugin,
@@ -324,6 +324,39 @@ def test_blocking_pre_commit_gate_failure_defers_the_unit(project):
     assert summary.deferred == 1 and summary.done == 0
     kinds = [e["kind"] for e in engine.journal.entries()]
     assert "story-deferred" in kinds and "story-done" not in kinds
+
+
+def test_pre_commit_gate_workflow_not_rerun_on_commit_resume(project):
+    """#115: a task persisted at COMMITTING already ran its pre_commit_gate
+    workflows — the phase save lands only after the gate loop returns clean.
+    The resume re-drive must not re-charge them (and could not legally unwind
+    a blocking failure anyway: COMMITTING has no move to DEFERRED)."""
+    reg = PluginRegistry(
+        [LoadedPlugin(manifest=wf_manifest("wf", stage="pre_commit_gate", blocking=True))]
+    )
+    engine, _ = make_engine(project, [], reg)
+    committing_crash_state(project, engine)
+
+    state = load_state(engine.run_dir)
+    state.clear_pause()
+    adapter = MockAdapter([])
+    resumed = Engine(
+        paths=project,
+        policy=engine.policy,
+        adapter=adapter,
+        run_dir=engine.run_dir,
+        journal=engine.journal,
+        state=state,
+        registry=reg,
+    )
+    summary = resumed.run()
+
+    assert summary.done == 1
+    assert load_state(resumed.run_dir).tasks["1-1-a"].phase == Phase.DONE
+    assert adapter.sessions == []  # the gate session was not re-charged
+    kinds = [e["kind"] for e in resumed.journal.entries()]
+    assert "workflow-start" not in kinds
+    assert "resume-commit" in kinds and "story-done" in kinds
 
 
 def test_no_workflow_no_extra_session(project):

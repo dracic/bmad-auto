@@ -1936,6 +1936,49 @@ def test_interrupted_bundle_redrives_by_identity_after_triage_loss(project):
     assert ledger_entries(project)["DW-1"].status.startswith("done")
 
 
+def test_resume_committing_bundle_finishes_commit(project):
+    """#115, sweep flavor: a bundle whose host died in the commit window
+    (COMMITTING persisted, DONE save never landed) is finished on resume —
+    the recovery arm mirrors the base engine's resume-commit, not the
+    rollback+restart the recovery used to apply to every non-DEV_VERIFY phase."""
+    write_ledger(project, {"DW-1": "open"})
+    plan = triage_result(
+        ["DW-1"], bundles=[{"name": "fix", "dw_ids": ["DW-1"], "intent": "resolve DW-1"}]
+    )
+    engine, _ = make_sweep(
+        project,
+        [
+            triage_effect(plan),
+            bundle_dev_effect(project, "fix", ["DW-1"]),
+            bundle_review_effect(project, "fix"),
+        ],
+    )
+
+    def crashing_emit(stage, *args, **kwargs):
+        if stage == "pre_commit":
+            raise RuntimeError("host died in the commit window")
+        return original_emit(stage, *args, **kwargs)
+
+    original_emit = engine._emit
+    engine._emit = crashing_emit
+    assert engine.run().crashed
+    crashed = load_state(engine.run_dir).tasks["dw-fix"]
+    assert crashed.phase == Phase.COMMITTING
+    assert not crashed.commit_sha  # stamped only by the DONE save that never ran
+
+    resumed, adapter = resume_sweep(project, engine, [])
+    summary = resumed.run()
+
+    assert not summary.paused and not summary.crashed
+    task = resumed.state.tasks["dw-fix"]
+    assert task.phase == Phase.DONE and task.commit_sha
+    assert adapter.sessions == []  # no triage, dev, review, or gate session re-run
+    journal = journal_text(resumed)
+    assert "resume-commit" in journal
+    assert "resume-restart" not in journal
+    assert ledger_entries(project)["DW-1"].status.startswith("done")
+
+
 def test_regenerated_intent_when_bundle_file_missing(project):
     # The triage session's authored prose is the one unrecoverable piece; the
     # verbatim ledger entries are re-attached and become the contract.

@@ -1184,6 +1184,27 @@ class Engine:
                     self._integrate_unit(task, unit)
                 else:
                     continuation()
+            elif task.phase == Phase.COMMITTING:
+                # the host died in the commit window: the gate+advance save
+                # landed (pre_commit_gate ran clean) but the DONE save that
+                # stamps commit_sha did not. Finish the commit instead of
+                # rolling verified work back — the gates are deliberately NOT
+                # re-run (see _finalize_commit_phase), the pre_commit hook IS
+                # re-emitted (message regenerated; pause veto still honored),
+                # and finalize_commit tolerates both the pre- and post-squash
+                # crash states (#115).
+                self.journal.append("resume-commit", story_key=task.story_key)
+                if isolated:
+                    unit = self._reopen_unit(task)
+                    prev = self.workspace
+                    self.workspace = unit.workspace
+                    try:
+                        self._finalize_commit_phase(task)
+                    finally:
+                        self.workspace = prev
+                    self._integrate_unit(task, unit)
+                else:
+                    self._finalize_commit_phase(task)
             else:
                 self.journal.append(
                     "resume-restart", story_key=task.story_key, phase=str(task.phase)
@@ -1784,6 +1805,31 @@ class Engine:
             return
         advance(task, Phase.COMMITTING)
         self._save()
+        self._finalize_commit_phase(task)
+
+    def _finalize_commit_phase(self, task: StoryTask) -> None:
+        """Drive an already-COMMITTING task to DONE: regenerate the message,
+        emit ``pre_commit`` (rewrite honored; a pause veto escalates —
+        COMMITTING→ESCALATED is legal), squash via ``finalize_commit``, stamp
+        ``commit_sha``, advance to DONE.
+
+        Precondition: ``task.phase == COMMITTING`` and that phase is PERSISTED
+        (the gate+advance+save in ``_commit``, or a resume that found it on
+        disk). The persisted phase is durable proof the ``pre_commit_gate``
+        workflows already ran and passed — the COMMITTING save lands only
+        after the gate loop returns clean — which is why the resume arm calls
+        this WITHOUT re-running them: a re-run would double-charge the session
+        budget, and a blocking failure would need an illegal
+        COMMITTING→DEFERRED move (#115).
+
+        Re-drive contract: safe to call again after a host death anywhere
+        inside it. ``finalize_commit`` is content-idempotent across both crash
+        states — pre-squash (skill commit chain above baseline) squashes
+        normally; post-squash (squashed commit at HEAD, clean tree)
+        re-squashes to an identical-content commit, orphaning the pre-crash
+        squash (harmless). ``commit_sha`` is stamped only here and is
+        write-only (never routing), so the empty persisted value is
+        harmless."""
         message = self._commit_message(task)
         # pre_commit: a plugin may rewrite the commit message or escalate (pause).
         # A defer/skip veto would have to unwind a COMMITTING task (no legal move
