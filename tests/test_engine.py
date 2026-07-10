@@ -9,6 +9,7 @@ import pytest
 from conftest import (
     _file_exists_cmd,
     dev_effect,
+    fault_read_text,
     generic_dev_effect,
     git,
     review_effect,
@@ -17,7 +18,7 @@ from conftest import (
     write_sprint,
 )
 
-from bmad_loop import platform_util
+from bmad_loop import platform_util, verify
 from bmad_loop.adapters.base import SessionResult
 from bmad_loop.adapters.mock import MockAdapter
 from bmad_loop.engine import Engine, RunPaused, RunStopped
@@ -1077,6 +1078,113 @@ def test_generic_reconcile_skips_out_of_tree_spec(project, tmp_path):
     ]
     assert len(skipped) == 1 and skipped[0]["spec"] == str(outside)
     assert "spec-status-reconciled" not in kinds  # no reconcile happened
+
+
+def test_reconcile_skips_and_journals_on_unreadable_spec(project, monkeypatch):
+    """Reconcile is a bookkeeping *observation* pass over a spec the dev skill may
+    still be writing. An OSError there used to crash the whole run; it now skips the
+    pass and journals `spec-read-failed`. Skipping is safe: the deterministic verify
+    gate re-reads the spec straight after and supplies the retry ladder."""
+    engine, _ = make_engine(project, [])
+    sp = spec_path(project, "1-1-a")
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        "---\ntitle: 'x'\nstatus: 'in-progress'\n---\n\n## Auto Run Result\n\n- Status: done\n"
+    )
+    sp.write_text(original, encoding="utf-8")
+    task = StoryTask(story_key="1-1-a", epic=1)
+    rj = {"workflow": "auto-dev", "spec_file": str(sp), "status": "in-progress"}
+    fault_read_text(monkeypatch, sp)
+
+    engine._reconcile_generic_terminal_status(task, rj)
+
+    assert sp.read_bytes() == original.encode()  # never written (repair skipped)
+    assert rj["status"] == "in-progress"  # result dict untouched
+    events = [e for e in engine.journal.entries() if e["kind"] == "spec-read-failed"]
+    assert len(events) == 1
+    assert events[0]["site"] == "reconcile"
+    assert events[0]["story_key"] == "1-1-a" and events[0]["spec"] == str(sp)
+    assert "PermissionError" in events[0]["error"]
+    assert "spec-status-reconciled" not in [e["kind"] for e in engine.journal.entries()]
+
+
+def test_reconcile_folds_followup_without_reread(project, monkeypatch):
+    """`reset_spec_status` rewrites only the frontmatter status line, so a re-read
+    after it could only return the followup flag the first read already carried —
+    at the cost of a second racy read that can now fail. Exactly one frontmatter
+    read, and the flag still folds into the live result dict."""
+    engine, _ = make_engine(project, [])
+    sp = spec_path(project, "1-1-a")
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text(
+        "---\ntitle: 'x'\nstatus: 'in-progress'\nfollowup_review_recommended: true\n---\n\n"
+        "## Auto Run Result\n\n- Status: done\n",
+        encoding="utf-8",
+    )
+    calls, real = [], verify.read_frontmatter
+
+    def counting(path):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(verify, "read_frontmatter", counting)
+    task = StoryTask(story_key="1-1-a", epic=1)
+    rj = {"workflow": "auto-dev", "spec_file": str(sp), "status": "in-progress"}
+    engine._reconcile_generic_terminal_status(task, rj)
+
+    assert len(calls) == 1  # the deleted re-read stays deleted
+    assert rj["status"] == "done"
+    assert rj["followup_review_recommended"] is True  # folded from the single read
+    assert verify.status_of(real(sp)) == "done"  # the repair write still happened
+
+
+def test_post_dev_state_sync_skips_on_unreadable_spec(project, monkeypatch):
+    """Same degrade for the sprint-board sync: an unreadable spec must not advance
+    the board, and must not crash the run."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(project, [])
+    sp = spec_path(project, "1-1-a")
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    write_spec(sp, "done", "abc123")
+    before = project.sprint_status.read_bytes()
+    fault_read_text(monkeypatch, sp)
+
+    engine._post_dev_state_sync(StoryTask(story_key="1-1-a", epic=1), {"spec_file": str(sp)})
+
+    assert project.sprint_status.read_bytes() == before  # board not advanced
+    events = [e for e in engine.journal.entries() if e["kind"] == "spec-read-failed"]
+    assert len(events) == 1 and events[0]["site"] == "post-dev-sync"
+    assert events[0]["story_key"] == "1-1-a"
+
+
+def test_transient_spec_read_fault_does_not_crash_run(project, monkeypatch):
+    """Integration capstone for #97. A single transient OSError on the spec — a
+    TOCTOU truncation while the dev skill rewrites the file the orchestrator is
+    reading back — used to escape to `engine.run()`'s `except Exception` and mark
+    the WHOLE RUN crashed, abandoning every remaining story.
+
+    The run now absorbs it: the first read (the reconcile bookkeeping pass) skips
+    and journals, every later read succeeds against the real spec, and the story
+    lands DONE. One fault, one journal event, no crash."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(project, [generic_dev_effect(project, "1-1-a", followup_review=False)])
+    sp = spec_path(project, "1-1-a")
+    real, fired = Path.read_text, []
+
+    def raise_once_then_delegate(self, *a, **kw):
+        if self == sp and not fired:
+            fired.append(self)
+            raise PermissionError(13, "Permission denied")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", raise_once_then_delegate)
+    summary = engine.run()
+
+    assert fired  # the fault really fired (a green run proves nothing otherwise)
+    assert not summary.crashed and summary.done == 1
+    assert engine.state.tasks["1-1-a"].phase == Phase.DONE
+    events = [e for e in engine.journal.entries() if e["kind"] == "spec-read-failed"]
+    assert len(events) == 1 and events[0]["site"] == "reconcile"
 
 
 def test_generic_reconcile_idempotent_when_already_done(project):

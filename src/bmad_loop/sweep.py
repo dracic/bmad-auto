@@ -1174,7 +1174,10 @@ class SweepEngine(Engine):
         spec_path = verify.resolve_spec_path(spec_file, self.workspace.paths)
         if not spec_path.is_file():
             return
-        if verify.status_of(verify.read_frontmatter(spec_path)) != success_status:
+        fm = self._observed_frontmatter(spec_path, task.story_key, "bundle-ledger-close")
+        if fm is None:
+            return
+        if verify.status_of(fm) != success_status:
             return
         ledger = self.workspace.paths.deferred_work
         note = f"resolved by sweep bundle {task.story_key}"

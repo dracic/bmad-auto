@@ -46,6 +46,15 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **An unreadable spec no longer crashes the whole run.** Every spec read-back — the four verify
+  gates, the reconcile/sprint/ledger bookkeeping passes, and the generic adapter's Stop poll — raced
+  the dev skill's own writes, so a transient `OSError` (a TOCTOU truncation, a lock, an EACCES)
+  escaped to `engine.run()` and abandoned every remaining story. Observation now degrades where
+  repair still raises: verify gates return a retryable outcome naming the read fault (never a phantom
+  status mismatch), bookkeeping passes skip and journal `spec-read-failed`, and the read-back poll
+  treats it as not-yet-terminal, falling through to the existing stall/timeout → post-kill-reconcile
+  ladder (#97).
+
 - **A resumed sweep re-drives its in-flight bundles by identity, not by bundle name.** `SweepEngine`
   recovered a bundle only from inside `_run_bundle`, which a cycle reaches after re-deriving the key
   from the _current_ triage plan — so a bundle re-armed by `bmad-loop resolve` survived a resume only

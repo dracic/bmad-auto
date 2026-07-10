@@ -1797,6 +1797,40 @@ class Engine:
             return False
         return self.policy.review.enabled
 
+    def _observed_frontmatter(self, spec_path: Path, story_key: str, site: str) -> dict | None:
+        """Read a spec's frontmatter on a *bookkeeping* path, degrading an
+        unreadable spec to ``None`` (journaled) instead of a whole-run crash.
+
+        These reads observe what the dev skill left behind so the orchestrator can
+        sync the sprint board / ledger. They race the skill's own writes, so an
+        OSError is a designed transient, not a broken orchestrator. Returning None
+        tells the caller to skip its bookkeeping pass entirely: skipping is always
+        safe because the deterministic verify gate re-reads the spec immediately
+        after and supplies the retry ladder. Silent it is not — every skip lands a
+        ``spec-read-failed`` event in the journal.
+
+        Repair writes (``reset_spec_status``, ``mark_done``) deliberately do the
+        opposite and let OSError raise: silently skipping a rewrite would leave the
+        spec in a state the caller believes it fixed. Observation degrades, repair
+        raises.
+        """
+        try:
+            return verify.read_frontmatter(spec_path)
+        except OSError as e:
+            self._journal_spec_read_failed(spec_path, story_key, site, e)
+            return None
+
+    def _journal_spec_read_failed(
+        self, spec_path: Path, story_key: str, site: str, e: OSError
+    ) -> None:
+        self.journal.append(
+            "spec-read-failed",
+            story_key=story_key,
+            spec=str(spec_path),
+            site=site,
+            error=f"{e.__class__.__name__}: {e}",
+        )
+
     def _reconcile_generic_terminal_status(self, task: StoryTask, result_json: dict | None) -> None:
         """Repair a generic-skill spec the session finalized in prose but not in
         frontmatter. ``bmad-dev-auto`` sometimes appends a terminal
@@ -1838,7 +1872,9 @@ class Engine:
         # "none" through verify.status_of (str(None)), which would dodge the
         # RECONCILABLE_FROM allowlist; normalize it (and a missing key) to "" so the
         # blank-status case reconciles. A literal `status: none` stays "none".
-        fm = verify.read_frontmatter(spec_path)
+        fm = self._observed_frontmatter(spec_path, task.story_key, "reconcile")
+        if fm is None:
+            return
         raw_status = fm.get("status")
         fm_status = "" if raw_status is None else str(raw_status).strip().lower()
         if fm_status == success_status:
@@ -1863,18 +1899,26 @@ class Engine:
             return
         if fm_status not in devcontract.RECONCILABLE_FROM:
             return  # blocked / unknown custom status: never override a deliberate one
-        arr = devcontract.parse_auto_run_result(spec_path.read_text(encoding="utf-8"))
+        try:
+            text = spec_path.read_text(encoding="utf-8")
+        except OSError as e:
+            self._journal_spec_read_failed(spec_path, task.story_key, "reconcile-prose", e)
+            return
+        arr = devcontract.parse_auto_run_result(text)
         if not arr.present or arr.status != devcontract.DONE:
             return  # no terminal prose, or a blocked outcome: leave for the escalation path
         if not devcontract.reset_spec_status(spec_path, success_status):
             return
         # Keep the in-place result_json the rest of _dev_phase reads consistent with
         # the now-reconciled spec (the followup flag is only carried on a done exit).
+        # `reset_spec_status` rewrites only the status line, so `fm` (read above)
+        # still holds every other key — a re-read here could only return the same
+        # followup flag, at the cost of a second racy read that can now fail.
         if isinstance(result_json, dict):
             result_json["status"] = success_status
             if success_status == "done":
                 result_json["followup_review_recommended"] = bool(
-                    verify.read_frontmatter(spec_path).get("followup_review_recommended", False)
+                    fm.get("followup_review_recommended", False)
                 )
         self.journal.append(
             "spec-status-reconciled",
@@ -1906,8 +1950,10 @@ class Engine:
             return
         review_enabled = self._dev_review_enabled()  # always False for the generic path
         success_status = "in-review" if review_enabled else "done"
-        status = verify.status_of(verify.read_frontmatter(spec_path))
-        if status != success_status:
+        fm = self._observed_frontmatter(spec_path, task.story_key, "post-dev-sync")
+        if fm is None:
+            return
+        if verify.status_of(fm) != success_status:
             return
         target = "review" if review_enabled else "done"
         sprint_advance(self.workspace.paths.sprint_status, task.story_key, target)

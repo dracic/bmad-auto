@@ -224,7 +224,17 @@ def synthesize_result(
     so a plan-halt ``ready-for-dev`` (no such prose) is never reconciled to
     ``done`` and this leg's success outcome is not clobbered.
     """
-    fm = read_frontmatter(spec_path)
+    try:
+        fm = read_frontmatter(spec_path)
+    except OSError:
+        # Same degrade as `_read_text_or_empty` below, for the same reason: this is
+        # the read-back path. An unreadable spec is not evidence a session
+        # finished, so treat it exactly like one that has not terminated yet — the
+        # caller keeps polling, and a fault that persists past the grace window
+        # lands as a stall/timeout verdict that `_post_kill_reconcile` can still
+        # rescue. Crashing here would take the whole run down for a spec the CLI
+        # merely had open for writing.
+        return SynthResult(result_json=None, status_consistent=True)
     fm_status = str(fm.get("status", "")).strip().lower()
     arr = parse_auto_run_result(_read_text_or_empty(spec_path))
 
