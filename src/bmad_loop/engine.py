@@ -1046,15 +1046,27 @@ class Engine:
         self, task: StoryTask, baseline: str, *, preserve_failed: bool = False
     ) -> None:
         """Leave the tree untouched, surface bold manual-recovery instructions, and
-        pause the run. Always raises RunPaused. Reached either (a, default) the OFF
-        path for a stopped/abandoned in-place attempt, or (b, ``preserve_failed``)
-        rollback is ON/resolved but the attempt's commits above baseline could not be
-        parked on a recovery ref, so an automatic ``reset --hard`` would silently
-        discard them — a distinct notice that names the at-risk commits and never
-        tells the operator to blindly reset. A *resolved* escalation never reaches
-        here — `_rollback_or_pause` auto-recovers that human-initiated re-drive
-        regardless of `scm.rollback_on_failure`."""
+        pause the run. Always raises RunPaused. Three notice shapes: (a, default)
+        the OFF path for a stopped/abandoned in-place attempt with no commits of
+        its own — plain manual-rollback steps; (b, ``preserve_failed``) rollback is
+        ON/resolved but the attempt's commits above baseline could not be parked on
+        a recovery ref, so an automatic ``reset --hard`` would silently discard
+        them — a distinct notice that names the at-risk commits and never tells the
+        operator to blindly reset; (c) the OFF path but the attempt COMMITTED work
+        above its baseline (#100: a completed session whose run died before the
+        orchestrator folded the result) — instructing a bare ``reset --hard`` there
+        would discard finished, possibly already-pushed commits, so this notice
+        tells the operator to save and check integration state first. A *resolved*
+        escalation never reaches here — `_rollback_or_pause` auto-recovers that
+        human-initiated re-drive regardless of `scm.rollback_on_failure`."""
         short = baseline[:12] or "<baseline_commit>"
+        commits: list[str] = []
+        if baseline:
+            # advisory probe: a git fault here must not block the pause itself
+            try:
+                commits = verify.commits_above(self.workspace.root, baseline)
+            except verify.GitError:
+                commits = []
         if preserve_failed:
             notice = (
                 "**ACTION REQUIRED — commits could not be auto-preserved**\n"
@@ -1066,6 +1078,22 @@ class Engine:
                 "  1. **Save them first** — e.g. `git branch my-rescue HEAD` (the "
                 f"commits are `{short}..HEAD`).\n"
                 "  2. Only once they are safe, discard the attempt if you want to: "
+                f"`git reset --hard {short}`, then review/remove leftover untracked "
+                "files.\n"
+                f"Then run `bmad-loop resume {self.state.run_id}`."
+            )
+        elif commits:
+            notice = (
+                "**ACTION REQUIRED — manual recovery needed (committed work present)**\n"
+                f"Story **{task.story_key}**'s attempt was stopped with auto-rollback "
+                "OFF, and it **committed work above its baseline**. **Your commits "
+                "are intact at the current HEAD.** They may already be integrated "
+                "or pushed to a remote — do NOT reset before checking.\n"
+                f"  1. **Save them first** — e.g. `git branch my-rescue HEAD` (the "
+                f"commits are `{short}..HEAD`).\n"
+                "  2. Check whether they are already integrated (merged, pushed to "
+                "a remote, referenced by open PRs) before discarding anything.\n"
+                "  3. Only if you decide to discard the attempt: "
                 f"`git reset --hard {short}`, then review/remove leftover untracked "
                 "files.\n"
                 f"Then run `bmad-loop resume {self.state.run_id}`."
@@ -1090,7 +1118,12 @@ class Engine:
                 "`[scm] rollback_on_failure` (it discards the attempt's uncommitted "
                 "work but never deletes pre-existing untracked files)."
             )
-        self.journal.append("rollback-manual-required", story_key=task.story_key, baseline=baseline)
+        self.journal.append(
+            "rollback-manual-required",
+            story_key=task.story_key,
+            baseline=baseline,
+            commits=len(commits),
+        )
         gates.notify(
             self.policy,
             self.run_dir,
@@ -1176,14 +1209,22 @@ class Engine:
 
     def _resumable_session(self, task: StoryTask) -> tuple[str, SessionResult] | None:
         """The in-flight session's durably-recorded result, when complete enough
-        to act on: the task died mid-phase but its current attempt/cycle record
-        is ``completed`` and carries the parsed result. Consumes only evidence
-        the adapter vouched for at session end — no artifact re-scan, no
-        loosening of completion authority. Anything less returns None and the
-        caller falls through to resume-restart."""
-        if task.phase == Phase.DEV_RUNNING:
+        to act on: the task died mid-phase (``*_RUNNING``) or in the post-verify
+        decision window (``*_VERIFY`` — persisted by the save right after the
+        verify/decide pass, before the decision's action completed) but its
+        current attempt/cycle record is ``completed`` and carries the parsed
+        result. Consumes only evidence the adapter vouched for at session end —
+        no artifact re-scan, no loosening of completion authority. Anything less
+        returns None and the caller falls through to resume-restart (#100: that
+        restart used to discard a completed-``done`` attempt's commits).
+
+        DEV_VERIFY reaches this matcher only when ``task.spec_file`` is empty
+        (verify did not fully pass before the death): _finish_inflight checks
+        the spec-approval-gate arm first, so a DEV_VERIFY task WITH a verified
+        spec keeps its _resume_after_dev_verify recovery."""
+        if task.phase in (Phase.DEV_RUNNING, Phase.DEV_VERIFY):
             role, seq = "dev", task.attempt
-        elif task.phase == Phase.REVIEW_RUNNING:
+        elif task.phase in (Phase.REVIEW_RUNNING, Phase.REVIEW_VERIFY):
             role, seq = "review", task.review_cycle
         else:
             return None

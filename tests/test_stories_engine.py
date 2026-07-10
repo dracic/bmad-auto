@@ -720,6 +720,44 @@ def test_plan_review_owed_survives_crash_before_durable_record(project):
     assert task.commit_sha is None  # never committed un-reviewed
 
 
+def test_resume_dev_verify_replay_stories_mode(project):
+    """Stories-mode parity for the #100 resume arm: a story persisted at
+    DEV_VERIFY without a verified spec (verify failed, then the host died mid
+    retry-reset) replays its completed dev record instead of resume-restart.
+    After the operator repaired the story spec, the replay verifies green and
+    commits — no session re-run, no attempt budget burned."""
+    setup_stories(project, [entry("1")])
+    engine, _ = make_engine(project, [stories_dev_effect(final_status="in-progress")])
+
+    with pytest.MonkeyPatch.context() as mp:
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("host died during the retry reset")
+
+        mp.setattr("bmad_loop.verify.safe_rollback", boom)
+        assert engine.run().crashed
+
+    crashed = load_state(engine.run_dir).tasks["1"]
+    assert crashed.phase == Phase.DEV_VERIFY
+    assert not crashed.spec_file  # verify had not passed — the #100 shape
+    assert crashed.sessions[-1].result_json is not None
+
+    # the operator repaired the story spec before resuming
+    write_spec(story_spec(project, "1"), "done", crashed.baseline_commit)
+
+    resumed, adapter = resume_engine(project, engine, [])
+    summary = resumed.run()
+
+    assert summary.done == 1 and not summary.crashed
+    final = load_state(resumed.run_dir).tasks["1"]
+    assert final.phase == Phase.DONE
+    assert final.attempt == 1  # the replay burned no attempt budget
+    assert adapter.sessions == []  # the dev session was not re-run
+    kinds = [e["kind"] for e in resumed.journal.entries()]
+    assert "resume-verify" in kinds
+    assert "resume-restart" not in kinds
+
+
 def test_plan_review_owed_after_non_fixable_retry_becomes_implement_leg(project):
     """MAJOR-B(b): leg 1 plans (ready-for-dev) but fails verify non-fixably (wrong
     workflow tag), so the tree resets and attempt 2 re-dispatches. The plan survived

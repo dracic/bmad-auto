@@ -46,6 +46,15 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **Resume no longer asks for a rollback of a completed session's committed work.** A host death
+  in the post-verify decision window left the task persisted at `DEV_VERIFY`/`REVIEW_VERIFY`,
+  where the resume replay matcher (which only knew the `*_RUNNING` phases) missed the
+  durably-recorded completed session and fell through to resume-restart — pausing with a
+  `git reset --hard <baseline>` instruction that would discard the attempt's finished, possibly
+  already-pushed commits. Those phases now replay the recorded result through the normal
+  verify/decide pipeline, and the rollback-OFF manual-recovery notice detects commits above
+  baseline and leads with saving/checking them instead of a bare reset (#100).
+
 - **The TUI no longer crashes on a private-mode CSI sequence in an adapter log.** The gemini
   CLI's startup burst includes XTMODKEYS `CSI > 4 ; ? m`; the marker byte sat _inside_ the
   params, so the private-marker strip filter missed it and pyte 0.8.2 raised a `TypeError`

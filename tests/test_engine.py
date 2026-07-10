@@ -411,6 +411,180 @@ def test_resume_final_review_cycle_dirty_replay_defers_without_extra_budget(proj
     assert "resume-verify" in kinds
 
 
+def _dev_verify_crash_state(project, engine, spec_status: str) -> tuple[str, Path]:
+    """Persist the exact state.json shape from issue #100: a task at DEV_VERIFY
+    with no verified spec (verify had not passed when the host died), whose
+    completed dev session record — result on disk, commits above baseline — is
+    durable. Returns (baseline, spec_path)."""
+    baseline = rev_parse_head(project.project)
+    # the attempt committed its work above baseline, as the reporter's session
+    # did (only the work — sweeping the still-untracked sprint board into the
+    # commit would make a later baseline reset delete it)
+    src = project.project / "src.txt"
+    src.write_text(src.read_text() + "change for 1-1-a\n")
+    git(project.project, "add", "src.txt")
+    git(project.project, "commit", "-q", "-m", "attempt work for 1-1-a")
+    sp = spec_path(project, "1-1-a")
+    write_spec(sp, spec_status, baseline)
+
+    task = StoryTask(story_key="1-1-a", epic=1, phase=Phase.DEV_VERIFY, attempt=1)
+    task.baseline_commit = baseline
+    task.baseline_untracked = []
+    task.record_session(
+        SessionRecord(
+            task_id="1-1-a-dev-1",
+            role="dev",
+            status="completed",
+            result_json={
+                "workflow": "auto-dev",
+                "story_key": "1-1-a",
+                "spec_file": str(sp),
+                "baseline_commit": baseline,
+                "escalations": [],
+                "followup_review_recommended": False,
+            },
+        )
+    )
+    engine.state.tasks[task.story_key] = task
+    engine._save()
+    return baseline, sp
+
+
+def test_resume_dev_verify_replays_recorded_dev_result_to_done(project):
+    """#100: the host died after persisting DEV_VERIFY but before the decision's
+    action completed — spec_file empty, completed/done dev record on disk,
+    commits above baseline. Resume must replay that record through the normal
+    verify/decide pipeline instead of demanding a manual rollback (`git reset
+    --hard <baseline>`) of finished, possibly already-pushed work."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        # the issue's environment: the production default, where the old
+        # resume-restart arm paused with the destructive reset instruction
+        scm=ScmPolicy(rollback_on_failure=False),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    baseline, _sp = _dev_verify_crash_state(project, engine, "done")
+    src = project.project / "src.txt"
+
+    resumed, adapter = resume_engine(project, engine, [])
+    summary = resumed.run()
+
+    assert summary.done == 1 and not summary.paused and not summary.crashed
+    final = load_state(resumed.run_dir).tasks["1-1-a"]
+    assert final.phase == Phase.DONE
+    assert final.attempt == 1  # the replay burned no attempt budget
+    assert final.commit_sha  # the field the issue found null — now stamped
+    assert adapter.sessions == []  # nothing re-run — the record was replayed
+    # the attempt's committed work survived (squashed into the story commit)
+    assert "change for 1-1-a" in src.read_text()
+    assert rev_parse_head(project.project) != baseline
+    kinds = [e["kind"] for e in resumed.journal.entries()]
+    assert "resume-verify" in kinds
+    assert "resume-restart" not in kinds
+    assert "rollback-manual-required" not in kinds
+
+
+def test_resume_dev_verify_replay_verify_still_failing_retries_normally(project):
+    """When the replayed record's verify failure reproduces (the spec is still
+    short of done), the replay re-enters the normal retry path — commits parked
+    on a recovery ref, reset, then a fresh budgeted attempt — instead of
+    resume-restart's evidence-blind discard."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(project, [])  # helper default: rollback ON
+    _dev_verify_crash_state(project, engine, "in-progress")
+
+    resumed, adapter = resume_engine(
+        project,
+        engine,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+    )
+    summary = resumed.run()
+
+    assert summary.done == 1 and not summary.crashed
+    final = load_state(resumed.run_dir).tasks["1-1-a"]
+    assert final.phase == Phase.DONE
+    assert final.attempt == 2  # the replay burned no budget; the fresh attempt did
+    assert [s.role for s in adapter.sessions] == ["dev", "review"]
+    kinds = [e["kind"] for e in resumed.journal.entries()]
+    assert "resume-verify" in kinds
+    assert "resume-restart" not in kinds
+    assert "attempt-commits-preserved" in kinds  # committed work parked, not orphaned
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        SessionRecord(task_id="1-1-a-dev-1", role="dev", status="stalled"),
+        # completed but without a recorded result (legacy state.json shape)
+        SessionRecord(task_id="1-1-a-dev-1", role="dev", status="completed"),
+    ],
+)
+def test_resume_dev_verify_record_incomplete_still_restarts(project, record):
+    """DEV_VERIFY without a verified spec joins the replay matcher only for a
+    completed record WITH a recorded result — anything less keeps today's
+    resume-restart (no artifact re-scan, no loosening of completion authority)."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(project, [])
+    task = StoryTask(story_key="1-1-a", epic=1, phase=Phase.DEV_VERIFY, attempt=1)
+    task.record_session(record)
+    engine.state.tasks[task.story_key] = task
+    engine._save()
+
+    resumed, _ = resume_engine(
+        project,
+        engine,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+    )
+    summary = resumed.run()
+
+    assert summary.done == 1
+    kinds = [e["kind"] for e in resumed.journal.entries()]
+    assert "resume-restart" in kinds
+    assert "resume-verify" not in kinds
+
+
+def test_resume_review_verify_replays_recorded_review(project):
+    """A host death in the post-review-verify decision window (REVIEW_VERIFY
+    persisted by the save right after the review session, decision not yet
+    acted on) replays the recorded review pass instead of resume-restart's
+    rollback — the same #100 window one phase later."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+    )
+
+    def crashing_emit(stage, *args, **kwargs):
+        if stage == "post_review_result":
+            raise RuntimeError("host died in the review decision window")
+        return original_emit(stage, *args, **kwargs)
+
+    original_emit = engine._emit
+    engine._emit = crashing_emit
+    assert engine.run().crashed
+    crashed = load_state(engine.run_dir).tasks["1-1-a"]
+    assert crashed.phase == Phase.REVIEW_VERIFY
+    assert crashed.review_cycle == 1
+    assert crashed.sessions[-1].result_json is not None
+
+    resumed, adapter = resume_engine(project, engine, [])
+    summary = resumed.run()
+
+    assert summary.done == 1 and not summary.crashed
+    final = load_state(resumed.run_dir).tasks["1-1-a"]
+    assert final.phase == Phase.DONE
+    assert final.review_cycle == 1  # the replay burned no review-budget slot
+    assert adapter.sessions == []  # neither dev nor review re-run
+    entries = resumed.journal.entries()
+    verifies = [e for e in entries if e["kind"] == "resume-verify"]
+    assert verifies and verifies[-1]["role"] == "review"
+    kinds = [e["kind"] for e in entries]
+    assert "resume-restart" not in kinds
+    assert "rollback-manual-required" not in kinds
+
+
 def test_reconcile_early_return_heals_stale_resumed_dict(project):
     """On the idempotent early-return path (frontmatter already at the success
     status), the reconcile still syncs a stale *resumed* result dict from the
@@ -1786,6 +1960,63 @@ def test_manual_recovery_wording_stopped(project):
     assert "failed" not in stopped.value.reason
     assert "manual rollback" in stopped.value.reason.lower()
     assert "attempt was stopped" in stopped.value.reason
+
+
+def test_manual_recovery_notice_names_committed_work(project):
+    """#100: rollback OFF + an attempt that COMMITTED above baseline. The pause
+    notice must lead with saving/checking the commits — which may already be
+    pushed — never with a bare `git reset --hard` that would discard them."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=False),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    task = StoryTask(story_key="1-1-a", epic=1)
+    task.baseline_commit = rev_parse_head(project.project)
+    task.baseline_untracked = []
+    src = project.project / "src.txt"
+    src.write_text(src.read_text() + "committed attempt work\n")
+    git(project.project, "add", "-A")
+    git(project.project, "commit", "-q", "-m", "attempt commit")
+    attempt_head = rev_parse_head(project.project)
+
+    with pytest.raises(RunPaused) as paused:
+        engine._rollback_or_pause(task)
+
+    assert rev_parse_head(project.project) == attempt_head  # tree untouched
+    reason = paused.value.reason
+    assert "failed" not in reason  # a stopped attempt is not described as "failed"
+    assert f"{task.baseline_commit[:12]}..HEAD" in reason
+    assert "intact" in reason
+    assert "pushed" in reason
+    # save-the-commits comes before any reset instruction
+    assert reason.index("git branch") < reason.index("reset --hard")
+    manual = [e for e in engine.journal.entries() if e["kind"] == "rollback-manual-required"]
+    assert manual and manual[-1]["commits"] == 1
+
+
+def test_manual_recovery_notice_probe_failure_falls_back(project, monkeypatch):
+    """The commits probe is advisory: a git fault must neither block the pause
+    nor change the classic no-commits notice."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=False),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    task = StoryTask(story_key="1-1-a", epic=1)
+    baseline = rev_parse_head(project.project)
+
+    def boom(repo, base):
+        raise GitError("probe failed")
+
+    monkeypatch.setattr(verify, "commits_above", boom)
+    with pytest.raises(RunPaused) as paused:
+        engine._pause_for_manual_recovery(task, baseline)
+
+    assert "attempt was stopped" in paused.value.reason
+    assert "manual rollback" in paused.value.reason.lower()
 
 
 def test_rollback_preserves_committed_attempt_work(project):
