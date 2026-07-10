@@ -542,6 +542,81 @@ def test_log_view_strips_private_marker_sgr_split_across_reads(tmp_path):
     assert not any(style.underline for _, _, style in line.spans)
 
 
+def test_log_view_strips_private_marker_mid_params(tmp_path):
+    # gemini's XTMODKEYS reply `CSI > 4 ; ? m` carries the `?` marker *inside* the
+    # params. Unstripped, pyte 0.8.2 dispatches it with private=True and
+    # select_graphic_rendition rejects the kwarg — the TypeError that killed the
+    # whole TUI in #111.
+    path = tmp_path / "task.log"
+    path.write_bytes(b"\x1b[>4;?mhello world\r\n")
+    view = data.LogView(path)
+    assert view.read_new() is True
+    line = view.render()
+    assert "hello world" in line.plain
+    assert not any(style.underline for _, _, style in line.spans)
+
+
+def test_log_view_survives_gemini_startup_preamble(tmp_path):
+    # The exact byte prefix from the #111 traceback: the gemini CLI's terminal
+    # capability negotiation burst, including the crashing `CSI > 4 ; ? m`.
+    path = tmp_path / "task.log"
+    path.write_bytes(
+        b"\x1b[8m\x1b[?u\x1b]11;?\x1b\\\x1b[>q\x1b[>4;?m\x1b[c\x1b[2K\r\x1b[0m" b"ready to work\r\n"
+    )
+    view = data.LogView(path)
+    assert view.read_new() is True
+    assert "ready to work" in view.render().plain
+
+
+def test_log_view_strips_vim9_private_sgr(tmp_path):
+    # `CSI ? 4 m` (vim 9+, upstream selectel/pyte#202): marker in first position
+    # but final `m` — must be stripped, not read as underline or crash pyte.
+    path = tmp_path / "task.log"
+    path.write_bytes(b"\x1b[?4mhello\r\n")
+    view = data.LogView(path)
+    assert view.read_new() is True
+    line = view.render()
+    assert "hello" in line.plain
+    assert not any(style.underline for _, _, style in line.spans)
+
+
+def test_log_view_strips_private_marker_mid_params_split_across_reads(tmp_path):
+    # The #111 sequence straddles two reads; the held-back trailing CSI (whose
+    # char class already admits marker bytes anywhere) lets the filter see it
+    # whole on the next read.
+    path = tmp_path / "task.log"
+    path.write_bytes(b"\x1b[>4;?")
+    view = data.LogView(path)
+    view.read_new()
+    with path.open("ab") as f:
+        f.write(b"mhello\r\n")
+    assert view.read_new() is True
+    line = view.render()
+    assert "hello" in line.plain
+    assert not any(style.underline for _, _, style in line.spans)
+
+
+def test_log_view_survives_unfilterable_private_csi(tmp_path):
+    # Belt-and-braces: a private-marked CSI with a non-`m` final passes the strip
+    # filter deliberately (only marker-SGR is stripped) and crashes raw pyte 0.8.2
+    # (`cursor_position() got an unexpected keyword argument 'private'`). The
+    # tolerant stream drops the sequence instead of killing the poll worker, and
+    # the emulator keeps rendering everything after it.
+    path = tmp_path / "task.log"
+    path.write_bytes(b"\x1b[?1;1Hhello\r\n")
+    view = data.LogView(path)
+    assert view.read_new() is True
+    assert "hello" in view.render().plain
+
+    with path.open("ab") as f:
+        f.write(b"\x1b[31mstill alive\x1b[0m\r\n")
+    assert view.read_new() is True
+    line = view.render()
+    assert "still alive" in line.plain
+    styled = {line.plain[s:e] for s, e, st in line.spans if st.color is not None}
+    assert "still alive" in styled
+
+
 def test_log_view_history_beyond_screen(tmp_path):
     path = tmp_path / "task.log"
     path.write_bytes(b"".join(f"row {i:03d}\r\n".encode() for i in range(1, 81)))

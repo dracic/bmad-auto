@@ -354,13 +354,18 @@ def _render_row(row: dict) -> Text:
 
 
 # CSI sequences with a private/secondary marker (< > = ?) are terminal capability
-# negotiation, never display SGR. pyte 0.8.2 ignores the marker and misdispatches
-# them to SGR anyway: e.g. XTMODKEYS `CSI > 4 ; 2 m` (modifyOtherKeys, emitted at
-# session start by Claude Code et al.) is read as SGR 4 = underline-on, leaving the
-# whole log underlined until an exit-time disable a live capture never contains.
-# Strip them before pyte sees them; a legitimate SGR carries no marker, so this can
-# only remove non-display sequences (never printable text or genuine styling).
-_PRIVATE_MARKER_SGR = re.compile(rb"\x1b\[[<>=?][0-9;:]*m")
+# negotiation, never display SGR. pyte 0.8.2 ignores a leading marker and
+# misdispatches them to SGR anyway: e.g. XTMODKEYS `CSI > 4 ; 2 m` (modifyOtherKeys,
+# emitted at session start by Claude Code et al.) is read as SGR 4 = underline-on,
+# leaving the whole log underlined until an exit-time disable a live capture never
+# contains. Worse, a marker byte *inside* the params — gemini's `CSI > 4 ; ? m`,
+# vim9's `CSI ? 4 m` — makes pyte dispatch with private=True to a handler that
+# rejects the kwarg, a TypeError that would kill the poll worker (#111; upstream
+# selectel/pyte#202, fixed in master but never released). Strip them before pyte
+# sees them, matching the marker anywhere in the param bytes; a legitimate SGR
+# carries no marker, so this can only remove non-display sequences (never printable
+# text or genuine styling).
+_PRIVATE_MARKER_SGR = re.compile(rb"\x1b\[[0-9;:<>=?]*[<>=?][0-9;:<>=?]*m")
 # Alternate-screen switch sequences (DECSET/DECRST 1049/1047/47). A CLI fullscreen
 # TUI (Claude Code's fullscreen renderer) switches here and repaints in place; pyte
 # has no altscreen buffer, so the capture collapses to the final frame. Detecting
@@ -398,6 +403,21 @@ def _strip_private_marker_sgr(chunk: bytes) -> tuple[bytes, int]:
     held = len(m.group()) if m else 0
     body = chunk[: len(chunk) - held] if held else chunk
     return _PRIVATE_MARKER_SGR.sub(b"", body), held
+
+
+class _TolerantByteStream(pyte.ByteStream):
+    """pyte 0.8.2 dispatches a private-marked CSI (marker byte in the params) with
+    private=True to handlers that don't accept it, raising TypeError (upstream
+    selectel/pyte#202; fixed in master Sep 2025, never released). Any parser
+    exception here would kill the poll worker — and with it the app — so drop the
+    unparseable sequence instead: the base method re-initializes the parser before
+    re-raising, leaving the stream usable for the bytes that follow."""
+
+    def _send_to_parser(self, data: str) -> bool | None:
+        try:
+            return super()._send_to_parser(data)
+        except Exception:
+            return None
 
 
 class _CountingDeque(deque):
@@ -501,7 +521,7 @@ class LogView:
         self._screen.history = self._screen.history._replace(
             top=_CountingDeque(maxlen=self._history)
         )
-        self._stream = pyte.ByteStream(self._screen)
+        self._stream = _TolerantByteStream(self._screen)
         self._row_cache.clear()
         self._checkpoints: list[tuple[int, int]] = []
         self._render_base = 0
