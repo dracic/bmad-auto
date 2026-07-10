@@ -1814,3 +1814,159 @@ def test_dry_run_stories_relativizes_absolute_folder(project, capsys):
     out = capsys.readouterr().out
     assert "Spec folder: _bmad-output/epic-1. Story id: 1." in out
     assert f"Spec folder: {abs_folder}" not in out  # not the raw absolute path
+
+
+# --------------- `bmad-loop mux`: backend listing + persisted choice (issue #87) ----
+
+
+class _MuxStub:
+    """Selection-surface double (available/version only — `mux` needs no more)."""
+
+    def __init__(self, avail=True, version=None):
+        self._avail, self._version = avail, version
+
+    def available(self):
+        return self._avail
+
+    def version(self):
+        return self._version
+
+
+@pytest.fixture
+def mux_registry(monkeypatch):
+    """Isolated multiplexer registry with builtins suppressed, so `mux` tests are
+    deterministic regardless of whether the host has tmux installed."""
+    from bmad_loop.adapters import multiplexer as m
+
+    monkeypatch.delenv("BMAD_LOOP_MUX_BACKEND", raising=False)
+    saved_backends = list(m._BACKENDS)
+    saved_loaded = m._BUILTINS_LOADED
+    saved_configured = m._CONFIGURED
+    m._BACKENDS.clear()
+    m._BUILTINS_LOADED = True  # suppress the real tmux builtin
+    m._CONFIGURED = None
+    m.get_multiplexer.cache_clear()
+    yield m
+    m._BACKENDS[:] = saved_backends
+    m._BUILTINS_LOADED = saved_loaded
+    m._CONFIGURED = saved_configured
+    m.get_multiplexer.cache_clear()
+
+
+def test_mux_lists_backends_and_selection(mux_registry, tmp_path, capsys):
+    import sys as _sys
+
+    mux_registry.register_multiplexer(
+        "alpha", lambda p: p == _sys.platform, lambda: _MuxStub(avail=True, version="alpha 1.2")
+    )
+    mux_registry.register_multiplexer(
+        "beta", lambda p: False, lambda: _MuxStub(avail=False)
+    )
+    assert cli.main(["mux", "--project", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "alpha 1.2" in out
+    assert "beta" in out
+    assert "selection: alpha (_MuxStub) — first available platform match" in out
+    assert "bmad-loop mux set <name>" in out  # the no-prompt override hint
+
+
+def test_mux_exits_1_on_forced_unknown_name(mux_registry, tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "ghost")
+    mux_registry.get_multiplexer.cache_clear()
+    assert cli.main(["mux", "--project", str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert "NAME" in captured.out  # the listing still prints for diagnosis
+    assert "ghost" in captured.err and "FAIL" in captured.err
+
+
+def test_mux_set_persists_choice(mux_registry, tmp_path, capsys):
+    import sys as _sys
+
+    mux_registry.register_multiplexer(
+        "alpha", lambda p: p == _sys.platform, lambda: _MuxStub(avail=True)
+    )
+    assert cli.main(["mux", "set", "alpha", "--project", str(tmp_path)]) == 0
+    assert policy_mod.load(tmp_path / ".bmad-loop" / "policy.toml").mux.backend == "alpha"
+    assert 'mux backend set to "alpha"' in capsys.readouterr().out
+
+
+def test_mux_set_unavailable_backend_warns_but_persists(mux_registry, tmp_path, capsys):
+    mux_registry.register_multiplexer("alpha", lambda p: False, lambda: _MuxStub(avail=False))
+    assert cli.main(["mux", "set", "alpha", "--project", str(tmp_path)]) == 0
+    captured = capsys.readouterr()
+    assert "not available on this host" in captured.err
+    assert policy_mod.load(tmp_path / ".bmad-loop" / "policy.toml").mux.backend == "alpha"
+
+
+def test_mux_set_unregistered_errors_without_force(mux_registry, tmp_path, capsys):
+    assert cli.main(["mux", "set", "ghost", "--project", str(tmp_path)]) == 1
+    assert "not a registered backend" in capsys.readouterr().err
+    assert not (tmp_path / ".bmad-loop" / "policy.toml").exists()
+
+
+def test_mux_set_force_persists_unregistered_name(mux_registry, tmp_path):
+    assert cli.main(["mux", "set", "ghost", "--force", "--project", str(tmp_path)]) == 0
+    assert policy_mod.load(tmp_path / ".bmad-loop" / "policy.toml").mux.backend == "ghost"
+
+
+def test_mux_set_requires_a_name(mux_registry, tmp_path, capsys):
+    assert cli.main(["mux", "set", "--project", str(tmp_path)]) == 1
+    assert "requires a backend name" in capsys.readouterr().err
+
+
+def test_mux_set_clear_returns_to_auto(mux_registry, tmp_path):
+    mux_registry.register_multiplexer("alpha", lambda p: False, lambda: _MuxStub())
+    assert cli.main(["mux", "set", "alpha", "--project", str(tmp_path)]) == 0
+    assert cli.main(["mux", "set", "--clear", "--project", str(tmp_path)]) == 0
+    assert policy_mod.load(tmp_path / ".bmad-loop" / "policy.toml").mux.backend == ""
+
+
+def test_mux_set_notes_env_override_shadowing(mux_registry, tmp_path, capsys, monkeypatch):
+    mux_registry.register_multiplexer("alpha", lambda p: False, lambda: _MuxStub())
+    monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "alpha")
+    assert cli.main(["mux", "set", "alpha", "--project", str(tmp_path)]) == 0
+    assert "outranks the persisted choice" in capsys.readouterr().err
+
+
+def test_policy_mux_choice_reaches_selection_through_main(mux_registry, tmp_path, capsys):
+    """End-to-end chokepoint proof: a [mux] backend persisted in policy.toml is
+    honored by a fresh CLI invocation (main() installs it before dispatch)."""
+    mux_registry.register_multiplexer("fake", lambda p: False, lambda: _MuxStub(avail=True))
+    _write_policy(tmp_path, '[mux]\nbackend = "fake"\n')
+    assert cli.main(["mux", "--project", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "selection: fake (_MuxStub) — set by [mux] backend" in out
+
+
+def test_policy_mux_unknown_name_fails_loud_through_main(mux_registry, tmp_path, capsys):
+    """A stale persisted choice (backend uninstalled later) must fail loudly and
+    name the policy file to edit."""
+    _write_policy(tmp_path, '[mux]\nbackend = "ghost"\n')
+    assert cli.main(["mux", "--project", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "ghost" in err and "policy.toml" in err
+
+
+def test_platform_preflight_lists_multiple_backends(mux_registry, monkeypatch):
+    import sys as _sys
+
+    mux_registry.register_multiplexer(
+        "alpha", lambda p: p == _sys.platform, lambda: _MuxStub(avail=True, version="alpha 1.2")
+    )
+    mux_registry.register_multiplexer("beta", lambda p: False, lambda: _MuxStub(avail=False))
+    notes, problems = cli._platform_preflight()
+    assert any("mux backends:" in n and "alpha*" in n and "beta (unavailable)" in n for n in notes)
+
+
+def test_platform_preflight_single_backend_gets_no_listing(mux_registry):
+    mux_registry.register_multiplexer("alpha", lambda p: True, lambda: _MuxStub(avail=True))
+    notes, problems = cli._platform_preflight()
+    assert not any("mux backends:" in n for n in notes)
+
+
+def test_platform_preflight_notes_forced_selection_provenance(mux_registry, monkeypatch):
+    mux_registry.register_multiplexer("alpha", lambda p: False, lambda: _MuxStub(avail=True))
+    monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "alpha")
+    mux_registry.get_multiplexer.cache_clear()
+    notes, problems = cli._platform_preflight()
+    assert any("forced by BMAD_LOOP_MUX_BACKEND" in n for n in notes)

@@ -49,6 +49,25 @@ def _policy_path(project: Path) -> Path:
     return project / POLICY_FILE
 
 
+def _configure_mux(project: Path) -> None:
+    """Install the policy ``[mux] backend`` choice into the multiplexer seam.
+
+    The single configuration point, called from ``main()`` before dispatch so
+    every mux consumer — including probe/diagnose/attach/stop, which never load
+    policy themselves — selects under the persisted choice. Tolerant of a broken
+    policy file: diagnostics must keep working on a misconfigured host, and the
+    commands that need policy re-load it loudly themselves."""
+    from .adapters.multiplexer import configure_multiplexer
+
+    path = _policy_path(project)
+    name: str | None = None
+    try:
+        name = policy_mod.load(path).mux.backend or None
+    except (policy_mod.PolicyError, OSError):
+        pass
+    configure_multiplexer(name, origin=path)
+
+
 def _reject_bad_run_id(run_id: str | None) -> int | None:
     """Guard the hidden ``--run-id`` flag before the id becomes a directory name, a
     multiplexer session name and a git ref component. Rejects rather than sanitizes
@@ -138,7 +157,7 @@ def _platform_preflight() -> tuple[list[str], list[str]]:
     ``sys.platform`` branch to validate. The process host is named so a
     misselection (e.g. the Windows host picked on Linux) is visible at a glance.
     """
-    from .adapters.multiplexer import get_multiplexer
+    from .adapters.multiplexer import detect_multiplexers, get_multiplexer
     from .process_host import get_process_host
 
     notes: list[str] = []
@@ -157,6 +176,26 @@ def _platform_preflight() -> tuple[list[str], list[str]]:
             )
     except Exception as e:  # noqa: BLE001 — selection or readiness must not abort validate
         problems.append(f"multiplexer preflight failed: {e}")
+
+    try:
+        infos = detect_multiplexers()
+        if len(infos) > 1:  # a lone tmux needs no listing; keep single-backend output stable
+            listed = ", ".join(
+                i.name
+                + ("*" if i.selected else "")
+                + (
+                    " (available" + (f", {i.version}" if i.version else "") + ")"
+                    if i.available
+                    else " (unavailable)"
+                )
+                for i in infos
+            )
+            notes.append(f"mux backends: {listed} — `bmad-loop mux` for details")
+        chosen = next((i for i in infos if i.selected), None)
+        if chosen and chosen.reason in ("env", "policy"):
+            notes.append(f"multiplexer selection {_mux_reason_label(chosen.reason)}")
+    except Exception:  # noqa: BLE001 — detection is advisory; never break validate
+        pass
 
     try:
         notes.append(f"process host: {type(get_process_host()).__name__}")
@@ -268,6 +307,111 @@ def cmd_validate(args: argparse.Namespace) -> int:
     for problem in problems:
         print(f"FAIL: {problem}", file=sys.stderr)
     return 1 if problems else 0
+
+
+def _mux_reason_label(reason: str) -> str:
+    """Human wording for a MuxBackendInfo.reason, shared by `mux` and validate."""
+    return {
+        "env": "forced by BMAD_LOOP_MUX_BACKEND",
+        "policy": f"set by [mux] backend in {POLICY_FILE}",
+        "platform-default": f"platform default for {sys.platform}",
+        "first-match": "first available platform match",
+        "fallback": "fallback (no registered backend is available)",
+    }.get(reason, reason)
+
+
+def cmd_mux(args: argparse.Namespace) -> int:
+    """List registered terminal-multiplexer backends and the selection, or
+    persist a machine-scoped choice (`mux set <name>` / `mux set --clear`) into
+    .bmad-loop/policy.toml. Never prompts — runs are unattended."""
+    from .adapters.multiplexer import MultiplexerError, detect_multiplexers, get_multiplexer
+
+    project = _project(args)
+    if args.action == "set":
+        return _mux_set(project, args)
+    if args.clear or args.force:
+        print("error: --clear/--force apply to `bmad-loop mux set`", file=sys.stderr)
+        return 1
+
+    rows = detect_multiplexers()
+    header = ("NAME", "PLATFORM", "AVAILABLE", "VERSION", "SELECTED")
+    table = [
+        (
+            r.name,
+            "yes" if r.matches_platform else "no",
+            "yes" if r.available else "no",
+            r.version or "-",
+            f"* {_mux_reason_label(r.reason)}" if r.selected else "",
+        )
+        for r in rows
+    ]
+    widths = [max(len(h), *(len(row[i]) for row in table), 0) for i, h in enumerate(header)]
+    for row in (header, *table):
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
+    print(
+        "override: BMAD_LOOP_MUX_BACKEND env var, or `bmad-loop mux set <name>` "
+        f"(persists to {POLICY_FILE})"
+    )
+    try:
+        backend = get_multiplexer()
+    except MultiplexerError as e:
+        # A forced unknown name (env or policy): the listing above still helps.
+        print(f"FAIL: {e}", file=sys.stderr)
+        return 1
+    chosen = next((r for r in rows if r.selected), None)
+    reason = _mux_reason_label(chosen.reason) if chosen else "fallback"
+    name = chosen.name if chosen else "tmux"
+    print(f"selection: {name} ({type(backend).__name__}) — {reason}")
+    return 0
+
+
+def _mux_set(project: Path, args: argparse.Namespace) -> int:
+    from .adapters.multiplexer import detect_multiplexers
+
+    path = _policy_path(project)
+    if args.clear:
+        if args.name:
+            print("error: `mux set --clear` takes no backend name", file=sys.stderr)
+            return 1
+        policy_mod.write_mux_backend(path, None)
+        print(f"mux backend cleared (auto-select) in {path}")
+        return 0
+    if not args.name:
+        print(
+            "error: `mux set` requires a backend name (run `bmad-loop mux` to list), "
+            "or `mux set --clear` to return to auto-select",
+            file=sys.stderr,
+        )
+        return 1
+    rows = {r.name: r for r in detect_multiplexers()}
+    row = rows.get(args.name)
+    if row is None and not args.force:
+        known = ", ".join(sorted(rows)) or "(none registered)"
+        print(
+            f"error: {args.name!r} is not a registered backend; known: {known}. "
+            "A plugin backend that only registers on the target machine can be "
+            "persisted with --force.",
+            file=sys.stderr,
+        )
+        return 1
+    if row is not None and not row.available:
+        # Deliberate choice = trusted (same doctrine as the env override), but
+        # say so: the run will fail loudly if the binary never appears.
+        print(
+            f"warning: backend {args.name!r} is not available on this host (its "
+            "transport binary is not on PATH); persisted anyway — `bmad-loop validate` "
+            "will report it",
+            file=sys.stderr,
+        )
+    if os.environ.get("BMAD_LOOP_MUX_BACKEND"):
+        print(
+            "note: BMAD_LOOP_MUX_BACKEND is set in this shell and outranks the "
+            "persisted choice",
+            file=sys.stderr,
+        )
+    policy_mod.write_mux_backend(path, args.name)  # a junk name raises PolicyError → main()
+    print(f'mux backend set to "{args.name}" in {path}')
+    return 0
 
 
 def _require_base_skills(project: Path, pol, *, require_stories: bool = False) -> bool:
@@ -1608,6 +1752,30 @@ def main(argv: list[str] | None = None) -> int:
         "(overrides [stories].source; skips the sprint-status gate)",
     )
 
+    mux_p = add(
+        "mux",
+        cmd_mux,
+        "list terminal-multiplexer backends + selection; `mux set <name>` persists a choice",
+    )
+    mux_p.add_argument(
+        "action",
+        nargs="?",
+        choices=("set",),
+        help="set: persist a backend choice into .bmad-loop/policy.toml",
+    )
+    mux_p.add_argument("name", nargs="?", help="backend name to persist (see the listing)")
+    mux_p.add_argument(
+        "--clear",
+        action="store_true",
+        help="with set: remove the persisted choice (back to auto-select)",
+    )
+    mux_p.add_argument(
+        "--force",
+        action="store_true",
+        help="with set: persist a name not registered in this process (e.g. a plugin "
+        "backend that only registers on the target machine)",
+    )
+
     probe_p = add(
         "probe-adapter",
         cmd_probe,
@@ -1822,6 +1990,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
+        # Install the policy [mux] backend choice before dispatch: several
+        # handlers (probe/diagnose/attach/stop/cleanup/tui) reach the mux
+        # without ever loading policy, so this is the one reliable seam.
+        _configure_mux(_project(args))
         return args.func(args)
     except (
         bmadconfig.BmadConfigError,
