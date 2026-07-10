@@ -1298,6 +1298,27 @@ def test_post_kill_reconcile_non_utf8_stories_spec_keeps_stall(tmp_path):
     )
 
 
+def test_stories_readback_oserror_spec_returns_none(tmp_path, monkeypatch):
+    """The read-back *poll* (not the post-kill hook) is where the issue's headline
+    crash lived: this path guards only UnicodeDecodeError, so an OSError escaped to
+    engine.run()'s `except Exception` and marked the whole run crashed. It now reads
+    like a spec that has not terminated yet — poll returns None, grace expires, the
+    stall/timeout verdict routes through the designed ladder.
+
+    `devcontract` binds `read_frontmatter` by ``from .verify import``, so patch the
+    name on `devcontract`; patching `verify.read_frontmatter` would not rebind it.
+    Faulting `Path.read_text` instead would also trip `stories.resolve_story_spec`,
+    whose own guard would mask which read actually failed."""
+    adapter, _ = make_dev_adapter(tmp_path)
+    _write_story_spec(tmp_path, "1", "slug", _DONE_SPEC)
+
+    def boom(_path):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(generic.devcontract, "read_frontmatter", boom)
+    assert adapter._stories_synth_result(_dev_handle(), _stories_spec(tmp_path), wait=False) is None
+
+
 def test_post_kill_reconcile_blank_frontmatter_prose_done_rescues(tmp_path):
     """status_consistent is "no active disagreement": a blank frontmatter with prose
     `done` is exactly what a delivered Stop would have synthesized (the engine's

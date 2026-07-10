@@ -1088,6 +1088,29 @@ def resolve_spec_path(spec_file: str, paths: ProjectPaths) -> Path:
     return paths.implementation_artifacts / p
 
 
+def _gate_frontmatter(spec_path: Path) -> dict[str, Any] | VerifyOutcome:
+    """Read a spec's frontmatter for a verify gate, degrading an unreadable spec
+    to a retryable :class:`VerifyOutcome` instead of a whole-run crash.
+
+    Every verify gate reads the spec back while the dev skill may still be
+    rewriting it, so an OSError here (a TOCTOU truncation, a transient lock, a
+    momentarily unsearchable parent) is a fault with a *designed* transient
+    producer — not a broken orchestrator. `read_frontmatter` itself keeps raising
+    (repair callers depend on that); only these observation gates degrade.
+
+    The reason is deliberately distinct from a status mismatch: returning ``{}``
+    here would read as status ``""`` and let a read fault masquerade as "the
+    skill forgot to set the status", sending a repair session after a bug that
+    is not there. Retries are not silent — the reason lands in the journal via
+    `dev-decision` / `review-verify-failed`, and a persistent fault is bounded
+    into DEFER (or PAUSE) by `escalation.decide_dev` / `decide_review_session`.
+    """
+    try:
+        return read_frontmatter(spec_path)
+    except OSError as e:
+        return VerifyOutcome.retry(f"spec unreadable ({e.__class__.__name__}: {e}): {spec_path}")
+
+
 def _verify_shared_gates(
     spec_path: Path,
     rj: dict[str, Any],
@@ -1118,7 +1141,9 @@ def _verify_shared_gates(
             f"dev result.json workflow is {workflow!r}, expected {DEV_WORKFLOW!r}"
         )
 
-    fm = read_frontmatter(spec_path)
+    fm = _gate_frontmatter(spec_path)
+    if isinstance(fm, VerifyOutcome):
+        return fm
     status = status_of(fm)
     if status != expected_status:
         return VerifyOutcome.retry(
@@ -1405,7 +1430,9 @@ def verify_commands_outcome(policy: Policy, cwd: Path) -> VerifyOutcome:
 def verify_review(task: StoryTask, paths: ProjectPaths, policy: Policy) -> VerifyOutcome:
     if not task.spec_file:
         return VerifyOutcome.retry("no spec file recorded for task")
-    fm = read_frontmatter(Path(task.spec_file))
+    fm = _gate_frontmatter(Path(task.spec_file))
+    if isinstance(fm, VerifyOutcome):
+        return fm
     status = status_of(fm)
     if status != "done":
         return VerifyOutcome.retry(f"spec status is {status!r}, expected 'done'")
@@ -1426,7 +1453,10 @@ def verify_review_stories(task: StoryTask, paths: ProjectPaths, policy: Policy) 
     id-keyed story spec ``verify_dev_stories`` recorded on the dev pass."""
     if not task.spec_file:
         return VerifyOutcome.retry("no spec file recorded for task")
-    status = status_of(read_frontmatter(Path(task.spec_file)))
+    fm = _gate_frontmatter(Path(task.spec_file))
+    if isinstance(fm, VerifyOutcome):
+        return fm
+    status = status_of(fm)
     if status != "done":
         return VerifyOutcome.retry(f"spec status is {status!r}, expected 'done'")
     return verify_commands_outcome(policy, paths.project)
@@ -1441,13 +1471,22 @@ def verify_review_bundle(task: StoryTask, paths: ProjectPaths, policy: Policy) -
     can trust it happened."""
     if not task.spec_file:
         return VerifyOutcome.retry("no spec file recorded for task")
-    fm = read_frontmatter(Path(task.spec_file))
+    fm = _gate_frontmatter(Path(task.spec_file))
+    if isinstance(fm, VerifyOutcome):
+        return fm
     status = status_of(fm)
     if status != "done":
         return VerifyOutcome.retry(f"spec status is {status!r}, expected 'done'")
 
     ledger = paths.deferred_work
-    text = ledger.read_text(encoding="utf-8") if ledger.is_file() else ""
+    # Same TOCTOU class as the spec read above: the ledger is rewritten by the
+    # orchestrator's own mark_done between the dev and review gates.
+    try:
+        text = ledger.read_text(encoding="utf-8") if ledger.is_file() else ""
+    except OSError as exc:
+        return VerifyOutcome.retry(
+            f"deferred-work ledger unreadable ({exc.__class__.__name__}: {exc}): {ledger}"
+        )
     entries = {e.id: e for e in deferredwork.parse_ledger(text)}
     not_done = sorted(
         i for i in task.dw_ids if i not in entries or not entries[i].status.startswith("done")

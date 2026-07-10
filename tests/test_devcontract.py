@@ -377,6 +377,29 @@ def test_synthesize_result_non_utf8_fallback_marker_is_not_terminal(tmp_path):
     assert sr.status_consistent is True
 
 
+def test_synthesize_result_oserror_is_not_terminal(tmp_path, monkeypatch):
+    """An unreadable spec is not evidence a session finished, so it reads exactly
+    like one that has not terminated yet — no result_json, no crash. The caller
+    keeps polling; a fault that outlives the grace window becomes a stall/timeout
+    verdict that `_post_kill_reconcile` can still rescue. Before this, an OSError
+    here took the whole run down (engine.run()'s `except Exception` → crash.txt).
+
+    `devcontract` binds `read_frontmatter` by ``from .verify import``, so the name
+    to patch is `devcontract.read_frontmatter` — patching `verify.read_frontmatter`
+    would leave this module's already-bound reference untouched and the test would
+    pass for the wrong reason."""
+    spec = tmp_path / "spec-1-1-a.md"
+    spec.write_text("---\nstatus: done\n---\n\n## Auto Run Result\n\n- Status: done\n")
+
+    def boom(_path):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(devcontract, "read_frontmatter", boom)
+    sr = devcontract.synthesize_result(spec, story_key="1-1")
+    assert sr.result_json is None
+    assert sr.status_consistent is True
+
+
 # ----------------------------------------------------------- reset_spec_status
 
 

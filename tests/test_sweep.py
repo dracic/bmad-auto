@@ -9,6 +9,7 @@ from conftest import (
     bundle_dev_effect,
     bundle_dev_escalates,
     bundle_review_effect,
+    fault_read_text,
     git,
     migrate_effect,
     triage_effect,
@@ -470,6 +471,36 @@ def test_generic_skill_bundle_orchestrator_closes_ledger(project):
     assert "--dw-bundle" not in dev_prompt
     kinds = {e["kind"] for e in engine.journal.entries()}
     assert "sweep-bundle-closed" in kinds
+
+
+def test_bundle_ledger_close_skips_on_unreadable_spec(project, monkeypatch):
+    """The bundle counterpart of the sprint-board sync: an unreadable bundle spec
+    must not close any dw id (the ledger write is a repair — it must never fire off
+    an observation the orchestrator could not make) and must not crash the sweep."""
+    write_ledger(project, {"DW-1": "open", "DW-2": "open"})
+    pol = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        review=ReviewPolicy(enabled=False),
+        dev=DevPolicy(skill="bmad-dev-auto"),
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_sweep(project, [], policy=pol)
+    sp = project.implementation_artifacts / "spec-dw-fix-things.md"
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    write_spec(sp, "done", "abc123")
+    task = StoryTask(story_key="dw-fix-things", epic=0, dw_ids=["DW-1", "DW-2"])
+    fault_read_text(monkeypatch, sp)
+
+    engine._post_dev_state_sync(task, {"spec_file": str(sp)})
+
+    entries = ledger_entries(project)
+    assert entries["DW-1"].status == "open" and entries["DW-2"].status == "open"
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "sweep-bundle-closed" not in kinds
+    events = [e for e in engine.journal.entries() if e["kind"] == "spec-read-failed"]
+    assert len(events) == 1 and events[0]["site"] == "bundle-ledger-close"
+    assert events[0]["story_key"] == "dw-fix-things"
 
 
 def test_generic_bundle_review_verify_recloses_ledger_after_review_rewrites_it(project):

@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import git, spec_path, write_spec, write_sprint
+from conftest import fault_read_text, git, spec_path, write_spec, write_sprint
 
 from bmad_loop import verify
 from bmad_loop.model import StoryTask
@@ -641,6 +641,71 @@ def test_verify_review_bundle_missing_entry_fails(project):
     assert not out.ok and out.fixable and "DW-2" in out.reason
 
 
+def test_verify_shared_gates_oserror_degrades_to_retry(project, monkeypatch):
+    """An unreadable spec at the dev gate is a retryable outcome, not a whole-run
+    crash: the dev skill is still rewriting the spec this gate reads back, so a
+    transient OSError has a designed producer. The reason must name the read fault
+    — degrading to frontmatter {} would read as status "" and send a repair
+    session after a status bug that does not exist."""
+    write_sprint(project, {"1-1-a": "review"})
+    task = make_task(project)
+    sp = spec_path(project, "1-1-a")
+    write_spec(sp, "in-review", task.baseline_commit)
+    (project.project / "src.txt").write_text("changed\n")
+    fault_read_text(monkeypatch, sp)
+
+    out = verify.verify_dev(task, project, dev_result(sp))
+    assert not out.ok and out.retryable and not out.fixable
+    assert "spec unreadable" in out.reason and "PermissionError" in out.reason
+    assert "spec status is" not in out.reason  # never masquerades as a status mismatch
+
+
+@pytest.mark.parametrize("mode", ["review", "review_stories", "review_bundle"])
+def test_verify_review_gates_oserror_degrades_to_retry(project, monkeypatch, mode):
+    """Same degrade at all three review gates."""
+    if mode == "review":
+        write_sprint(project, {"1-1-a": "done"})
+        task = make_task(project)
+        sp = spec_path(project, "1-1-a")
+        write_spec(sp, "done", task.baseline_commit)
+        gate = verify.verify_review
+    elif mode == "review_stories":
+        task = make_stories_task(project, "1")
+        sp = write_story(
+            project.planning_artifacts / "epic-a", "1", "x", "done", task.baseline_commit
+        )
+        gate = verify.verify_review_stories
+    else:
+        task = make_bundle_task(project)
+        sp = project.implementation_artifacts / "spec-dw-test-bundle.md"
+        write_spec(sp, "done", task.baseline_commit)
+        bundle_ledger(project, {"DW-1": "done 2026-06-11", "DW-2": "done 2026-06-11"})
+        gate = verify.verify_review_bundle
+    task.spec_file = str(sp)
+    fault_read_text(monkeypatch, sp)
+
+    out = gate(task, project, Policy())
+    assert not out.ok and out.retryable
+    assert "spec unreadable" in out.reason and "PermissionError" in out.reason
+    assert "expected 'done'" not in out.reason
+
+
+def test_verify_review_bundle_ledger_oserror_degrades_to_retry(project, monkeypatch):
+    """The ledger read is the same TOCTOU class as the spec read beside it — the
+    orchestrator's own `mark_done` rewrites it between the dev and review gates."""
+    task = make_bundle_task(project)
+    sp = project.implementation_artifacts / "spec-dw-test-bundle.md"
+    write_spec(sp, "done", task.baseline_commit)
+    task.spec_file = str(sp)
+    bundle_ledger(project, {"DW-1": "done 2026-06-11", "DW-2": "done 2026-06-11"})
+    fault_read_text(monkeypatch, project.deferred_work)  # spec reads fine
+
+    out = verify.verify_review_bundle(task, project, Policy())
+    assert not out.ok and out.retryable and not out.fixable
+    assert "deferred-work ledger unreadable" in out.reason and "PermissionError" in out.reason
+    assert "DW-1" not in out.reason  # not the "entries not marked done" verdict
+
+
 def test_safe_rollback_reverts_tracked_and_removes_run_created(project):
     repo = project.project
     baseline = verify.rev_parse_head(repo)
@@ -1173,6 +1238,21 @@ def test_read_frontmatter_tolerates_non_utf8(project):
     p = project.project / "x.md"
     p.write_bytes(b"\xff\xfe\x00\x01 not utf-8 \x80\x81")
     assert verify.read_frontmatter(p) == {}
+
+
+def test_read_frontmatter_oserror_still_raises(project, monkeypatch):
+    """`read_frontmatter` degrades a *decode* fault to {} but must keep RAISING on
+    OSError. Repair callers (`reset_spec_status`, `mark_done`) read through it and
+    depend on the raise: silently skipping a rewrite leaves the spec in a state the
+    caller believes it fixed. The observation callers wrap it instead —
+    `verify._gate_frontmatter`, `Engine._observed_frontmatter`,
+    `devcontract.synthesize_result`. Widening the except here would erase that
+    distinction everywhere at once."""
+    p = project.project / "x.md"
+    p.write_text("---\nstatus: done\n---\n")
+    fault_read_text(monkeypatch, p)
+    with pytest.raises(PermissionError):
+        verify.read_frontmatter(p)
 
 
 def test_artifact_relpaths_returns_in_repo_folders(project):

@@ -1483,9 +1483,16 @@ class Engine:
                 self._post_dev_state_sync(task, result.result_json)
                 # carry the skill's follow-up-review recommendation (PR #2505)
                 # onto the task so _review_and_commit can gate the review loop.
-                task.followup_review_recommended = bool(
-                    (result.result_json or {}).get("followup_review_recommended", False)
-                )
+                # A present key is authoritative (folded from the frontmatter, or
+                # the legacy skill's own result.json); an absent one is a resumed
+                # pre-reconcile snapshot whose re-fold may have been dropped by a
+                # spec read fault — re-derive from the spec instead of defaulting
+                # a recommended review away.
+                rj = result.result_json or {}
+                if "followup_review_recommended" in rj:
+                    task.followup_review_recommended = bool(rj["followup_review_recommended"])
+                else:
+                    task.followup_review_recommended = self._followup_from_spec(task, rj)
                 outcome = self._verify_dev_artifacts(task, result.result_json)
                 if outcome.ok and self._run_verify_commands_after_dev(task, result.result_json):
                     # deterministic gates run here too: a broken build must not
@@ -1797,6 +1804,72 @@ class Engine:
             return False
         return self.policy.review.enabled
 
+    def _observed_frontmatter(self, spec_path: Path, story_key: str, site: str) -> dict | None:
+        """Read a spec's frontmatter on a *bookkeeping* path, degrading an
+        unreadable spec to ``None`` (journaled) instead of a whole-run crash.
+
+        These reads observe what the dev skill left behind so the orchestrator can
+        sync the sprint board / ledger. They race the skill's own writes, so an
+        OSError is a designed transient, not a broken orchestrator. Returning None
+        tells the caller to skip its bookkeeping pass entirely: skipping is safe
+        because everything a skipped pass would have derived is re-supplied later —
+        the spec *status* by the deterministic verify gate's own re-read (which
+        turns a still-unrepaired spec into a retry), and the review-routing flag by
+        ``_followup_from_spec`` at the point ``_dev_phase`` consumes it. Silent it
+        is not — every skip lands a ``spec-read-failed`` event in the journal.
+
+        Repair writes (``reset_spec_status``, ``mark_done``) deliberately do the
+        opposite and let OSError raise: silently skipping a rewrite would leave the
+        spec in a state the caller believes it fixed. Observation degrades, repair
+        raises.
+        """
+        try:
+            return verify.read_frontmatter(spec_path)
+        except OSError as e:
+            self._journal_spec_read_failed(spec_path, story_key, site, e)
+            return None
+
+    def _journal_spec_read_failed(
+        self, spec_path: Path, story_key: str, site: str, e: OSError
+    ) -> None:
+        self.journal.append(
+            "spec-read-failed",
+            story_key=story_key,
+            spec=str(spec_path),
+            site=site,
+            error=f"{e.__class__.__name__}: {e}",
+        )
+
+    def _followup_from_spec(self, task: StoryTask, rj: dict) -> bool:
+        """Review-routing fallback for a result that carries no
+        ``followup_review_recommended`` key: re-derive it from the finalized spec
+        frontmatter — the source ``devcontract.synthesize_result`` and the
+        reconcile folds read it from, so a readable spec can never disagree.
+
+        The key is absent exactly when the result is a *resumed* pre-reconcile
+        snapshot (``synthesize_result`` only writes it on a ``done`` synth, and the
+        durable record is persisted before reconcile mutates the live dict). The
+        reconcile re-fold normally restores it on replay, but a spec read fault
+        skips that fold — and the verify gate only re-supplies *status*, not this
+        flag — so without this fallback a recommended follow-up review would be
+        silently skipped. Gates on the frontmatter's own status (mirroring the
+        fold): a faulted replay leaves ``rj["status"]`` at the stale snapshot
+        value, so the result status must not decide. Degrades to False on a read
+        fault (journaled) — the pre-existing absent-key default.
+        """
+        if not self._generic_dev():
+            return False
+        spec_file = rj.get("spec_file")
+        if not spec_file:
+            return False
+        spec_path = verify.resolve_spec_path(str(spec_file), self.workspace.paths)
+        if not spec_path.is_file():
+            return False
+        fm = self._observed_frontmatter(spec_path, task.story_key, "followup-routing")
+        if fm is None:
+            return False
+        return verify.status_of(fm) == "done" and bool(fm.get("followup_review_recommended", False))
+
     def _reconcile_generic_terminal_status(self, task: StoryTask, result_json: dict | None) -> None:
         """Repair a generic-skill spec the session finalized in prose but not in
         frontmatter. ``bmad-dev-auto`` sometimes appends a terminal
@@ -1838,7 +1911,9 @@ class Engine:
         # "none" through verify.status_of (str(None)), which would dodge the
         # RECONCILABLE_FROM allowlist; normalize it (and a missing key) to "" so the
         # blank-status case reconciles. A literal `status: none` stays "none".
-        fm = verify.read_frontmatter(spec_path)
+        fm = self._observed_frontmatter(spec_path, task.story_key, "reconcile")
+        if fm is None:
+            return
         raw_status = fm.get("status")
         fm_status = "" if raw_status is None else str(raw_status).strip().lower()
         if fm_status == success_status:
@@ -1863,18 +1938,26 @@ class Engine:
             return
         if fm_status not in devcontract.RECONCILABLE_FROM:
             return  # blocked / unknown custom status: never override a deliberate one
-        arr = devcontract.parse_auto_run_result(spec_path.read_text(encoding="utf-8"))
+        try:
+            text = spec_path.read_text(encoding="utf-8")
+        except OSError as e:
+            self._journal_spec_read_failed(spec_path, task.story_key, "reconcile-prose", e)
+            return
+        arr = devcontract.parse_auto_run_result(text)
         if not arr.present or arr.status != devcontract.DONE:
             return  # no terminal prose, or a blocked outcome: leave for the escalation path
         if not devcontract.reset_spec_status(spec_path, success_status):
             return
         # Keep the in-place result_json the rest of _dev_phase reads consistent with
         # the now-reconciled spec (the followup flag is only carried on a done exit).
+        # `reset_spec_status` rewrites only the status line, so `fm` (read above)
+        # still holds every other key — a re-read here could only return the same
+        # followup flag, at the cost of a second racy read that can now fail.
         if isinstance(result_json, dict):
             result_json["status"] = success_status
             if success_status == "done":
                 result_json["followup_review_recommended"] = bool(
-                    verify.read_frontmatter(spec_path).get("followup_review_recommended", False)
+                    fm.get("followup_review_recommended", False)
                 )
         self.journal.append(
             "spec-status-reconciled",
@@ -1906,8 +1989,10 @@ class Engine:
             return
         review_enabled = self._dev_review_enabled()  # always False for the generic path
         success_status = "in-review" if review_enabled else "done"
-        status = verify.status_of(verify.read_frontmatter(spec_path))
-        if status != success_status:
+        fm = self._observed_frontmatter(spec_path, task.story_key, "post-dev-sync")
+        if fm is None:
+            return
+        if verify.status_of(fm) != success_status:
             return
         target = "review" if review_enabled else "done"
         sprint_advance(self.workspace.paths.sprint_status, task.story_key, target)

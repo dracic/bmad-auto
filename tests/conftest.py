@@ -205,6 +205,22 @@ def install_base_skills(paths: ProjectPaths, trees=(".claude/skills", ".agents/s
         _write_skill_stubs(paths.project / tree, BASE_SKILLS)
 
 
+def fault_read_text(monkeypatch, target: Path) -> None:
+    """Make exactly ``target``'s ``read_text`` raise PermissionError; every other
+    path still reads normally. A selective monkeypatch rather than chmod: chmod is a
+    no-op for root and carries no read bit on Windows, so the fault would silently
+    not fire on half the CI matrix. ``read_bytes`` is untouched, so a test can still
+    assert the faulted file's contents are unchanged."""
+    real = Path.read_text
+
+    def fake(self, *a, **kw):
+        if self == target:
+            raise PermissionError(13, "Permission denied")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", fake)
+
+
 def write_sprint(paths: ProjectPaths, statuses: dict[str, str]) -> None:
     doc = dict(SPRINT_TEMPLATE)
     doc["development_status"] = dict(statuses)
