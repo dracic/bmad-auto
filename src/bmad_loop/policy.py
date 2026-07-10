@@ -951,8 +951,13 @@ def write_mux_backend(path: Path, name: str | None) -> None:
                 mux_header_at = len(out) - 1
             continue
         if not replaced and section == "mux" and _MUX_KEY_RE.match(line):
-            ending = line[len(line.rstrip("\r\n")) :] or "\n"
-            out.append(new_line + ending)
+            stripped = line.rstrip("\r\n")
+            ending = line[len(stripped) :] or "\n"
+            # backend names never contain '#' (_MUX_NAME_RE), so any '#' after
+            # '=' on this line is a hand-added trailing comment worth keeping.
+            hash_idx = stripped.find("#", stripped.index("="))
+            trailing = ("  " + stripped[hash_idx:]) if hash_idx != -1 else ""
+            out.append(new_line + trailing + ending)
             replaced = True
             continue
         out.append(line)

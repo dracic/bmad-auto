@@ -613,6 +613,27 @@ def test_write_mux_backend_preserves_hand_edits(tmp_path):
     assert "# keep my comment" in p.read_text(encoding="utf-8")
 
 
+def test_write_mux_backend_preserves_trailing_comment_on_anchor_line(tmp_path):
+    """A hand-added comment on the backend line itself survives a replace —
+    'preserving every other byte' includes the anchor line's own comment."""
+    p = tmp_path / "policy.toml"
+    p.write_text('[mux]\nbackend = "old"  # pinned per teammate X\n', encoding="utf-8")
+    policy.write_mux_backend(p, "new")
+    text = p.read_text(encoding="utf-8")
+    assert 'backend = "new"  # pinned per teammate X\n' in text
+    assert policy.load(p).mux.backend == "new"
+
+
+def test_write_mux_backend_clear_preserves_trailing_comment(tmp_path):
+    """Clearing re-comments the line but keeps the hand-added trailing comment."""
+    p = tmp_path / "policy.toml"
+    p.write_text('[mux]\nbackend = "old"  # pinned per teammate X\n', encoding="utf-8")
+    policy.write_mux_backend(p, None)
+    text = p.read_text(encoding="utf-8")
+    assert '# backend = "tmux"  # pinned per teammate X\n' in text
+    assert policy.load(p).mux.backend == ""
+
+
 def test_write_mux_backend_preserves_crlf_line_ending(tmp_path):
     p = tmp_path / "policy.toml"
     p.write_bytes(b'[mux]\r\nbackend = "old"\r\n')

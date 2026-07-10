@@ -35,6 +35,8 @@ class _Stub:
         return self._avail
 
     def version(self):
+        if isinstance(self._version, Exception):
+            raise self._version
         return self._version
 
 
@@ -191,6 +193,22 @@ def test_unavailable_platform_default_falls_through_to_first_available(fresh_reg
     assert (name, reason) == ("other", "first-match")
 
 
+def test_platform_default_requires_platform_match(fresh_registry):
+    """A backend name-colliding with this platform's default but claiming a
+    *different* platform must not be defaulted onto this one: the default step
+    enforces matches() like every other step, and selection falls through to
+    the first genuine platform match."""
+    fresh_registry._BUILTINS_LOADED = True
+    other = _Stub(avail=True)
+    fresh_registry.register_multiplexer(
+        _platform_default_name(), lambda p: False, lambda: _Stub(avail=True)
+    )
+    fresh_registry.register_multiplexer("other", lambda p: p == sys.platform, lambda: other)
+    backend, name, reason = fresh_registry._select()
+    assert backend is other
+    assert (name, reason) == ("other", "first-match")
+
+
 def test_all_unavailable_pins_historical_first_match_fallback(fresh_registry):
     """Nothing available → today's behavior is preserved: the first platform
     match is returned anyway (validate reports it unavailable later)."""
@@ -291,3 +309,20 @@ def test_detect_multiplexers_guards_broken_probes(fresh_registry):
     rows = {r.name: r for r in fresh_registry.detect_multiplexers()}
     assert rows["bare"].available is False and rows["bare"].version is None
     assert rows["raiser"].available is False
+
+
+def test_detect_multiplexers_version_crash_keeps_availability(fresh_registry):
+    """version() is cosmetic: a backend whose availability probes True but
+    whose version() raises must still read available (and selected, since
+    _select never calls version()) — never a contradictory
+    selected=True/available=False row."""
+    fresh_registry._BUILTINS_LOADED = True
+    fresh_registry.register_multiplexer(
+        "verless",
+        lambda p: p == sys.platform,
+        lambda: _Stub(avail=True, version=RuntimeError("boom")),
+    )
+    rows = {r.name: r for r in fresh_registry.detect_multiplexers()}
+    assert rows["verless"].available is True
+    assert rows["verless"].version is None
+    assert rows["verless"].selected is True and rows["verless"].reason == "first-match"

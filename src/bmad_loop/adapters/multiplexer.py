@@ -297,7 +297,8 @@ def _select() -> tuple[TerminalMultiplexer, str, str]:
     1. ``env`` — ``BMAD_LOOP_MUX_BACKEND`` forces a backend by name
     2. ``policy`` — the ``[mux] backend`` choice installed by
        :func:`configure_multiplexer`, same forced-by-name semantics
-    3. ``platform-default`` — this platform's default, iff registered + available
+    3. ``platform-default`` — this platform's default, iff registered +
+       platform match + available
     4. ``first-match`` — first registered backend matching the platform that is
        available (registration order breaks ties among available backends)
     5. ``fallback`` — the historical behavior, preserved so a POSIX host without
@@ -335,11 +336,17 @@ def _select() -> tuple[TerminalMultiplexer, str, str]:
         return instances[name]
 
     default = _PLATFORM_DEFAULTS.get(sys.platform, _DEFAULT_BACKEND)
-    default_factory = _factory_by_name(default)
-    if default_factory is not None:
-        backend = _instance(default, default_factory)
-        if _usable(backend):
-            return backend, default, "platform-default"
+    for name, matches, factory in _BACKENDS:
+        if name != default:
+            continue
+        # first registration with the default name wins, as everywhere else;
+        # it must also claim this platform — a name-colliding backend for
+        # another platform doesn't get defaulted onto this one.
+        if matches(sys.platform):
+            backend = _instance(name, factory)
+            if _usable(backend):
+                return backend, name, "platform-default"
+        break
     for name, matches, factory in _BACKENDS:
         if matches(sys.platform) and _usable(_instance(name, factory)):
             return instances[name], name, "first-match"
@@ -404,9 +411,16 @@ def detect_multiplexers() -> list[MuxBackendInfo]:
         try:
             backend = factory()
             available = _usable(backend)
-            version = backend.version()
         except Exception:
             available = False
+        else:
+            # version() is cosmetic: its failure must not overwrite the
+            # already-computed availability (a selected backend would
+            # otherwise show a contradictory available=False row).
+            try:
+                version = backend.version()
+            except Exception:
+                version = None
         selected = name == selected_name
         rows.append(
             MuxBackendInfo(
