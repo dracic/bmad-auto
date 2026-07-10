@@ -1188,6 +1188,101 @@ def test_transient_spec_read_fault_does_not_crash_run(project, monkeypatch):
     assert len(events) == 1 and events[0]["site"] == "reconcile"
 
 
+def _crash_replay_setup(project):
+    """A host death that leaves the replay-fold's exact preconditions on disk.
+
+    The dev session runs in the reconcile scenario (prose done, frontmatter
+    lagging), so its durable record is the pre-reconcile snapshot
+    `devcontract.synthesize_result` produces there: status "in-progress" and NO
+    `followup_review_recommended` key (only written on a done synth). The host
+    dies in the post-session window — phase persists as DEV_RUNNING — but only
+    AFTER the original run's reconcile repaired the spec on disk (that write
+    lands before the next state save), so the resumed reconcile enters the
+    already-finalized branch whose re-fold is the sole carrier of the followup
+    flag back onto the replay."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    inner = dev_effect(project, "1-1-a", final_status="in-progress", prose_status="done")
+
+    def snapshot_effect(spec):
+        result = inner(spec)
+        result.result_json["status"] = "in-progress"
+        del result.result_json["followup_review_recommended"]
+        return result
+
+    engine, _ = make_engine(project, [snapshot_effect])
+    original_emit = engine._emit
+
+    def crashing_emit(stage, *args, **kwargs):
+        if stage == "post_session":
+            raise RuntimeError("host died in the post-session window")
+        return original_emit(stage, *args, **kwargs)
+
+    engine._emit = crashing_emit
+    assert engine.run().crashed
+    saved = load_state(engine.run_dir).tasks["1-1-a"]
+    assert saved.phase == Phase.DEV_RUNNING
+    assert "followup_review_recommended" not in saved.sessions[0].result_json
+
+    sp = spec_path(project, "1-1-a")
+    sp.write_text(
+        "---\ntitle: 'test'\ntype: 'feature'\nstatus: 'done'\n"
+        f"baseline_revision: '{rev_parse_head(project.project)}'\n"
+        "followup_review_recommended: true\n---\n\n## Intent\n\ntest spec\n"
+        "\n## Auto Run Result\n\n- Status: done\n\nSummary: test.\n",
+        encoding="utf-8",
+    )
+    return engine, sp
+
+
+def test_resume_replay_fault_still_routes_recommended_review(project, monkeypatch):
+    """The resume counterpart of the capstone above. A replayed dev result is a
+    pre-reconcile snapshot with no followup key, and the reconcile re-fold is
+    what restores it — a transient read fault used to drop that fold silently.
+    The verify gate re-supplies only *status*, so the story committed with its
+    recommended follow-up review skipped. Routing now re-derives from the
+    finalized spec at consumption (`_followup_from_spec`): the fault costs one
+    journal event, not the review."""
+    engine, sp = _crash_replay_setup(project)
+    real, fired = Path.read_text, []
+
+    def raise_once_then_delegate(self, *a, **kw):
+        if self == sp and not fired:
+            fired.append(self)
+            raise PermissionError(13, "Permission denied")
+        return real(self, *a, **kw)
+
+    resumed, adapter = resume_engine(project, engine, [review_effect(project, "1-1-a", clean=True)])
+    monkeypatch.setattr(Path, "read_text", raise_once_then_delegate)
+    summary = resumed.run()
+
+    assert fired  # the reconcile read really faulted
+    assert not summary.crashed and summary.done == 1
+    assert [s.role for s in adapter.sessions] == ["review"]  # routed, dev not re-run
+    kinds = [e["kind"] for e in resumed.journal.entries()]
+    assert "review-not-recommended" not in kinds
+    events = [e for e in resumed.journal.entries() if e["kind"] == "spec-read-failed"]
+    assert len(events) == 1 and events[0]["site"] == "reconcile"
+
+
+def test_resume_replay_persistent_fault_degrades_and_defers(project, monkeypatch):
+    """When the fault outlives the routing fallback too, the degrade stays the
+    decided one: routing falls back to False (journaled at site
+    `followup-routing`), the verify gate's own faulted read turns each attempt
+    into a retry, and the attempt budget lands the story in DEFERRED — never a
+    crash, never a phantom review."""
+    engine, sp = _crash_replay_setup(project)
+    resumed, adapter = resume_engine(project, engine, [dev_effect(project, "1-1-a")])
+    fault_read_text(monkeypatch, sp)
+    summary = resumed.run()
+
+    assert not summary.crashed and summary.done == 0
+    final = load_state(resumed.run_dir).tasks["1-1-a"]
+    assert final.phase == Phase.DEFERRED
+    assert [s.role for s in adapter.sessions] == ["dev"]  # the one budgeted retry
+    sites = [e["site"] for e in resumed.journal.entries() if e["kind"] == "spec-read-failed"]
+    assert "reconcile" in sites and "followup-routing" in sites
+
+
 def test_generic_reconcile_idempotent_when_already_done(project):
     """When the skill DID advance the frontmatter to done, reconcile is a no-op:
     no second write, no `spec-status-reconciled` journal entry."""

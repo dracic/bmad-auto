@@ -1483,9 +1483,16 @@ class Engine:
                 self._post_dev_state_sync(task, result.result_json)
                 # carry the skill's follow-up-review recommendation (PR #2505)
                 # onto the task so _review_and_commit can gate the review loop.
-                task.followup_review_recommended = bool(
-                    (result.result_json or {}).get("followup_review_recommended", False)
-                )
+                # A present key is authoritative (folded from the frontmatter, or
+                # the legacy skill's own result.json); an absent one is a resumed
+                # pre-reconcile snapshot whose re-fold may have been dropped by a
+                # spec read fault — re-derive from the spec instead of defaulting
+                # a recommended review away.
+                rj = result.result_json or {}
+                if "followup_review_recommended" in rj:
+                    task.followup_review_recommended = bool(rj["followup_review_recommended"])
+                else:
+                    task.followup_review_recommended = self._followup_from_spec(task, rj)
                 outcome = self._verify_dev_artifacts(task, result.result_json)
                 if outcome.ok and self._run_verify_commands_after_dev(task, result.result_json):
                     # deterministic gates run here too: a broken build must not
@@ -1804,10 +1811,12 @@ class Engine:
         These reads observe what the dev skill left behind so the orchestrator can
         sync the sprint board / ledger. They race the skill's own writes, so an
         OSError is a designed transient, not a broken orchestrator. Returning None
-        tells the caller to skip its bookkeeping pass entirely: skipping is always
-        safe because the deterministic verify gate re-reads the spec immediately
-        after and supplies the retry ladder. Silent it is not — every skip lands a
-        ``spec-read-failed`` event in the journal.
+        tells the caller to skip its bookkeeping pass entirely: skipping is safe
+        because everything a skipped pass would have derived is re-supplied later —
+        the spec *status* by the deterministic verify gate's own re-read (which
+        turns a still-unrepaired spec into a retry), and the review-routing flag by
+        ``_followup_from_spec`` at the point ``_dev_phase`` consumes it. Silent it
+        is not — every skip lands a ``spec-read-failed`` event in the journal.
 
         Repair writes (``reset_spec_status``, ``mark_done``) deliberately do the
         opposite and let OSError raise: silently skipping a rewrite would leave the
@@ -1830,6 +1839,36 @@ class Engine:
             site=site,
             error=f"{e.__class__.__name__}: {e}",
         )
+
+    def _followup_from_spec(self, task: StoryTask, rj: dict) -> bool:
+        """Review-routing fallback for a result that carries no
+        ``followup_review_recommended`` key: re-derive it from the finalized spec
+        frontmatter — the source ``devcontract.synthesize_result`` and the
+        reconcile folds read it from, so a readable spec can never disagree.
+
+        The key is absent exactly when the result is a *resumed* pre-reconcile
+        snapshot (``synthesize_result`` only writes it on a ``done`` synth, and the
+        durable record is persisted before reconcile mutates the live dict). The
+        reconcile re-fold normally restores it on replay, but a spec read fault
+        skips that fold — and the verify gate only re-supplies *status*, not this
+        flag — so without this fallback a recommended follow-up review would be
+        silently skipped. Gates on the frontmatter's own status (mirroring the
+        fold): a faulted replay leaves ``rj["status"]`` at the stale snapshot
+        value, so the result status must not decide. Degrades to False on a read
+        fault (journaled) — the pre-existing absent-key default.
+        """
+        if not self._generic_dev():
+            return False
+        spec_file = rj.get("spec_file")
+        if not spec_file:
+            return False
+        spec_path = verify.resolve_spec_path(str(spec_file), self.workspace.paths)
+        if not spec_path.is_file():
+            return False
+        fm = self._observed_frontmatter(spec_path, task.story_key, "followup-routing")
+        if fm is None:
+            return False
+        return verify.status_of(fm) == "done" and bool(fm.get("followup_review_recommended", False))
 
     def _reconcile_generic_terminal_status(self, task: StoryTask, result_json: dict | None) -> None:
         """Repair a generic-skill spec the session finalized in prose but not in

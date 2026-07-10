@@ -53,7 +53,9 @@ breaking changes may land in a minor release.
   repair still raises: verify gates return a retryable outcome naming the read fault (never a phantom
   status mismatch), bookkeeping passes skip and journal `spec-read-failed`, and the read-back poll
   treats it as not-yet-terminal, falling through to the existing stall/timeout → post-kill-reconcile
-  ladder (#97).
+  ladder. Review routing re-derives `followup_review_recommended` from the finalized spec when a
+  replayed result lacks it, so a fault that skips the reconcile re-fold can no longer silently skip
+  a recommended follow-up review on resume (#97).
 
 - **A resumed sweep re-drives its in-flight bundles by identity, not by bundle name.** `SweepEngine`
   recovered a bundle only from inside `_run_bundle`, which a cycle reaches after re-deriving the key
