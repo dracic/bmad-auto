@@ -18,12 +18,12 @@ from __future__ import annotations
 import sys
 
 import pytest
-from conftest import dev_effect, review_effect, write_sprint
+from conftest import committing_crash_state, dev_effect, review_effect, write_sprint
 
 from bmad_loop.adapters.mock import MockAdapter
 from bmad_loop.engine import Engine
-from bmad_loop.journal import Journal
-from bmad_loop.model import RunState, TokenUsage
+from bmad_loop.journal import Journal, load_state
+from bmad_loop.model import Phase, RunState, TokenUsage
 from bmad_loop.plugins import (
     HookBus,
     HookContext,
@@ -331,6 +331,69 @@ def test_commit_message_mutation_reaches_git(project):
     summary = engine.run()
     assert summary.done == 1
     assert git(project.project, "log", "-1", "--format=%s") == "plugin-authored: 1-1-a"
+
+
+def _resume_committing(project, engine, registry):
+    """Resume a run whose task was persisted at COMMITTING (#115 crash state)."""
+    state = load_state(engine.run_dir)
+    state.clear_pause()
+    adapter = MockAdapter([])
+    resumed = Engine(
+        paths=project,
+        policy=engine.policy,
+        adapter=adapter,
+        run_dir=engine.run_dir,
+        journal=engine.journal,
+        state=state,
+        registry=registry,
+    )
+    return resumed, adapter
+
+
+def test_pre_commit_hook_fires_on_commit_resume(project):
+    """#115: the commit re-drive skips the pre_commit_gate workflows but must
+    still emit the pre_commit hook — the message is regenerated on resume, so
+    a plugin's rewrite has to reach the squashed commit."""
+
+    class P(Plugin):
+        def on_pre_commit(self, c):  # noqa: ANN001
+            c.proposed_commit_message = f"plugin-authored: {c.story_key}"
+
+    reg = registry_of(py_plugin(P, "msgmut"))
+    engine, _ = make_engine(project, [], reg)
+    committing_crash_state(project, engine)
+
+    resumed, adapter = _resume_committing(project, engine, reg)
+    summary = resumed.run()
+
+    assert summary.done == 1
+    assert adapter.sessions == []
+    from conftest import git
+
+    assert git(project.project, "log", "-1", "--format=%s") == "plugin-authored: 1-1-a"
+
+
+def test_pre_commit_pause_veto_on_commit_resume_escalates(project):
+    """A pause veto during the commit re-drive escalates (COMMITTING→ESCALATED
+    is the legal move) with the attempt's commits left intact above baseline."""
+
+    class P(Plugin):
+        def on_pre_commit(self, c):  # noqa: ANN001
+            c.veto("pause", "halt")
+
+    reg = registry_of(py_plugin(P, "vpcommit"))
+    engine, _ = make_engine(project, [], reg)
+    baseline = committing_crash_state(project, engine)
+
+    resumed, _ = _resume_committing(project, engine, reg)
+    summary = resumed.run()
+
+    assert summary.paused and summary.escalated == 1
+    final = load_state(resumed.run_dir).tasks["1-1-a"]
+    assert final.phase == Phase.ESCALATED
+    from bmad_loop.verify import rev_parse_head
+
+    assert rev_parse_head(project.project) != baseline  # attempt commits intact
 
 
 def test_veto_defer_routes_to_defer(project):

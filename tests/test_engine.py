@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from conftest import (
     _file_exists_cmd,
+    committing_crash_state,
     dev_effect,
     fault_read_text,
     generic_dev_effect,
@@ -583,6 +584,93 @@ def test_resume_review_verify_replays_recorded_review(project):
     kinds = [e["kind"] for e in entries]
     assert "resume-restart" not in kinds
     assert "rollback-manual-required" not in kinds
+
+
+def test_resume_committing_finishes_commit_to_done(project):
+    """#115: the host died after _commit persisted COMMITTING but before the
+    DONE save stamped commit_sha. That phase matched no resume arm and fell
+    through to resume-restart, rolling back (or pausing over) fully-verified
+    work. Resume must finish the commit in place — without re-charging the
+    pre_commit_gate workflows (the persisted phase is durable proof they
+    passed) and without any fresh session."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        # the issue's environment: the production default, where the old
+        # resume-restart arm paused with the manual-recovery notice
+        scm=ScmPolicy(rollback_on_failure=False),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    baseline = committing_crash_state(project, engine)
+
+    resumed, adapter = resume_engine(project, engine, [])
+    summary = resumed.run()
+
+    assert summary.done == 1 and not summary.paused and not summary.crashed
+    final = load_state(resumed.run_dir).tasks["1-1-a"]
+    assert final.phase == Phase.DONE
+    assert final.attempt == 1 and final.review_cycle == 0  # no budget burned
+    assert final.commit_sha == rev_parse_head(project.project) != baseline
+    assert adapter.sessions == []  # no session re-run — gates included
+    assert len(final.sessions) == 1  # only the pre-crash dev record
+    # the whole attempt squashed into exactly one story commit above baseline
+    log = git(project.project, "log", "--format=%s", f"{baseline}..HEAD")
+    assert len(log.splitlines()) == 1
+    assert "change for 1-1-a" in (project.project / "src.txt").read_text()
+    assert worktree_clean(project.project)  # sprint board swept into the squash
+    kinds = [e["kind"] for e in resumed.journal.entries()]
+    assert "resume-commit" in kinds and "story-done" in kinds
+    assert "resume-restart" not in kinds
+    assert "rollback-manual-required" not in kinds
+
+
+def test_resume_committing_post_squash_still_one_commit(project):
+    """The other #115 crash state: finalize_commit completed just before the
+    death (squashed commit at HEAD, clean tree) but the DONE save never landed.
+    The re-drive must converge on exactly ONE commit above baseline — not stack
+    a second squash — and stamp commit_sha at HEAD."""
+    engine, _ = make_engine(project, [])
+    baseline = committing_crash_state(project, engine, post_squash=True)
+
+    resumed, adapter = resume_engine(project, engine, [])
+    summary = resumed.run()
+
+    assert summary.done == 1 and not summary.crashed
+    final = load_state(resumed.run_dir).tasks["1-1-a"]
+    assert final.phase == Phase.DONE
+    assert final.commit_sha == rev_parse_head(project.project)
+    assert adapter.sessions == []
+    log = git(project.project, "log", "--format=%s", f"{baseline}..HEAD")
+    assert len(log.splitlines()) == 1  # re-squash, not a stacked second commit
+    assert worktree_clean(project.project)
+    kinds = [e["kind"] for e in resumed.journal.entries()]
+    assert "resume-commit" in kinds
+    assert "resume-restart" not in kinds
+
+
+def test_resume_committing_git_error_escalates(project):
+    """A commit failure during the re-drive escalates (COMMITTING→ESCALATED is
+    the legal failure move) with the attempt chain intact at HEAD — never a
+    silent rollback through resume-restart."""
+    engine, _ = make_engine(project, [])
+    committing_crash_state(project, engine)
+    head_before = rev_parse_head(project.project)
+    # a rejecting pre-commit hook makes finalize_commit's commit step fail
+    hook = project.project / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+
+    resumed, _ = resume_engine(project, engine, [])
+    summary = resumed.run()
+
+    assert summary.paused and summary.escalated == 1
+    final = load_state(resumed.run_dir).tasks["1-1-a"]
+    assert final.phase == Phase.ESCALATED
+    # finalize's HEAD-restore preserved the attempt chain on the branch
+    assert rev_parse_head(project.project) == head_before
+    kinds = [e["kind"] for e in resumed.journal.entries()]
+    assert "resume-commit" in kinds
+    assert "resume-restart" not in kinds
 
 
 def test_reconcile_early_return_heals_stale_resumed_dict(project):

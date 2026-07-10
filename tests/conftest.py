@@ -16,7 +16,7 @@ from bmad_loop.adapters.base import SessionResult, SessionSpec
 from bmad_loop.bmadconfig import ProjectPaths
 from bmad_loop.journal import save_state
 from bmad_loop.model import PAUSE_ESCALATION, Phase, RunState, SessionRecord, StoryTask
-from bmad_loop.verify import rev_parse_head
+from bmad_loop.verify import finalize_commit, rev_parse_head
 
 # The suite reads/writes UTF-8 files (specs, journals, JSON, reports). Windows'
 # default text encoding is cp1252, so a plain read_text()/open() throws
@@ -254,6 +254,53 @@ def write_spec(path: Path, status: str, baseline: str, *, prose_status: str | No
 
 def spec_path(paths: ProjectPaths, story_key: str) -> Path:
     return paths.implementation_artifacts / f"spec-{story_key}.md"
+
+
+def committing_crash_state(paths: ProjectPaths, engine, *, post_squash: bool = False) -> str:
+    """Persist the exact state.json shape from issue #115: a task at COMMITTING
+    (the save right after advance(COMMITTING), before finalize_commit / the DONE
+    save that stamps commit_sha). Fully verified on disk: attempt work committed
+    above baseline (only the work file — sweeping the still-untracked sprint
+    board into the commit would make a later baseline reset delete it), spec at
+    done, sprint synced at DEV time. review_cycle stays 0 — the
+    _skip_review_and_commit path reaches COMMITTING with zero review sessions.
+    With post_squash, finalize_commit already ran before the death (squashed
+    commit at HEAD, clean tree) but commit_sha was never persisted. Returns the
+    baseline sha."""
+    baseline = rev_parse_head(paths.project)
+    src = paths.project / "src.txt"
+    src.write_text(src.read_text() + "change for 1-1-a\n")
+    git(paths.project, "add", "src.txt")
+    git(paths.project, "commit", "-q", "-m", "attempt work for 1-1-a")
+    sp = spec_path(paths, "1-1-a")
+    write_spec(sp, "done", baseline)
+    write_sprint(paths, {"1-1-a": "done"})
+    if post_squash:
+        finalize_commit(paths.project, baseline, "pre-crash squash")
+
+    task = StoryTask(story_key="1-1-a", epic=1, phase=Phase.COMMITTING, attempt=1)
+    task.review_cycle = 0
+    task.baseline_commit = baseline
+    task.baseline_untracked = []
+    task.spec_file = str(sp)
+    task.record_session(
+        SessionRecord(
+            task_id="1-1-a-dev-1",
+            role="dev",
+            status="completed",
+            result_json={
+                "workflow": "auto-dev",
+                "story_key": "1-1-a",
+                "spec_file": str(sp),
+                "baseline_commit": baseline,
+                "escalations": [],
+                "followup_review_recommended": False,
+            },
+        )
+    )
+    engine.state.tasks[task.story_key] = task
+    engine._save()
+    return baseline
 
 
 def dev_effect(

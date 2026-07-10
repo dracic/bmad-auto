@@ -1034,6 +1034,29 @@ def test_finalize_commit_only_uncommitted_bookkeeping(project):
     assert log.splitlines() == ["story: via bmad-loop"]
 
 
+def test_finalize_commit_rerun_is_content_idempotent(project):
+    """The #115 resume re-drive may run finalize_commit on a post-squash tree
+    (the first finalize completed just before a host death). The re-run must
+    converge on exactly ONE commit above baseline with an identical tree —
+    never stack a second squash or raise. (No sha1 != sha2 assertion: same
+    tree/parent/message within one second re-mints the same sha.)"""
+    baseline = verify.rev_parse_head(project.project)
+    (project.project / "src.txt").write_text("dev work\n")
+    git(project.project, "add", "-A")
+    git(project.project, "commit", "-q", "-m", "skill: implement")
+
+    sha1 = verify.finalize_commit(project.project, baseline, "story 1-1-a: via bmad-loop")
+    sha2 = verify.finalize_commit(project.project, baseline, "story 1-1-a: via bmad-loop")
+
+    assert sha1 is not None and sha2 is not None
+    tree1 = git(project.project, "rev-parse", f"{sha1}^{{tree}}")
+    tree2 = git(project.project, "rev-parse", f"{sha2}^{{tree}}")
+    assert tree1 == tree2
+    assert verify.worktree_clean(project.project)
+    log = git(project.project, "log", "--format=%s", f"{baseline}..HEAD")
+    assert log.splitlines() == ["story 1-1-a: via bmad-loop"]
+
+
 def test_commit_paths_commits_only_listed(project):
     base = verify.rev_parse_head(project.project)
     (project.project / "src.txt").write_text("ledger-ish edit\n")  # the "tracked" target

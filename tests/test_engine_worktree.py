@@ -24,7 +24,7 @@ from bmad_loop.adapters.base import SessionResult
 from bmad_loop.adapters.mock import MockAdapter
 from bmad_loop.engine import Engine
 from bmad_loop.journal import Journal, load_state
-from bmad_loop.model import Phase, RunState, StoryTask, TokenUsage
+from bmad_loop.model import Phase, RunState, SessionRecord, StoryTask, TokenUsage
 from bmad_loop.policy import GatesPolicy, NotifyPolicy, Policy, ScmPolicy
 from bmad_loop.verify import (
     branch_exists,
@@ -474,6 +474,74 @@ def test_worktree_crash_restart_discards_stale_worktree(project):
     assert summary.done == 1
     assert "change for 1-1-a" in (project.project / "src.txt").read_text()
     assert [p.resolve() for p in worktree_list(project.project)] == [project.project.resolve()]
+
+
+def test_worktree_resume_committing_finishes_and_merges(project):
+    """#115, isolated flavor: a unit persisted at COMMITTING (gate+advance save
+    landed, DONE save did not) is finished inside its still-mounted worktree
+    and merged back — not discarded as a stale worktree by resume-restart."""
+    commit_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(project, [])
+    from bmad_loop.workspace import open_unit_workspace
+
+    unit = open_unit_workspace(
+        project.project, project, "test-run", "1-1-a", "main", "story", engine.run_dir
+    )
+    # the attempt committed its work inside the unit (only the work file —
+    # the sprint board is the orchestrator's dev-time write, still uncommitted)
+    src = unit.path / "src.txt"
+    src.write_text(src.read_text() + "change for 1-1-a\n")
+    git(unit.path, "add", "src.txt")
+    git(unit.path, "commit", "-q", "-m", "attempt work for 1-1-a")
+    wt = project.rebased(unit.path)
+    sp = wt.implementation_artifacts / "spec-1-1-a.md"
+    write_spec(sp, "done", unit.baseline)
+    set_sprint(wt, "1-1-a", "done")
+
+    task = StoryTask("1-1-a", 1, phase=Phase.COMMITTING, attempt=1)
+    task.worktree_path = str(unit.path)
+    task.branch = unit.branch
+    task.baseline_commit = unit.baseline
+    task.spec_file = str(sp)
+    task.record_session(
+        SessionRecord(
+            task_id="1-1-a-dev-1",
+            role="dev",
+            status="completed",
+            result_json={
+                "workflow": "auto-dev",
+                "story_key": "1-1-a",
+                "spec_file": str(sp),
+                "baseline_commit": unit.baseline,
+                "escalations": [],
+                "followup_review_recommended": False,
+            },
+        )
+    )
+    engine.state.tasks["1-1-a"] = task
+    engine._save()
+
+    state = load_state(engine.run_dir)
+    state.clear_pause()
+    adapter = MockAdapter([])
+    resumed = Engine(
+        paths=project,
+        policy=wt_policy(),
+        adapter=adapter,
+        run_dir=engine.run_dir,
+        journal=engine.journal,
+        state=state,
+    )
+    summary = resumed.run()
+
+    assert summary.done == 1 and not summary.crashed
+    assert adapter.sessions == []  # commit finished from persisted state alone
+    assert "change for 1-1-a" in (project.project / "src.txt").read_text()
+    assert [p.resolve() for p in worktree_list(project.project)] == [project.project.resolve()]
+    assert worktree_clean(project.project)
+    kinds = journal_kinds(resumed)
+    assert "resume-commit" in kinds and "unit-merged" in kinds
+    assert "resume-restart" not in kinds
 
 
 # ----------------------------------------------------------------- regression guard
