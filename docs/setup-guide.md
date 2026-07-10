@@ -58,7 +58,7 @@ claude "/bmad-loop-setup accept all defaults"
    `uv tool upgrade bmad-loop --reinstall`.
 3. Asks **which coding CLI(s)** the orchestrator should drive, then runs `bmad-loop init`
    to install the `bmad-loop-*` skills + register hooks + write the `.bmad-loop/policy.toml`
-   template + add gitignore entries (see [Choosing which CLIs to drive](#choosing-which-clis-to-drive)
+   template + add gitignore entries (including policy.toml itself — policy is per-machine; repos initialized before this run `git rm --cached .bmad-loop/policy.toml` once if theirs is already committed) (see [Choosing which CLIs to drive](#choosing-which-clis-to-drive)
    and [Initializing CLIs other than claude](#initializing-clis-other-than-claude)). On an
    upgrade it passes `--force-skills` so the per-project skill copies are refreshed.
 4. Runs `bmad-loop validate` as a preflight (see [Verify](#verify)).
