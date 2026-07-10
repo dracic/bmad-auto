@@ -563,6 +563,12 @@ async def test_journal_jump_near_tail_does_not_chase_growing_log(project):
         # scroll end" with scroll_y == max == 0, which would sample anchored=0 before
         # the deferred _scroll_log_to timer runs, then fail when the jump lands late).
         await until(pilot, lambda: log.max_scroll_y > 0 and log.is_vertical_scroll_end)
+        # The flush's own scroll_end can satisfy the wait while one deferred
+        # _scroll_log_to retry is still armed; post-flush that fire clamps to the
+        # tail and ends the chain, but landing after the growth-render below would
+        # re-scroll against the grown content. Drain it before sampling the anchor.
+        await pilot.pause(0.12)
+        assert log.is_vertical_scroll_end  # chain drained at the tail, not mid-log
         anchored, base_max = log.scroll_y, log.max_scroll_y
         # the live session keeps writing; a poll repaints the pane
         with (run_dir / "logs" / "story-1.log").open("ab") as f:
