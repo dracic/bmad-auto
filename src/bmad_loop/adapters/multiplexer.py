@@ -11,8 +11,15 @@ can slot in without the rest of the codebase shelling out to ``tmux`` directly.
 names mirror today's call sites verbatim so the migration is mechanical. Backends
 register themselves through :func:`register_multiplexer` (bundled ones from
 :func:`_load_builtin_backends`, out-of-tree ones at import time); the process-wide
-backend is selected by registry — by platform, or forced by name through the
-``BMAD_LOOP_MUX_BACKEND`` env var — and returned by :func:`get_multiplexer`.
+backend is selected by registry and returned by :func:`get_multiplexer`.
+
+Selection precedence (issue #87): the ``BMAD_LOOP_MUX_BACKEND`` env var, then the
+policy ``[mux] backend`` choice (installed once per CLI invocation via
+:func:`configure_multiplexer`), then the platform default when registered and
+available, then the first registered backend that matches the platform and is
+available, then the historical fallback (first platform match regardless of
+availability, bottoming out at tmux). :func:`detect_multiplexers` enumerates the
+registry for ``bmad-loop mux`` and the ``validate`` preflight.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ import os
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -204,6 +212,16 @@ class TerminalMultiplexer(ABC):
 # (name, matches(platform) -> bool, factory() -> TerminalMultiplexer)
 _BACKENDS: list[tuple[str, Callable[[str], bool], Callable[[], TerminalMultiplexer]]] = []
 _BUILTINS_LOADED = False
+# The policy [mux] backend choice — (name, origin policy path) — installed once
+# per CLI invocation by cli._configure_mux via configure_multiplexer. None = auto.
+_CONFIGURED: tuple[str, Path | None] | None = None
+
+# Per-platform default backend name, consulted only when that backend is both
+# registered AND available on this host. Naming a backend that never registers
+# is deliberate and harmless: psmux is an out-of-tree backend today, so on a
+# win32 host without it the default simply doesn't apply.
+_PLATFORM_DEFAULTS: dict[str, str] = {"win32": "psmux"}
+_DEFAULT_BACKEND = "tmux"  # every platform not listed above
 
 
 def register_multiplexer(
@@ -236,26 +254,168 @@ def _load_builtin_backends() -> None:
     _BUILTINS_LOADED = True  # set only after a successful import so a transient failure retries
 
 
+def configure_multiplexer(name: str | None, *, origin: Path | None = None) -> None:
+    """Install the policy ``[mux] backend`` choice (``None``/``""`` = auto).
+
+    Called once per CLI invocation (``cli.main``, after parsing ``--project``)
+    before any :func:`get_multiplexer` consumer runs, so probe/diagnose/attach —
+    which never load policy themselves — select under the persisted choice too.
+    Idempotent: the selection cache is cleared only when the effective value
+    changes, so the process-wide singleton identity survives repeated
+    same-value configuration."""
+    global _CONFIGURED
+    new = (name, origin) if name else None
+    if new == _CONFIGURED:
+        return
+    _CONFIGURED = new
+    get_multiplexer.cache_clear()
+
+
+def _known() -> str:
+    return ", ".join(name for name, _, _ in _BACKENDS) or "(none registered)"
+
+
+def _factory_by_name(name: str) -> Callable[[], TerminalMultiplexer] | None:
+    for reg_name, _, factory in _BACKENDS:
+        if reg_name == name:  # duplicate registrations: first wins, as in the loop below
+            return factory
+    return None
+
+
+def _usable(backend: TerminalMultiplexer) -> bool:
+    """``available()`` read through a guard: selection must never crash on a
+    backend's host probe, so a missing or raising probe reads as unavailable."""
+    try:
+        return bool(backend.available())
+    except Exception:
+        return False
+
+
+def _select() -> tuple[TerminalMultiplexer, str, str]:
+    """Resolve the backend by precedence; returns ``(instance, name, reason)``.
+
+    1. ``env`` — ``BMAD_LOOP_MUX_BACKEND`` forces a backend by name
+    2. ``policy`` — the ``[mux] backend`` choice installed by
+       :func:`configure_multiplexer`, same forced-by-name semantics
+    3. ``platform-default`` — this platform's default, iff registered + available
+    4. ``first-match`` — first registered backend matching the platform that is
+       available (registration order breaks ties among available backends)
+    5. ``fallback`` — the historical behavior, preserved so a POSIX host without
+       tmux still returns TmuxMultiplexer and ``validate`` reports it
+       unavailable: first platform match regardless of availability, then tmux
+
+    A forced name (1-2) bypasses both the platform predicate and ``available()``
+    — an explicit choice is trusted, and the backend itself fails loudly if it
+    can't run. A forced name matching nothing is a misconfiguration; never
+    silently fall back to tmux (wrong/unsafe on a non-POSIX host)."""
+    _load_builtin_backends()
+    forced = os.environ.get("BMAD_LOOP_MUX_BACKEND")
+    if forced:
+        factory = _factory_by_name(forced)
+        if factory is None:
+            raise MultiplexerError(
+                f"BMAD_LOOP_MUX_BACKEND={forced!r} matches no registered backend; "
+                f"known: {_known()}"
+            )
+        return factory(), forced, "env"
+    if _CONFIGURED is not None:
+        name, origin = _CONFIGURED
+        factory = _factory_by_name(name)
+        if factory is None:
+            where = f"[mux] backend = {name!r}" + (f" in {origin}" if origin else "")
+            raise MultiplexerError(f"{where} matches no registered backend; known: {_known()}")
+        return factory(), name, "policy"
+
+    # Construct each candidate at most once across the remaining steps.
+    instances: dict[str, TerminalMultiplexer] = {}
+
+    def _instance(name: str, factory: Callable[[], TerminalMultiplexer]) -> TerminalMultiplexer:
+        if name not in instances:
+            instances[name] = factory()
+        return instances[name]
+
+    default = _PLATFORM_DEFAULTS.get(sys.platform, _DEFAULT_BACKEND)
+    default_factory = _factory_by_name(default)
+    if default_factory is not None:
+        backend = _instance(default, default_factory)
+        if _usable(backend):
+            return backend, default, "platform-default"
+    for name, matches, factory in _BACKENDS:
+        if matches(sys.platform) and _usable(_instance(name, factory)):
+            return instances[name], name, "first-match"
+    for name, matches, factory in _BACKENDS:
+        if matches(sys.platform):
+            return _instance(name, factory), name, "fallback"
+    from .tmux_backend import TmuxMultiplexer  # bottom fallback, as before
+
+    return TmuxMultiplexer(), "tmux", "fallback"
+
+
 @functools.lru_cache(maxsize=1)
 def get_multiplexer() -> TerminalMultiplexer:
     """Return the process-wide terminal multiplexer, selected by registry.
 
-    ``BMAD_LOOP_MUX_BACKEND`` forces a backend by name (test / override hook);
-    otherwise the first backend whose ``matches(sys.platform)`` is true wins. tmux
-    is the default fallback, so POSIX behavior is unchanged. Cached — tests that
-    flip the env var must call ``get_multiplexer.cache_clear()``."""
-    forced = os.environ.get("BMAD_LOOP_MUX_BACKEND")
-    _load_builtin_backends()
-    for name, matches, factory in _BACKENDS:
-        if name == forced or (not forced and matches(sys.platform)):
-            return factory()
-    if forced:
-        # An explicit override that matches nothing is a misconfiguration; never
-        # silently fall back to tmux (wrong/unsafe on a non-POSIX host).
-        known = ", ".join(name for name, _, _ in _BACKENDS) or "(none registered)"
-        raise MultiplexerError(
-            f"BMAD_LOOP_MUX_BACKEND={forced!r} matches no registered backend; known: {known}"
-        )
-    from .tmux_backend import TmuxMultiplexer  # default fallback
+    Selection precedence lives in :func:`_select` (env var, policy choice,
+    platform default, first available match, historical fallback). Cached —
+    tests that flip the env var must call ``get_multiplexer.cache_clear()``;
+    :func:`register_multiplexer` and :func:`configure_multiplexer` clear it
+    themselves."""
+    return _select()[0]
 
-    return TmuxMultiplexer()
+
+@dataclass(frozen=True)
+class MuxBackendInfo:
+    """One registered backend's detection row, for ``bmad-loop mux`` and the
+    ``validate`` preflight."""
+
+    name: str
+    matches_platform: bool
+    available: bool
+    version: str | None
+    selected: bool
+    reason: str  # "" unless selected: env | policy | platform-default | first-match | fallback
+
+
+def detect_multiplexers() -> list[MuxBackendInfo]:
+    """Probe every registered backend: availability, version, platform match,
+    and which one :func:`_select` would pick (with its reason).
+
+    Never raises — this feeds diagnostics, which must work on a misconfigured
+    host: a forced unknown name yields rows with no selected mark, and a
+    backend whose factory or probes blow up reads as unavailable. Constructs
+    every registered backend, so factories must stay cheap, side-effect-free
+    constructors (true of the tmux family)."""
+    _load_builtin_backends()
+    try:
+        _, selected_name, reason = _select()
+    except MultiplexerError:
+        selected_name, reason = None, ""
+    rows: list[MuxBackendInfo] = []
+    seen: set[str] = set()
+    for name, matches, factory in _BACKENDS:
+        if name in seen:  # duplicate registrations: only the selectable (first) one is shown
+            continue
+        seen.add(name)
+        try:
+            matches_platform = bool(matches(sys.platform))
+        except Exception:
+            matches_platform = False
+        version: str | None = None
+        try:
+            backend = factory()
+            available = _usable(backend)
+            version = backend.version()
+        except Exception:
+            available = False
+        selected = name == selected_name
+        rows.append(
+            MuxBackendInfo(
+                name=name,
+                matches_platform=matches_platform,
+                available=available,
+                version=version,
+                selected=selected,
+                reason=reason if selected else "",
+            )
+        )
+    return rows
