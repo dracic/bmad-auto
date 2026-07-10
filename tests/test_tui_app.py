@@ -8,6 +8,7 @@ bindings drive modals into tui.launch calls (monkeypatched — no real tmux)."""
 from __future__ import annotations
 
 import os
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -2130,3 +2131,55 @@ async def test_split_runs_label_tracks_sprint_vs_stories(project):
         screen._apply_board(_Snapshot(generation=screen._generation, stories_mode=True, stories=[]))
         await pilot.pause()
         assert bar.label == "Stories"
+
+
+async def test_dashboard_survives_policy_read_oserror(project, monkeypatch):
+    """A transient read failure (permissions, race after the is_file check) while
+    loading policy at construction degrades to default geometry instead of
+    crashing the TUI at startup."""
+
+    def boom(path):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(policy_mod, "load", boom)
+    app = BmadLoopApp(project.project)
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _seeded(pilot, app)
+        assert screen._tui_policy == policy_mod.TuiPolicy()
+        assert screen.query_one("#left").size.width == 34  # CSS default, unseeded
+        assert not screen._left_frozen and not screen._detail_frozen
+
+
+async def test_first_geometry_save_writes_only_tui_keys(project):
+    """A geometry save on a project without policy.toml must create a minimal
+    [tui]-only file — not materialise POLICY_TEMPLATE, which would freeze every
+    default setting (gates, limits, ...) into the fresh file."""
+    root = project.project
+    policy_path = root / ".bmad-loop" / "policy.toml"
+    assert not policy_path.is_file()
+    app = BmadLoopApp(root)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _seeded(pilot, app)
+        await pilot.press("ctrl+w")
+        for _ in range(3):
+            await pilot.press("right")  # widen the sidebar only
+        await pilot.press("escape")  # exits resize mode -> persists
+        await pilot.pause()
+    doc = tomllib.loads(policy_path.read_text(encoding="utf-8"))
+    assert set(doc) == {"tui"}
+    assert doc["tui"] == {"left_width": 37}  # 34 + 3; untouched dims stay unset
+
+
+async def test_quit_in_resize_mode_persists_geometry(project):
+    """Quitting the app mid-resize-mode still persists the new geometry:
+    keyboard bumps only save on mode exit, and quit stays live in the mode."""
+    root = project.project
+    app = BmadLoopApp(root)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _seeded(pilot, app)
+        await pilot.press("ctrl+w")
+        for _ in range(4):
+            await pilot.press("right")
+        # Leave without Escape: shutdown unmounts the screen, which persists.
+    saved = policy_mod.load(root / ".bmad-loop" / "policy.toml").tui
+    assert saved.left_width == 38  # 34 + 4

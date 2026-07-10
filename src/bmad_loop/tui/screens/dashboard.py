@@ -174,11 +174,11 @@ class DashboardScreen(Screen[None]):
     def __init__(self, project: Path):
         super().__init__()
         self.project = project
-        # Persisted pane sizes to seed on first layout; a malformed policy file
-        # degrades to defaults rather than blocking the dashboard.
+        # Persisted pane sizes to seed on first layout; a malformed or unreadable
+        # policy file degrades to defaults rather than blocking the dashboard.
         try:
             self._tui_policy = policy_mod.load(project / policy_mod.POLICY_FILE).tui
-        except policy_mod.PolicyError:
+        except (policy_mod.PolicyError, OSError):
             self._tui_policy = policy_mod.TuiPolicy()
         self._seeded = False
         self._left_frozen = False  # Runs/Deferred switched to explicit heights
@@ -592,7 +592,9 @@ class DashboardScreen(Screen[None]):
         if not dirty and not path.is_file():
             return  # nothing customised and no file to update — don't create one
         try:
-            doc = PolicyDoc.load(path)
+            # A missing file starts empty, NOT from POLICY_TEMPLATE: a geometry
+            # save must not freeze every default setting into a fresh policy.toml.
+            doc = PolicyDoc.load(path, template_when_missing=False)
             doc.set("tui", "left_width", self.left_width if self.left_width > 0 else None)
             doc.set("tui", "runs_height", self.runs_height if self._left_frozen else None)
             doc.set("tui", "deferred_height", self.deferred_height if self._left_frozen else None)
@@ -600,6 +602,12 @@ class DashboardScreen(Screen[None]):
             doc.save(path)
         except (OSError, tomlkit.exceptions.TOMLKitError) as e:
             self.notify(f"could not save layout: {e}", severity="warning")
+
+    def on_unmount(self) -> None:
+        # Quitting mid-resize-mode would otherwise drop the new geometry: keyboard
+        # bumps persist only on mode exit, and `q` stays live inside the mode.
+        if self._resize_mode:
+            self._persist_geometry()
 
     # ---- keyboard resize mode -----------------------------------------------
 
