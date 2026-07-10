@@ -186,7 +186,7 @@ class SettingsScreen(Screen[None]):
             if spec.kind == "select":
                 yield Select(
                     [(o, o) for o in spec.options],
-                    prompt=f"default: {spec.default}",
+                    prompt=f"default: {spec.default or 'auto'}",
                     value=str(raw) if raw in spec.options else Select.NULL,
                     id=spec.widget_id,
                 )

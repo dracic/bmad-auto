@@ -365,10 +365,11 @@ description = "cap to 15fps + disable animations — fixes repaint tearing/garba
 [[section]]
 name = "mux"
 description = "terminal-multiplexer backend (machine-specific — policy.toml is gitignored)"
+# options are injected at build-registry time from detect_multiplexers() (plus any
+# already-forced value), since registered backends are a runtime fact, not an enum.
 [[section.field]]
 key = "backend"
-kind = "str"
+kind = "select"
 default_ref = "MuxPolicy.backend"
-placeholder = "auto: env var > this key > platform default > first available match"
 label = "backend"
-description = "force a registered transport backend by name (see `bmad-loop mux`) — BMAD_LOOP_MUX_BACKEND outranks it · takes effect on the next bmad-loop invocation"
+description = "force a registered transport backend by name (see `bmad-loop mux`); leave blank to auto-select — BMAD_LOOP_MUX_BACKEND outranks it · takes effect on the next bmad-loop invocation"
