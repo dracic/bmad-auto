@@ -25,7 +25,10 @@ of the README.
   driving runs (pure TUI observation works without it). The multiplexer sits behind a
   pluggable seam (`TerminalMultiplexer`), so a native-Windows backend can be added later
   without changing the engine — contributors should start with
-  [Porting bmad-loop to a new OS](porting-to-a-new-os.md).
+  [Porting bmad-loop to a new OS](porting-to-a-new-os.md). `bmad-loop mux` lists the
+  registered backends and shows which is selected (and why); once more than one is
+  available, `bmad-loop mux set <name>` — or the `[mux] backend` policy key, or the
+  `BMAD_LOOP_MUX_BACKEND` env var — forces the choice per machine.
 - **OS** — Linux or macOS. **Windows is supported via WSL**, which _is_ Linux: tmux and
   every POSIX path work unchanged there, so no special setup is needed. **Native Windows
   is not yet shipped** — it awaits a non-tmux multiplexer backend (tracked in
@@ -189,12 +192,18 @@ them to whoever owns the machine:
   subscription). Requires the Copilot **CLI** GA (≥ 2026-02) — _not_ the VS Code extension.
   **Pin a capable model**: the free default (GPT-5 mini) silently skips steps in the
   multi-step dev/review skills; set `[adapter] model = "claude-sonnet-4-6"` (→ `--model`).
+- **antigravity** — run `agy` once in the project and authenticate + trust the workspace
+  (`settings.json` `trustedWorkspaces`). **Experimental — probe before unattended use**
+  (`bmad-loop probe-adapter antigravity --probe`): token usage isn't captured yet
+  (`usage_parser = "none"`), and worktree runs use a different path than the trusted one,
+  so verify during the probe whether that re-triggers a trust prompt. Requires Antigravity
+  CLI (`agy` ≥ 1.0.16).
 
 ### Skill location
 
-`claude` reads skills from `.claude/skills/`; `codex` and `gemini` read from `.agents/skills/`.
-`init` installs the bundled `bmad-loop-*` skills into the right tree for each CLI you pass via
-`--cli`, so selecting `codex`/`gemini` populates `.agents/skills/` automatically. It skips skill
+`claude` reads skills from `.claude/skills/`; `codex`, `gemini`, `copilot`, and `antigravity`
+read from `.agents/skills/`. `init` installs the bundled `bmad-loop-*` skills into the right tree
+for each CLI you pass via `--cli`, so selecting any of the `.agents/skills/` CLIs populates it automatically. It skips skill
 dirs that already exist — pass `--force-skills` to overwrite a stale copy, or `--no-skills` to
 manage them yourself.
 
@@ -279,8 +288,10 @@ entries to strip; leave every other hook in place.
 
 ### 5. Drop the gitignore lines
 
-`init` appended `.bmad-loop/runs/` and `.bmad-loop/cache/` to `.gitignore`. Remove those two
-lines (skip any your project relies on for other reasons).
+`init` appended `.bmad-loop/runs/`, `.bmad-loop/cache/`, and `.bmad-loop/policy.toml` to
+`.gitignore`. Remove those three lines (skip any your project relies on for other reasons). If
+you had run `git rm --cached .bmad-loop/policy.toml` to stop sharing the per-machine policy, the
+file is untracked — re-add it (`git add .bmad-loop/policy.toml`) only if you want it back in version control.
 
 ### 6. Unregister from `_bmad/` (BMAD-installer projects only)
 

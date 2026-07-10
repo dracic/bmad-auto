@@ -8,7 +8,7 @@ Plain Python drives the loop — **pick story → implement → adversarially re
 
 [![CI](https://github.com/bmad-code-org/bmad-loop/actions/workflows/ci.yml/badge.svg)](https://github.com/bmad-code-org/bmad-loop/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%E2%80%933.14-blue)
-![CLIs](https://img.shields.io/badge/agents-claude%20%C2%B7%20codex%20%C2%B7%20gemini-8a2be2)
+![CLIs](https://img.shields.io/badge/agents-claude%20%C2%B7%20codex%20%C2%B7%20gemini%20%C2%B7%20copilot%20%C2%B7%20antigravity-8a2be2)
 ![No LLM in the loop](https://img.shields.io/badge/control%20loop-deterministic-success)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
@@ -33,13 +33,13 @@ Inspired by the original [bmad-automator](https://github.com/bmad-code-org/bmad-
 - 🔍 **Trust nothing, verify everything.** After each session the orchestrator checks artifacts on disk: spec frontmatter status, baseline-commit match (recorded independently — a cheap LLM-lie detector), non-empty diff, sprint-status sync, and _your_ test/lint commands before any commit.
 - 📒 **One source of truth.** `sprint-status.yaml` is owned by the BMAD skills; the orchestrator only ever reads it.
 - 🪟 **Fresh context per step.** Dev and review are separate sessions — review never inherits the implementer's context, so there's no anchoring bias.
-- ♻️ **Resumable & multi-agent.** Every run is a resumable state machine on disk, and a generic tmux adapter drives `claude`, `codex`, or `gemini` (mix per stage).
+- ♻️ **Resumable & multi-agent.** Every run is a resumable state machine on disk, and a generic tmux adapter drives `claude`, `codex`, `gemini`, `copilot`, or `antigravity` (mix per stage).
 - 🌿 **Optional worktree isolation.** Opt in (`[scm] isolation = "worktree"`) and each story runs in its own git worktree/branch and merges back locally — your main checkout stays free while a run is in flight.
 
 ## Requirements
 
-- **Python 3.11+**, **tmux**, and a supported coding CLI — `claude` by default; `codex` and `gemini` via [profiles](#other-coding-clis).
-- **Linux or macOS** (or **Windows via WSL**, which _is_ Linux — it runs as-is). tmux is the one bundled terminal-multiplexer backend today, but it sits behind a pluggable **registry** of OS seams (transport, process lifecycle, hook interpreter) with availability-aware selection — env var → persisted `[mux] backend` choice (`bmad-loop mux set <name>`) → platform default → first available platform match — so a native-Windows backend slots in as new files + a registration line each, with no engine edits — see [Porting bmad-loop to a new OS](docs/porting-to-a-new-os.md). Native Windows is not yet shipped.
+- **Python 3.11+**, **tmux**, and a supported coding CLI — `claude` by default; `codex`, `gemini`, `copilot`, and `antigravity` (`agy`) via [profiles](#other-coding-clis).
+- **Linux or macOS** (or **Windows via WSL**, which _is_ Linux — it runs as-is). tmux is the one bundled terminal-multiplexer backend today, but it sits behind a pluggable **registry** of OS seams (transport, process lifecycle, hook interpreter) with availability-aware selection — env var → persisted `[mux] backend` choice (`bmad-loop mux set <name>`) → platform default (`psmux` on Windows, `tmux` elsewhere) → first available platform match — so a native-Windows backend slots in as new files + a registration line each, with no engine edits — see [Porting bmad-loop to a new OS](docs/porting-to-a-new-os.md). Native Windows is not yet shipped.
 - A **BMAD v6 project** (`_bmad/bmm/config.yaml`, a `sprint-status.yaml` from `bmad-sprint-planning`) with the upstream `bmad-dev-auto` skill (and the three review-hunter skills its step-04 invokes inline: `bmad-review-adversarial-general`, `bmad-review-edge-case-hunter`, `bmad-review-verification-gap`) and the bmad-loop skill module from this repo installed (`bmad-loop-resolve`, `bmad-loop-sweep` — see [Installing the skill module](#installing-the-skill-module)). Standard BMAD skills stay untouched.
 
 ## Quick start
@@ -67,7 +67,7 @@ bmad-loop tui                    # …or drive everything from the dashboard
 | `bmad-loop run`                                          | Drive the dev → review → verify → commit loop. `--epic N`, `--story KEY`, `--max-stories N`, `--dry-run`. `--spec <folder>` forces **stories mode** (folder+id dispatch off `<folder>/stories.yaml`), overriding `[stories].source`; `--story` then filters by story id.                                                                                                                                                                                                            |
 | `bmad-loop sweep`                                        | Triage + execute open `deferred-work.md` entries. `--no-prompt`, `--decisions-only`, `--max-bundles N`, `--repeat`, `--max-cycles N`, `--dry-run`.                                                                                                                                                                                                                                                                                                                                  |
 | `bmad-loop resume <run-id>`                              | Continue a run paused at a gate, escalation, or interruption.                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `bmad-loop resolve <run-id>`                             | Resolve a CRITICAL escalation: open an interactive resolve agent to fix the frozen spec, then re-arm the story and resume. `--story KEY`, `--no-interactive`, `--resume` / `--no-resume`.                                                                                                                                                                                                                                                                                           |
+| `bmad-loop resolve <run-id>`                             | Resolve a CRITICAL escalation: open an interactive resolve agent to fix the frozen spec, then re-arm the story and resume. On an _intent gap_ the re-drive can resume review on the attempted change instead of re-implementing it. `--story KEY`, `--no-interactive`, `--restore-patch <path>` (intent-gap patch-restore), `--resume` / `--no-resume`.                                                                                                                             |
 | `bmad-loop decisions`                                    | Answer deferred-work decisions earlier sweeps left unanswered (skipped by `--no-prompt`, or an abandoned interactive sweep). Recorded so the next sweep acts on them without re-asking. `--list` shows them without answering.                                                                                                                                                                                                                                                      |
 | `bmad-loop list` (`ls`)                                  | List every run/sweep with its short ref, type, and status — the handle you pass to the commands below.                                                                                                                                                                                                                                                                                                                                                                              |
 | `bmad-loop status [<run-id>]`                            | Run + sprint summary with per-story token totals (plus a count of decisions awaiting an answer). A stories-mode run instead prints its stories board — id, live on-disk state, checkpoint markers, title.                                                                                                                                                                                                                                                                           |
@@ -208,6 +208,8 @@ sprint-status.yaml: 1-2-account-mgmt: ready-for-dev
 
 **Resolving a CRITICAL escalation:** the escalated story is parked in a terminal `escalated` phase — `resume` skips it. To un-stick it, run `bmad-loop resolve <run-id>` (or press `R` in the TUI). That opens an interactive **resolve agent** seeded with the escalation and the frozen spec; you converse with it to disambiguate the spec, it records the resolution, and on your confirmation the orchestrator re-arms the story (`escalated → pending`, spec status reset to `ready-for-dev`) and resumes — a clean rebuild against the corrected spec, then on through the rest of the sprint. Already fixed the spec yourself? `bmad-loop resolve <run-id> --no-interactive` skips straight to re-arm + resume.
 
+**Intent-gap patch-restore.** When review halted on an **intent gap** — the implementation was sound but read the spec differently than intended — `bmad-dev-auto` saves the attempted change as a patch before reverting ([BMAD-METHOD#2564](https://github.com/bmad-code-org/BMAD-METHOD/issues/2564)). If the attempted reading was in fact correct, `resolve` re-arms the spec to `in-review` and re-applies that patch onto baseline after every reset, so the re-driven session resumes **review** on the restored diff instead of re-implementing from scratch. The interactive agent supplies the patch automatically via `resolution.json`; on the hand-driven path pass `bmad-loop resolve <run-id> --no-interactive --restore-patch <path>`. A patch that fails to apply escalates rather than running on a half-restored tree, and deferred-work `sweep` bundles get the same recovery.
+
 ## Deferred-work sweeps
 
 Skills accumulate an append-only ledger (`deferred-work.md`, `DW-<n>` entries) of split-off goals, pre-existing review findings, and items deferred as "needs human decision". `bmad-loop sweep` processes it:
@@ -260,7 +262,7 @@ The orchestrator drives the upstream `bmad-dev-auto` skill as its inner dev prim
 uv tool install "bmad-loop[tui] @ git+https://github.com/bmad-code-org/bmad-loop.git"
 
 # OR a pinned release tag (reproducible — recommended for day-to-day use):
-uv tool install "bmad-loop[tui] @ git+https://github.com/bmad-code-org/bmad-loop.git@v0.5.1"
+uv tool install "bmad-loop[tui] @ git+https://github.com/bmad-code-org/bmad-loop.git@v0.8.1"
 
 bmad-loop init --project /path/to/project --cli claude   # add --cli codex/gemini as needed
 claude "/bmad-loop-setup accept all defaults"            # registers _bmad/ config + help
@@ -283,7 +285,7 @@ claude "/bmad-loop-setup upgrade"
 #    `uv tool upgrade` reuses the cached commit and won't pull new code.
 uv tool upgrade bmad-loop --reinstall                      # follows main or your pinned tag
 #    to move to a newer tag, re-run install with the new ref:
-#    uv tool install --force "bmad-loop[tui] @ git+https://github.com/bmad-code-org/bmad-loop.git@v0.5.1"
+#    uv tool install --force "bmad-loop[tui] @ git+https://github.com/bmad-code-org/bmad-loop.git@v0.8.1"
 
 # 2. re-lay the refreshed skills into EACH project that uses bmad-loop:
 bmad-loop init --project /path/to/project --force-skills
@@ -312,6 +314,11 @@ The bundled skills must be installed together with the upstream `bmad-dev-auto` 
 mode = "per-epic"          # none | per-epic | per-story-spec-approval
 retrospective = "notify"   # never | notify | auto
 
+[stories]                  # which planning pipeline drives the loop (see "Two planning pipelines")
+source = "sprint-status"   # sprint-status (default) | stories (typed stories.yaml, folder+id dispatch)
+spec_folder = ""           # required when source = "stories": the epic spec folder holding stories.yaml
+                           # (per-story spec_checkpoint / done_checkpoint pauses live in stories.yaml, not here)
+
 [limits]
 max_review_cycles = 3
 max_dev_attempts = 2
@@ -337,7 +344,7 @@ trigger = "recommended"    # when enabled: "recommended" runs the separate revie
                            # (the loop is bounded by limits.max_review_cycles either way)
 
 [adapter]
-name = "claude"            # CLI profile: claude | codex | gemini | custom
+name = "claude"            # CLI profile: claude | codex | gemini | copilot | antigravity | custom
 model = ""                 # empty = CLI default
 cleanup_session_on_finish = true  # kill the run's tmux session when it finishes (false keeps it for inspection)
 # extra_args replaces the profile's default bypass flags when set:
@@ -384,6 +391,10 @@ commit_message_template = ""   # {story_key} / {run_id} substituted; empty = bui
 max_parallel = 1           # units in flight at once (parallel fan-out unbuilt; values > 1 clamp to 1)
 seed_adapter_defaults = true   # copy each loaded adapter's gitignored MCP/CLI configs into the worktree
 worktree_seed = []         # extra project-relative gitignored files to seed, on top of adapter defaults
+
+[mux]                      # terminal-multiplexer backend — per-machine (policy.toml is gitignored)
+backend = ""               # "" = auto-select; else force a registered backend by name (see `bmad-loop mux`)
+                           # env var BMAD_LOOP_MUX_BACKEND outranks this
 
 [tui]
 low_frame_rate = false     # true = cap to 15fps + disable animations (= bmad-loop tui --low-frame-rate)
