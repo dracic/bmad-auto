@@ -15,9 +15,11 @@ bmad-loop tui              # or: bmad-loop tui --project /path/to/project
 ```
 
 `--project` defaults to the current directory. tmux — the orchestrator's only
-terminal-multiplexer backend today — must be on PATH for the launch/attach keys
+registered terminal-multiplexer backend today — must be on PATH for the launch/attach keys
 (`r` `s` `e` `a`); pure observation works without it. (WSL counts as Linux, so
-tmux works there unchanged; native Windows awaits a non-tmux backend.)
+tmux works there unchanged; native Windows awaits a non-tmux backend.) Once a second
+backend registers, `bmad-loop mux` shows which is selected and why, and the Settings
+editor's `mux.backend` (or the `BMAD_LOOP_MUX_BACKEND` env var) forces the choice per machine.
 
 Over a slow or high-latency link (SSH, Tailscale), a 60fps update stream can't
 drain in time and partial frames paint over old ones. Launch with
