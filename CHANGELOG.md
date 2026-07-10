@@ -46,6 +46,13 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **The TUI no longer crashes on a private-mode CSI sequence in an adapter log.** The gemini
+  CLI's startup burst includes XTMODKEYS `CSI > 4 ; ? m`; the marker byte sat _inside_ the
+  params, so the private-marker strip filter missed it and pyte 0.8.2 raised a `TypeError`
+  that killed the poll worker — and the whole dashboard. The filter now matches a marker
+  anywhere in the params, and any escape sequence pyte still can't parse is dropped instead
+  of propagating (upstream fix exists but was never released — selectel/pyte#202) (#111).
+
 - **An unreadable spec no longer crashes the whole run.** Every spec read-back — the four verify
   gates, the reconcile/sprint/ledger bookkeeping passes, and the generic adapter's Stop poll — raced
   the dev skill's own writes, so a transient `OSError` (a TOCTOU truncation, a lock, an EACCES)
