@@ -542,6 +542,32 @@ def provision_worktree(
     _worktree_local_exclude(worktree, sorted(patterns))
 
 
+def _warn_if_policy_tracked(project: Path) -> None:
+    """One-time migration hint: a .gitignore entry does not untrack an
+    already-committed policy.toml, so repos initialized before the file was
+    gitignored keep sharing it (and this machine's [mux] backend choice) until
+    the dev runs `git rm --cached` once. Best-effort — not a repo, or no git,
+    means nothing to warn about."""
+    try:
+        tracked = (
+            subprocess.run(  # noqa: S603, S607 — fixed argv, no shell
+                ["git", "ls-files", "--error-unmatch", ".bmad-loop/policy.toml"],
+                cwd=project,
+                capture_output=True,
+                timeout=10,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    if tracked:
+        print(
+            "  note: .bmad-loop/policy.toml is tracked by git; run "
+            "`git rm --cached .bmad-loop/policy.toml` once to stop sharing it "
+            "(your local copy is kept)"
+        )
+
+
 def install_into(
     project: Path,
     clis: Sequence[str] = ("claude",),
@@ -599,13 +625,19 @@ def install_into(
         policy_path.write_text(POLICY_TEMPLATE, encoding="utf-8")
         print(f"  policy written: {policy_path}")
 
-    # 5. gitignore generated dirs: per-run state (.bmad-loop/runs/) and the
-    # game-engine plugins' rebuildable caches, e.g. the per-worktree Unity Library
-    # (.bmad-loop/cache/). Both are large/ephemeral and must never be committed.
+    # 5. gitignore generated/machine-local state: per-run state (.bmad-loop/runs/),
+    # the game-engine plugins' rebuildable caches, e.g. the per-worktree Unity
+    # Library (.bmad-loop/cache/), and the policy file itself — policy.toml is
+    # per-machine-per-repo (it carries this machine's [mux] backend choice, and
+    # the TUI settings editor rewrites it), so it must never travel to teammates.
     gitignore = project / ".gitignore"
     existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
     have = set(existing.splitlines())
-    to_add = [line for line in (".bmad-loop/runs/", ".bmad-loop/cache/") if line not in have]
+    to_add = [
+        line
+        for line in (".bmad-loop/runs/", ".bmad-loop/cache/", ".bmad-loop/policy.toml")
+        if line not in have
+    ]
     if to_add:
         with gitignore.open("a", encoding="utf-8") as f:
             if existing and not existing.endswith("\n"):
@@ -613,6 +645,7 @@ def install_into(
             f.write("\n".join(to_add) + "\n")
         for line in to_add:
             print(f"  gitignored: {line}")
+    _warn_if_policy_tracked(project)
 
     if skills_skipped:
         print("  some skills already present; re-run with --force-skills to overwrite")

@@ -369,6 +369,7 @@ def test_install_into_full(tmp_path):
     gitignore = (tmp_path / ".gitignore").read_text()
     assert ".bmad-loop/runs/" in gitignore
     assert ".bmad-loop/cache/" in gitignore  # engine plugins' rebuildable caches
+    assert ".bmad-loop/policy.toml" in gitignore  # per-machine config ([mux] backend)
 
     # all bundled skills land in claude's tree, with nested files intact
     skills_dir = tmp_path / ".claude" / "skills"
@@ -383,6 +384,26 @@ def test_install_into_full(tmp_path):
     final_gitignore = (tmp_path / ".gitignore").read_text()
     assert final_gitignore.count(".bmad-loop/runs/") == 1
     assert final_gitignore.count(".bmad-loop/cache/") == 1
+    assert final_gitignore.count(".bmad-loop/policy.toml") == 1
+
+
+def test_install_into_warns_when_policy_is_tracked(tmp_path, capsys):
+    """A .gitignore entry doesn't untrack an already-committed policy.toml:
+    upgrading repos get the one-time `git rm --cached` hint."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    policy_file = tmp_path / ".bmad-loop" / "policy.toml"
+    policy_file.parent.mkdir(parents=True)
+    policy_file.write_text("[gates]\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".bmad-loop/policy.toml"], cwd=tmp_path, check=True)
+    assert install_into(tmp_path) == 0
+    assert "git rm --cached .bmad-loop/policy.toml" in capsys.readouterr().out
+
+
+def test_install_into_no_tracking_warning_outside_a_repo(tmp_path, capsys):
+    assert install_into(tmp_path) == 0
+    assert "git rm --cached" not in capsys.readouterr().out
 
 
 def test_hook_command_uses_selected_process_host(tmp_path, monkeypatch):
