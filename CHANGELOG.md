@@ -46,6 +46,20 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **A resumed sweep re-drives its in-flight bundles by identity, not by bundle name.** `SweepEngine`
+  recovered a bundle only from inside `_run_bundle`, which a cycle reaches after re-deriving the key
+  from the _current_ triage plan — so a bundle re-armed by `bmad-loop resolve` survived a resume only
+  because the cached `triage.json` reloaded and re-emitted the same name. Lose that cache and a fresh
+  triage partitioned the ids under new names, silently orphaning the human's resolution. The sweep
+  loop now opens with `_finish_inflight_bundles`, mirroring the base engine: every non-terminal `dw*`
+  task is re-driven under its own persisted `story_key`, before the ledger is read, so its ids leave
+  the open set and no fresh plan can re-bundle them. A still-escalated bundle stays terminal and
+  untouched. A missing bundle intent file is regenerated from the task (the verbatim ledger entries
+  become the contract; the triage prose is the only unrecoverable piece), and a bundle that survives
+  to a cycle anyway is journaled + notified rather than dropped. Relatedly, a truncated or
+  wrong-shaped `triage.json` now degrades to a fresh triage instead of crashing the whole run — the
+  corrupt leg of this bug was previously unreachable. New journal events: `sweep-inflight-redrive` /
+  `-stranded`, `sweep-intent-regenerated`. (#94)
 - **Run ids are validated, so a run ref can no longer escape the runs directory.** A positional ref
   (`delete`, `stop`, `archive`, `resume`, `status`) was recomposed into a path raw, so
   `bmad-loop delete ../../x` deleted any outside directory holding a `state.json`; the hidden
