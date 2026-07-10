@@ -1092,13 +1092,14 @@ def test_reconcile_skips_and_journals_on_unreadable_spec(project, monkeypatch):
         "---\ntitle: 'x'\nstatus: 'in-progress'\n---\n\n## Auto Run Result\n\n- Status: done\n"
     )
     sp.write_text(original, encoding="utf-8")
+    before = sp.read_bytes()  # snapshot: text-mode write newline-translates on Windows
     task = StoryTask(story_key="1-1-a", epic=1)
     rj = {"workflow": "auto-dev", "spec_file": str(sp), "status": "in-progress"}
     fault_read_text(monkeypatch, sp)
 
     engine._reconcile_generic_terminal_status(task, rj)
 
-    assert sp.read_bytes() == original.encode()  # never written (repair skipped)
+    assert sp.read_bytes() == before  # never written (repair skipped)
     assert rj["status"] == "in-progress"  # result dict untouched
     events = [e for e in engine.journal.entries() if e["kind"] == "spec-read-failed"]
     assert len(events) == 1
