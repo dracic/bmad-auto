@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+from .platform_util import atomic_replace
 
 POLICY_FILE = Path(".bmad-loop") / "policy.toml"
 
@@ -23,6 +26,15 @@ ISOLATION_MODES = {"none", "worktree"}
 BRANCH_PER_MODES = {"story", "run"}
 MERGE_STRATEGIES = {"ff", "merge", "squash"}
 DEV_SKILLS = {"bmad-dev-auto"}
+
+# Backend names are registry keys (adapters/multiplexer.py), never paths or
+# shell input; the alphabet mirrors what built-in and plugin backends use.
+_MUX_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# write_mux_backend's line targets: a [section] header, and the (possibly
+# commented) `backend =` anchor line inside [mux]. Template prose comments must
+# never start with `backend =` or the anchor match would hit them first.
+_TOML_SECTION_RE = re.compile(r"^\s*\[(?P<name>[^\]]+)\]\s*(?:#.*)?$")
+_MUX_KEY_RE = re.compile(r"^\s*#?\s*backend\s*=")
 
 # Deprecated [engine] keys, folded into [plugins.unity] at load time. The
 # game-engine layer is now a plugin; [engine] is a one-release compatibility
@@ -147,6 +159,17 @@ class TuiPolicy:
     # repaint tearing/garbage when driving the TUI over a slow/high-latency
     # link (SSH, Tailscale) where a 60fps update stream can't drain in time.
     low_frame_rate: bool = False
+
+
+@dataclass(frozen=True)
+class MuxPolicy:
+    # Terminal-multiplexer backend for THIS machine (the transport axis — which
+    # tmux-like program hosts sessions; independent of [adapter], the coding-CLI
+    # axis). "" = auto-select. Whether the name is actually registered is checked
+    # at selection time (adapters/multiplexer.py), not here — policy stays
+    # data-only, and a plugin backend may not be importable in every context that
+    # parses policy. Machine-specific: `bmad-loop init` gitignores policy.toml.
+    backend: str = ""
 
 
 @dataclass(frozen=True)
@@ -352,6 +375,7 @@ class Policy:
     cleanup: CleanupPolicy = field(default_factory=CleanupPolicy)
     plugins: PluginsPolicy = field(default_factory=PluginsPolicy)
     tui: TuiPolicy = field(default_factory=TuiPolicy)
+    mux: MuxPolicy = field(default_factory=MuxPolicy)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -469,6 +493,7 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
     engine_d = _section(doc, "engine")  # deprecated; folded into [plugins] below
     plugins_d = _section(doc, "plugins")
     tui_d = _section(doc, "tui")
+    mux_d = _section(doc, "mux")
 
     gates = GatesPolicy(
         mode=str(gates_d.get("mode", GatesPolicy.mode)),
@@ -675,6 +700,11 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
             _validate_plugin_settings(name, raw_settings, plugin_schemas.get(name))
     plugins = PluginsPolicy(enabled=tuple(enabled), settings=plugin_settings)
     tui = TuiPolicy(low_frame_rate=bool(tui_d.get("low_frame_rate", TuiPolicy.low_frame_rate)))
+    mux = MuxPolicy(backend=str(mux_d.get("backend", MuxPolicy.backend)).strip())
+    if mux.backend and not _MUX_NAME_RE.match(mux.backend):
+        raise PolicyError(
+            f"mux.backend must be a backend name (letters, digits, . _ -): got {mux.backend!r}"
+        )
     return Policy(
         gates=gates,
         limits=limits,
@@ -689,6 +719,7 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
         cleanup=cleanup,
         plugins=plugins,
         tui=tui,
+        mux=mux,
     )
 
 
@@ -870,4 +901,80 @@ enabled = []                 # e.g. ["unity", "my-lint-plugin"]
 # over slow/high-latency links (SSH, Tailscale). Equivalent to launching with
 # `bmad-loop tui --low-frame-rate`. Takes effect the next time the TUI starts.
 low_frame_rate = false
+
+[mux]
+# Terminal-multiplexer backend for this machine (the transport axis — which
+# tmux-like program hosts sessions; independent of [adapter], the coding-CLI
+# axis). Machine-specific: `bmad-loop init` gitignores policy.toml, so this
+# choice never travels to teammates on other machines or OSes.
+# Unset = auto-select: the BMAD_LOOP_MUX_BACKEND env var wins, then this key,
+# then the platform default (win32: psmux, elsewhere: tmux) when installed,
+# then the first registered backend that matches this platform and is
+# available. Naming a backend that is not registered fails loudly at launch.
+# `bmad-loop mux` lists backends and shows the selection; `bmad-loop mux set
+# <name>` writes this key. Takes effect on the next bmad-loop invocation.
+# backend = "tmux"
 """
+
+
+def write_mux_backend(path: Path, name: str | None) -> None:
+    """Persist (``name``) or clear (``None``) the ``[mux] backend`` key in the
+    policy file at ``path``, preserving every other byte — devs hand-edit
+    policy.toml, and the core install has no comment-preserving TOML writer
+    (tomlkit ships only with the [tui] extra). A missing file is created from
+    :data:`POLICY_TEMPLATE` so the written file keeps the full documentation.
+
+    The template anchors the key as a single ``# backend = "tmux"`` line under
+    ``[mux]`` with all prose comments *above* it, so the rewrite is a targeted
+    line replace: the first (possibly commented) ``backend =`` line inside
+    ``[mux]`` is swapped for the new value, or re-commented on clear. A file
+    predating the ``[mux]`` table gets the table appended at EOF (TOML tables
+    are order-free, so appending is always safe)."""
+    if name is not None and not _MUX_NAME_RE.match(name):
+        raise PolicyError(
+            f"mux.backend must be a backend name (letters, digits, . _ -): got {name!r}"
+        )
+    # bytes in / bytes out: text mode would translate a CRLF file's endings.
+    text = path.read_bytes().decode("utf-8") if path.is_file() else POLICY_TEMPLATE
+    new_line = f'backend = "{name}"' if name is not None else '# backend = "tmux"'
+
+    section = ""
+    replaced = False
+    mux_header_at: int | None = None
+    out: list[str] = []
+    for line in text.splitlines(keepends=True):
+        header = _TOML_SECTION_RE.match(line)
+        if header:
+            section = header.group("name").strip()
+            out.append(line)
+            if section == "mux" and mux_header_at is None:
+                mux_header_at = len(out) - 1
+            continue
+        if not replaced and section == "mux" and _MUX_KEY_RE.match(line):
+            ending = line[len(line.rstrip("\r\n")) :] or "\n"
+            out.append(new_line + ending)
+            replaced = True
+            continue
+        out.append(line)
+    if not replaced:
+        if mux_header_at is not None:  # [mux] table present but the key line was deleted
+            out.insert(mux_header_at + 1, new_line + "\n")
+        else:  # policy file predating the [mux] table
+            if out and not out[-1].endswith("\n"):
+                out.append("\n")
+            out.append(f"\n[mux]\n{new_line}\n")
+    result = "".join(out)
+
+    # Round-trip guard: never write a file this module can't read back to the
+    # intended value (catches an anchor/regex drift before it corrupts config).
+    parsed = loads(result)
+    if parsed.mux.backend != (name or ""):
+        raise PolicyError(
+            f"internal error: rewriting {path} would read back "
+            f"mux.backend = {parsed.mux.backend!r}, expected {(name or '')!r}"
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".toml.tmp")
+    tmp.write_bytes(result.encode("utf-8"))
+    atomic_replace(tmp, path)
