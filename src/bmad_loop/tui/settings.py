@@ -28,8 +28,15 @@ class PolicyDoc:
         self._doc = doc
 
     @classmethod
-    def load(cls, path: Path) -> PolicyDoc:
-        text = path.read_text(encoding="utf-8") if path.is_file() else policy_mod.POLICY_TEMPLATE
+    def load(cls, path: Path, *, template_when_missing: bool = True) -> PolicyDoc:
+        """``template_when_missing=False`` starts a missing file from an empty
+        document instead of POLICY_TEMPLATE — for callers that write a single
+        section (e.g. dashboard geometry) and must not materialise every
+        default setting into a fresh policy.toml."""
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+        else:
+            text = policy_mod.POLICY_TEMPLATE if template_when_missing else ""
         return cls(tomlkit.parse(text))
 
     def _table(self, section: str, create: bool) -> Any | None:

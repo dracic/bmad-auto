@@ -159,6 +159,15 @@ class TuiPolicy:
     # repaint tearing/garbage when driving the TUI over a slow/high-latency
     # link (SSH, Tailscale) where a 60fps update stream can't drain in time.
     low_frame_rate: bool = False
+    # Persisted dashboard pane geometry, in terminal cells. 0 = unset: the layout
+    # keeps its built-in default proportions (so a fresh project looks unchanged
+    # and only user-resized panes land in the file). The TUI writes these when a
+    # pane is resized by mouse-drag or the Ctrl+W resize mode, and seeds them back
+    # on the next launch. Per-project, since policy.toml is project-scoped.
+    left_width: int = 0  # sidebar (#left) width, columns
+    runs_height: int = 0  # Runs pane height, rows (top of the left column)
+    deferred_height: int = 0  # Deferred pane height, rows (bottom of the left column)
+    tasks_height: int = 0  # Tasks table height, rows (detail column)
 
 
 @dataclass(frozen=True)
@@ -412,6 +421,18 @@ def _opt_nudges(d: dict[str, Any], where: str) -> int | None:
     if value < 0:
         raise PolicyError(f"{where}.stop_without_result_nudges must be >= 0: got {value}")
     return value
+
+
+def _tui_dim(d: dict[str, Any], key: str) -> int:
+    """A persisted TUI pane dimension (cells). 0 = unset; negatives are rejected.
+    Strict like scm.max_parallel: a TOML bool or float would coerce silently and
+    corrupt the saved geometry, so require a real int."""
+    raw = d.get(key, 0)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise PolicyError(f"tui.{key} must be a non-negative integer: got {raw!r}")
+    if raw < 0:
+        raise PolicyError(f"tui.{key} must be >= 0: got {raw}")
+    return raw
 
 
 def _stage_adapter(adapter_d: dict[str, Any], key: str) -> StageAdapterPolicy:
@@ -699,7 +720,13 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
         for name, raw_settings in plugin_settings.items():
             _validate_plugin_settings(name, raw_settings, plugin_schemas.get(name))
     plugins = PluginsPolicy(enabled=tuple(enabled), settings=plugin_settings)
-    tui = TuiPolicy(low_frame_rate=bool(tui_d.get("low_frame_rate", TuiPolicy.low_frame_rate)))
+    tui = TuiPolicy(
+        low_frame_rate=bool(tui_d.get("low_frame_rate", TuiPolicy.low_frame_rate)),
+        left_width=_tui_dim(tui_d, "left_width"),
+        runs_height=_tui_dim(tui_d, "runs_height"),
+        deferred_height=_tui_dim(tui_d, "deferred_height"),
+        tasks_height=_tui_dim(tui_d, "tasks_height"),
+    )
     mux = MuxPolicy(backend=str(mux_d.get("backend", MuxPolicy.backend)).strip())
     if mux.backend and not _MUX_NAME_RE.match(mux.backend):
         raise PolicyError(
@@ -901,6 +928,14 @@ enabled = []                 # e.g. ["unity", "my-lint-plugin"]
 # over slow/high-latency links (SSH, Tailscale). Equivalent to launching with
 # `bmad-loop tui --low-frame-rate`. Takes effect the next time the TUI starts.
 low_frame_rate = false
+# Persisted dashboard pane sizes, in terminal cells. 0 = unset (use the built-in
+# default proportions). The TUI writes these when you resize a pane by mouse-drag
+# or the Ctrl+W resize mode; they are re-applied on the next launch. Usually you
+# won't hand-edit these — resize in the TUI instead.
+# left_width = 0        # sidebar width, columns
+# runs_height = 0       # Runs pane height, rows
+# deferred_height = 0   # Deferred pane height, rows
+# tasks_height = 0      # Tasks table height, rows
 
 [mux]
 # Terminal-multiplexer backend for this machine (the transport axis — which

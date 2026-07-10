@@ -82,11 +82,13 @@ captured and shown in a scrollable modal instead of spawned in tmux.
 
 ### Left column
 
-Three stacked panes; `tab` / `shift+tab` move focus between them. The sprint
-and deferred panes read project-level files maintained by LLM sessions
-(`sprint-status.yaml`, `deferred-work.md`), so both parse forgivingly: a
-missing or malformed file shows a dim placeholder instead of an error, and
-the pane recovers on the next poll once the file is readable again.
+Three stacked panes; `tab` / `shift+tab` move focus between them, and their
+heights (like the sidebar width) are resizable — see [Resizing
+panes](#resizing-panes). The sprint and deferred panes read project-level files
+maintained by LLM sessions (`sprint-status.yaml`, `deferred-work.md`), so both
+parse forgivingly: a missing or malformed file shows a dim placeholder instead
+of an error, and the pane recovers on the next poll once the file is readable
+again.
 
 #### Run list (top)
 
@@ -243,27 +245,46 @@ Journal kinds are styled by substring, first match wins:
 
 ## Key bindings
 
-| Key | Action                                                                     |
-| --- | -------------------------------------------------------------------------- |
-| `r` | start a run (modal)                                                        |
-| `s` | start a sweep (modal)                                                      |
-| `e` | resume the selected paused/interrupted run (confirm modal)                 |
-| `p` | review the selected paused run in the stage-appropriate HITL viewer        |
-| `R` | resolve a run paused at an escalation (interactive, then re-arm)           |
-| `d` | answer deferred-work decisions past sweeps left unanswered (modal walk)    |
-| `a` | attach to the selected run's live session or orchestrator window           |
-| `x` | stop the selected live run (confirm modal)                                 |
-| `D` | delete the selected run's directory (confirm modal)                        |
-| `A` | archive the selected run to `.bmad-loop/archive` (confirm modal)           |
-| `c` | clean up tmux sessions/windows for finished & stopped runs (confirm modal) |
-| `v` | run `bmad-loop validate`, output in a modal                                |
-| `g` | settings editor for `.bmad-loop/policy.toml`                               |
-| `M` | toggle theme (light/dark mode)                                             |
-| `y` | copy the active Log/Attention pane to the clipboard                        |
-| `q` | quit (running engines are unaffected)                                      |
+| Key      | Action                                                                     |
+| -------- | -------------------------------------------------------------------------- |
+| `r`      | start a run (modal)                                                        |
+| `s`      | start a sweep (modal)                                                      |
+| `e`      | resume the selected paused/interrupted run (confirm modal)                 |
+| `p`      | review the selected paused run in the stage-appropriate HITL viewer        |
+| `R`      | resolve a run paused at an escalation (interactive, then re-arm)           |
+| `d`      | answer deferred-work decisions past sweeps left unanswered (modal walk)    |
+| `a`      | attach to the selected run's live session or orchestrator window           |
+| `x`      | stop the selected live run (confirm modal)                                 |
+| `D`      | delete the selected run's directory (confirm modal)                        |
+| `A`      | archive the selected run to `.bmad-loop/archive` (confirm modal)           |
+| `c`      | clean up tmux sessions/windows for finished & stopped runs (confirm modal) |
+| `v`      | run `bmad-loop validate`, output in a modal                                |
+| `g`      | settings editor for `.bmad-loop/policy.toml`                               |
+| `M`      | toggle theme (light/dark mode)                                             |
+| `y`      | copy the active Log/Attention pane to the clipboard                        |
+| `ctrl+w` | enter/leave pane **resize mode** (see below)                               |
+| `q`      | quit (running engines are unaffected)                                      |
 
 In the settings editor: `ctrl+s` saves, `ctrl+e` expands/collapses all
 sections, `escape` goes back without saving. In any modal: `escape` cancels.
+
+### Resizing panes
+
+Every pane boundary is adjustable, by **mouse** or **keyboard**, and the sizes
+persist per-project to `[tui]` in `policy.toml` (re-applied on the next launch).
+
+- **Mouse** — drag any divider bar: the column split between the left sidebar and
+  the detail pane, the bars between the stacked left-column panes (they double as
+  the Sprint / Deferred Work section headings), and the bar between the Tasks
+  table and the Journal/Log/Attention tabs. Bars highlight on hover.
+- **Keyboard** — press `ctrl+w` to enter resize mode (the header shows a hint):
+  `←`/`→` widen or narrow the sidebar, `↑`/`↓` move the active horizontal
+  boundary, `Tab`/`Shift+Tab` pick which horizontal boundary is active, and
+  `Esc` (or `Enter`) leaves the mode. Outside resize mode the arrows and `Tab`
+  keep their usual navigation/focus behavior.
+
+To forget custom sizes, delete the `[tui]` size keys from `policy.toml` (or set
+them to `0`) — the panes return to their default proportions.
 
 ## Starting runs and sweeps (`r` / `s`)
 

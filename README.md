@@ -100,7 +100,7 @@ A live, read-only dashboard over everything below — and a launcher for new run
 <img src="docs/images/dashboard.png" alt="Dashboard: runs table, run header with token totals, per-story phase table, sprint tree, deferred-work ledger, and the journal tab." width="880">
 </div>
 
-The left column stacks the **runs table** (newest auto-selected; a per-run pause badge tags paused runs by kind, and the title carries a global _⚑ N need attention_ count), an expandable **sprint tree** (epics → stories/retro, completed items checked green) — replaced by a **stories board** (id · live disk state · spec/done checkpoint markers · title) when the selected run is in stories mode — and the **deferred-work ledger** (severity colour-coded). The right column shows the selected run's **header** (status, epic, task counts, cost-weighted token total), a **per-story table** (phase · dev attempts · review cycles · tokens · commit/defer info), and tabs tailing the **journal**, the active session's **pane log**, and the **ATTENTION** file. On a paused run, **`p`** opens the stage-appropriate HITL viewer — a plan-checkpoint spec viewer (Approve & resume / Request replan), a story-checkpoint summary card (Continue / Stop), the escalation view with story context (Resolve / Re-arm & resume), or a gate spec viewer — each calling the exact code paths the CLI uses.
+The left column stacks the **runs table** (newest auto-selected; a per-run pause badge tags paused runs by kind, and the title carries a global _⚑ N need attention_ count), an expandable **sprint tree** (epics → stories/retro, completed items checked green) — replaced by a **stories board** (id · live disk state · spec/done checkpoint markers · title) when the selected run is in stories mode — and the **deferred-work ledger** (severity colour-coded). The right column shows the selected run's **header** (status, epic, task counts, cost-weighted token total), a **per-story table** (phase · dev attempts · review cycles · tokens · commit/defer info), and tabs tailing the **journal**, the active session's **pane log**, and the **ATTENTION** file. Every pane boundary is resizable — drag any divider bar or press **`ctrl+w`** for a keyboard resize mode; the sidebar width and pane heights persist per-project to `[tui]` in `policy.toml` (see the [TUI guide](docs/tui-guide.md#resizing-panes)). On a paused run, **`p`** opens the stage-appropriate HITL viewer — a plan-checkpoint spec viewer (Approve & resume / Request replan), a story-checkpoint summary card (Continue / Stop), the escalation view with story context (Resolve / Re-arm & resume), or a gate spec viewer — each calling the exact code paths the CLI uses.
 
 ### A sweep blocked on a human decision
 
@@ -151,6 +151,7 @@ Press **`g`** to edit `.bmad-loop/policy.toml` in a form grouped by section — 
 | `v`       | run `bmad-loop validate`, output in a modal                                                              |
 | `g`       | settings editor for `.bmad-loop/policy.toml`                                                             |
 | `y`       | copy the active Log/Attention pane to the clipboard                                                      |
+| `ctrl+w`  | enter/leave pane resize mode (arrows resize, `Tab` picks the boundary) — or drag any divider bar         |
 | `M` / `q` | toggle theme (light/dark mode) / quit                                                                    |
 
 **The TUI is an observer/launcher, never the engine.** Runs started with `r`/`s` are detached `bmad-loop` processes in windows of a dedicated tmux session (`bmad-loop-ctl`), so they survive a TUI exit or crash; the dashboard watches runs purely through the run-dir artifacts the engine writes atomically, so runs started from a plain shell show up identically. Launch and attach need tmux; the dashboard itself does not. Pid-based liveness is local-only — a run whose engine died shows `interrupted` (press `e`); runs on other hosts show `unknown`.
@@ -398,6 +399,12 @@ backend = ""               # "" = auto-select; else force a registered backend b
 
 [tui]
 low_frame_rate = false     # true = cap to 15fps + disable animations (= bmad-loop tui --low-frame-rate)
+# Persisted dashboard pane sizes (terminal cells). 0 = unset → default proportions;
+# the TUI writes these when you resize by mouse-drag or the Ctrl+W resize mode.
+# left_width = 0           # sidebar width, columns
+# runs_height = 0          # Runs pane height, rows
+# deferred_height = 0      # Deferred pane height, rows
+# tasks_height = 0         # Tasks table height, rows
 ```
 
 **Gate modes:** `none` runs everything unattended; `per-epic` (default) pauses at epic boundaries; `per-story-spec-approval` pauses after each spec is written so you approve it before implementation is reviewed.
