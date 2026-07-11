@@ -63,7 +63,7 @@ def test_builtin_profiles_load():
     # add no such env overrides
     assert profiles["claude"].env.get("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN") == "1"
     assert profiles["claude"].env.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS") == "1"
-    for name in ("codex", "gemini", "copilot"):
+    for name in sorted(set(profiles) - {"claude"}):
         assert "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN" not in profiles[name].env
         assert "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" not in profiles[name].env
 
