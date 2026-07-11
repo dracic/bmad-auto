@@ -7,6 +7,11 @@ top of the generic plugin framework:
     report ready before any session runs, in both editor modes;
   * **per_worktree setup/teardown** (``on_pre_worktree_setup`` /
     ``on_pre_worktree_teardown``) launch and reap a managed Editor per worktree;
+  * a **rollback quiesce** (``on_pre_rollback`` / ``on_post_rollback``) saves +
+    closes open scenes before ``verify.safe_rollback`` runs ``git reset --hard``,
+    then refreshes assets after — so the reset can't rewrite a tracked ``.unity``
+    file under a shared Editor and raise a run-freezing modal dialog. Best effort:
+    a wedged Editor is skipped (fast) and the rollback always proceeds;
   * a failure **vetoes (defers)** the unit through the bus — the engine's generic
     ``_vetoed`` routing turns that into a deferral + notification, with no
     Unity-specific branch in the loop;
@@ -51,6 +56,10 @@ _TEARDOWN_TIMEOUT = 120
 # scene-guard seeding is a handful of small file copies; bound it small so a wedged
 # filesystem can't eat into the readiness budget (it never vetoes either way).
 _SEED_TIMEOUT = 60
+# fallback overall budget for the rollback quiesce helper if quiesce_timeout_sec is
+# unreadable. The helper's own per-call timeouts are the primary no-deadlock guard;
+# this is the outer kill so a wedged Editor can never stall a rollback either way.
+_QUIESCE_TIMEOUT = 60
 
 
 class UnityPlugin(Plugin):
@@ -126,6 +135,23 @@ class UnityPlugin(Plugin):
             return
         self._run_script("unity_teardown.py", ctx, timeout=_TEARDOWN_TIMEOUT)
 
+    def on_pre_rollback(self, ctx) -> None:
+        """Quiesce the Editor before ``verify.safe_rollback`` runs ``git reset
+        --hard``: save every open scene, then open an empty untitled scene so no
+        tracked ``.unity`` file is open when the reset rewrites it. Without this a
+        shared Editor holding a dirty scene raises a modal "scene changed on disk —
+        Reload/Cancel" dialog that freezes ``EditorApplication.update`` and every
+        Unity-MCP dispatch. Best effort — a wedged Editor is detected fast and
+        skipped, and the rc is ignored: a failed quiesce must never block the
+        rollback."""
+        self._quiesce("pre", ctx)
+
+    def on_post_rollback(self, ctx) -> None:
+        """After the reset rewrote the tracked tree, tell the Editor to re-import
+        so it sees the reverted assets rather than its stale in-memory copies. Best
+        effort — same never-veto contract as ``on_pre_rollback``."""
+        self._quiesce("post", ctx)
+
     def on_post_run(self, ctx) -> None:
         """Run finished cleanly: reclaim the IvanMurzak MCP server's /tmp scratch
         (downloaded server zips) and truncate its unbounded editor log. Best
@@ -148,6 +174,32 @@ class UnityPlugin(Plugin):
 
     def _install_scene_guard(self) -> bool:
         return bool(self.settings.get("install_scene_guard", True))
+
+    def _quiesce_on_rollback(self) -> bool:
+        return bool(self.settings.get("quiesce_on_rollback", True))
+
+    def _quiesce_timeout(self) -> int:
+        try:
+            return max(1, int(self.settings.get("quiesce_timeout_sec", _QUIESCE_TIMEOUT)))
+        except (TypeError, ValueError):
+            return _QUIESCE_TIMEOUT
+
+    def _quiesce(self, phase: str, ctx) -> None:
+        """Run the rollback quiesce helper for ``phase`` ("pre" | "post"). Skipped
+        when disabled or when the MCP isn't the IvanMurzak CLI (the only server the
+        helper drives). Best effort: the rc is ignored (the helper's exit codes are
+        advisory) and a failure never vetoes — this is observe-only, called from the
+        engine's ``pre_rollback`` / ``post_rollback`` stages which forbid a veto."""
+        if not self._quiesce_on_rollback():
+            return
+        if str(self.settings.get("mcp", "ivanmurzak")) != "ivanmurzak":
+            return
+        self._run_script(
+            "unity_quiesce.py",
+            ctx,
+            timeout=self._quiesce_timeout(),
+            extra_env={"BMAD_LOOP_QUIESCE_PHASE": phase},
+        )
 
     def _seed_scene_guard(self, ctx) -> None:
         """Seed the scene auto-save guard into the project so a chronically-dirty
@@ -197,12 +249,18 @@ class UnityPlugin(Plugin):
             env["BMAD_LOOP_ENGINE_AGENTS"] = ",".join(ctx.agents)
         return env
 
-    def _run_script(self, name: str, ctx, *, timeout: int) -> tuple[int, str]:
+    def _run_script(
+        self, name: str, ctx, *, timeout: int, extra_env: dict[str, str] | None = None
+    ) -> tuple[int, str]:
         """Run one helper script with the engine env, returning (rc, output-tail).
-        Never raises: a launch failure / timeout maps to a non-zero rc so the
-        readiness gate defers rather than crashing the run."""
+        ``extra_env`` is merged over ``engine_env(ctx)`` for per-call knobs the base
+        contract doesn't carry (e.g. the quiesce phase). Never raises: a launch
+        failure / timeout maps to a non-zero rc so the readiness gate defers rather
+        than crashing the run."""
         script = Path(self.manifest.scripts_dir) / name
         env = self.engine_env(ctx)
+        if extra_env:
+            env.update(extra_env)
         cwd = ctx.worktree or ctx.repo_root or None
         try:
             proc = subprocess.run(  # nosec B603 - operator-enabled engine plugin script

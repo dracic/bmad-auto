@@ -56,6 +56,7 @@ def test_builtin_unity_plugin_ships_its_scripts():
         "unity_setup.py",
         "unity_teardown.py",
         "unity_seed_assets.py",
+        "unity_quiesce.py",
     ):
         assert name in scripts, name
 
@@ -89,6 +90,8 @@ def test_builtin_unity_plugin_settings_schema():
         "ready_grace_sec",
         "install_scene_guard",
         "scene_guard_dir",
+        "quiesce_on_rollback",
+        "quiesce_timeout_sec",
     }
     assert by_key["editor_mode"].type == "select"
     assert by_key["editor_mode"].options == ("shared", "per_worktree")
@@ -97,6 +100,11 @@ def test_builtin_unity_plugin_settings_schema():
     assert by_key["install_scene_guard"].type == "bool"
     assert by_key["install_scene_guard"].default is True
     assert by_key["scene_guard_dir"].default == "Assets/BmadLoop/Editor"
+    assert by_key["quiesce_on_rollback"].type == "bool"
+    assert by_key["quiesce_on_rollback"].default is True
+    assert by_key["quiesce_timeout_sec"].type == "int"
+    assert by_key["quiesce_timeout_sec"].default == 60
+    assert by_key["quiesce_timeout_sec"].min == 1
 
 
 def test_unity_is_trust_gated():
@@ -134,6 +142,8 @@ def _make_unity(settings, scripts_dir):
         "ready_grace_sec": -1,
         "install_scene_guard": True,
         "scene_guard_dir": "Assets/BmadLoop/Editor",
+        "quiesce_on_rollback": True,
+        "quiesce_timeout_sec": 60,
     }
     full.update(settings)
     return cls(manifest, full)
@@ -203,6 +213,78 @@ def test_worktree_teardown_is_best_effort(tmp_path):
     assert not ctx.vetoed
 
 
+# --------------------------------------------------- rollback quiesce hooks
+
+
+def test_rollback_hooks_run_quiesce_with_phase_and_timeout(tmp_path, monkeypatch):
+    """pre/post_rollback shell the quiesce helper with the phase in the env and the
+    quiesce_timeout_sec as the overall kill budget."""
+    inst = _make_unity({"quiesce_timeout_sec": 42}, tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        inst,
+        "_run_script",
+        lambda name, ctx, *, timeout, extra_env=None: calls.append((name, timeout, extra_env))
+        or (0, ""),
+    )
+    inst.on_pre_rollback(_ctx("pre_rollback", tmp_path))
+    inst.on_post_rollback(_ctx("post_rollback", tmp_path))
+    assert calls == [
+        ("unity_quiesce.py", 42, {"BMAD_LOOP_QUIESCE_PHASE": "pre"}),
+        ("unity_quiesce.py", 42, {"BMAD_LOOP_QUIESCE_PHASE": "post"}),
+    ]
+
+
+def test_rollback_hooks_skipped_when_disabled(tmp_path, monkeypatch):
+    inst = _make_unity({"quiesce_on_rollback": False}, tmp_path)
+    calls = []
+    monkeypatch.setattr(inst, "_run_script", lambda *a, **k: calls.append(a) or (0, ""))
+    inst.on_pre_rollback(_ctx("pre_rollback", tmp_path))
+    inst.on_post_rollback(_ctx("post_rollback", tmp_path))
+    assert calls == []  # quiesce did not run
+
+
+def test_rollback_hooks_skipped_for_non_ivanmurzak_mcp(tmp_path, monkeypatch):
+    """Only the IvanMurzak CLI is driven; CoplayDev has no quiesce helper here."""
+    inst = _make_unity({"mcp": "coplaydev"}, tmp_path)
+    calls = []
+    monkeypatch.setattr(inst, "_run_script", lambda *a, **k: calls.append(a) or (0, ""))
+    inst.on_pre_rollback(_ctx("pre_rollback", tmp_path))
+    inst.on_post_rollback(_ctx("post_rollback", tmp_path))
+    assert calls == []
+
+
+def test_rollback_hooks_never_veto_on_failure(tmp_path):
+    """The quiesce is best-effort — a failing (or missing) helper never vetoes; the
+    rollback stages forbid a veto anyway."""
+    # no unity_quiesce.py on disk -> _run_script returns rc!=0, must be swallowed
+    inst = _make_unity({}, tmp_path)
+    ctx = _ctx("pre_rollback", tmp_path)
+    inst.on_pre_rollback(ctx)
+    inst.on_post_rollback(_ctx("post_rollback", tmp_path))
+    assert not ctx.vetoed
+
+
+def test_run_script_merges_extra_env(tmp_path):
+    """_run_script layers extra_env over engine_env so per-call knobs (the quiesce
+    phase) reach the helper without polluting the base contract."""
+    # a tiny helper that dumps the phase env var it received, so we can read it back
+    (tmp_path / "echo_phase.py").write_text(
+        "import os, sys\n" "sys.stdout.write(os.environ.get('BMAD_LOOP_QUIESCE_PHASE', 'UNSET'))\n",
+        encoding="utf-8",
+    )
+    inst = _make_unity({}, tmp_path)
+    rc, out = inst._run_script(
+        "echo_phase.py",
+        _ctx("pre_rollback", tmp_path),
+        timeout=30,
+        extra_env={"BMAD_LOOP_QUIESCE_PHASE": "pre"},
+    )
+    assert rc == 0 and out == "pre"
+    # base engine_env is unchanged: without extra_env the var is absent
+    assert "BMAD_LOOP_QUIESCE_PHASE" not in inst.engine_env(_ctx("pre_rollback", tmp_path))
+
+
 # ------------------------------------------------------ UnityPlugin env contract
 
 
@@ -267,6 +349,8 @@ def _real_unity(settings):
         "ready_grace_sec": -1,
         "install_scene_guard": True,
         "scene_guard_dir": "Assets/BmadLoop/Editor",
+        "quiesce_on_rollback": True,
+        "quiesce_timeout_sec": 60,
     }
     full.update(settings)
     return cls(manifest, full)

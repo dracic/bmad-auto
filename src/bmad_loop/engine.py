@@ -853,6 +853,13 @@ class Engine:
                 baseline=task.baseline_commit or "",
                 note="reverting tracked changes + run-created untracked files",
             )
+            # Give a plugin (the Unity engine) a chance to quiesce before the reset
+            # rewrites tracked files under it — e.g. save + close open scenes so a
+            # git reset --hard can't leave a shared Editor showing a run-freezing
+            # "scene changed on disk" modal. Observe-only, like pre_worktree_teardown:
+            # the returned ctx is ignored and never routed through _vetoed — a failed
+            # quiesce must never block a rollback.
+            self._emit("pre_rollback", task)
             # A re-drive (resolved / mid-re-drive) is contractually pause-free, so it
             # preserves best-effort but never blocks; a plain rollback pauses rather
             # than reset past work it could not park.
@@ -863,6 +870,9 @@ class Engine:
             # failure); best-effort, never blocks.
             self._preserve_attempt_worktree(task)
             self._safe_reset(task, preserve=protected)
+            # Refresh the plugin's view of the now-reset tree (the Unity engine
+            # re-imports assets). Observe-only for the same reason as pre_rollback.
+            self._emit("post_rollback", task)
             return
         self._pause_for_manual_recovery(task, task.baseline_commit or "")
         return  # unreachable: _pause_for_manual_recovery always raises

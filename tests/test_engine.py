@@ -2464,6 +2464,75 @@ def test_rollback_preserves_committed_attempt_work(project):
     assert git(repo, "rev-parse", entry["ref"]).strip() == attempt_head  # reachable by name
 
 
+def test_rollback_emits_pre_and_post_around_reset(project):
+    """A plugin (the Unity engine) hooks pre_rollback / post_rollback so it can
+    quiesce a live Editor before the hard reset rewrites tracked files under it, and
+    refresh after. pre_rollback must fire while the attempt tree is still checked out
+    (HEAD == attempt); post_rollback only after the reset landed (HEAD == baseline)."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    repo = project.project
+    task = StoryTask(story_key="1-1-a", epic=1)
+    task.baseline_commit = rev_parse_head(repo)
+    task.baseline_untracked = []
+    (repo / "impl.txt").write_text("committed implementation\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "attempt work")
+    attempt_head = rev_parse_head(repo)
+
+    seen: list[tuple[str, str]] = []
+    original_emit = engine._emit
+
+    def spying_emit(stage, *args, **kwargs):
+        if stage in ("pre_rollback", "post_rollback"):
+            seen.append((stage, rev_parse_head(repo)))
+        return original_emit(stage, *args, **kwargs)
+
+    engine._emit = spying_emit
+    engine._rollback_or_pause(task)  # rollback ON: resets to baseline
+
+    assert rev_parse_head(repo) == task.baseline_commit
+    # pre fires before the reset (attempt tree still open), post after it landed
+    assert seen == [
+        ("pre_rollback", attempt_head),
+        ("post_rollback", task.baseline_commit),
+    ]
+
+
+def test_rollback_emits_are_observe_only(project):
+    """The rollback emits are observe-only, like pre_worktree_teardown: the returned
+    ctx is never routed through ``_vetoed``, so a failed Editor quiesce can never
+    block or pause the rollback."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    repo = project.project
+    task = StoryTask(story_key="1-1-a", epic=1)
+    task.baseline_commit = rev_parse_head(repo)
+    task.baseline_untracked = []
+    (repo / "src.txt").write_text("uncommitted tracked edit\n")
+
+    routed: list = []
+    original_vetoed = engine._vetoed
+
+    def spying_vetoed(ctx, t):
+        routed.append(ctx)
+        return original_vetoed(ctx, t)
+
+    engine._vetoed = spying_vetoed
+    engine._rollback_or_pause(task)  # must not raise / pause
+
+    assert rev_parse_head(repo) == task.baseline_commit  # reset still happened
+    assert routed == []  # the rollback emits were never handed to the veto router
+
+
 def test_rollback_preserves_uncommitted_attempt_worktree(project):
     """rollback_on_failure ON + an attempt that left work UNcommitted: before the
     hard reset (and its untracked cleanup) the engine parks the uncommitted diff —

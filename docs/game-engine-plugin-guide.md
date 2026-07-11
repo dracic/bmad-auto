@@ -63,19 +63,24 @@ An engine binds the orchestrator's **per-story stages** that surround a unit's
 worktree and sessions. The relevant ones (full list in the
 [stage reference](plugin-authoring-guide.md#stage-reference)):
 
-| Stage                   | shared mode                       | per_worktree mode                                                                                                                 |
-| ----------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `pre_worktree_setup`    | not run                           | per unit, right after the worktree is cut — make it a usable project + launch its Editor                                          |
-| `pre_ready_gate`        | once, before the first session    | per unit, after setup, before the agent runs — block until Editor + MCP are ready                                                 |
-| (agent dev/review)      | drives the operator's live Editor | drives the worktree's managed Editor                                                                                              |
-| `pre_worktree_teardown` | not run                           | per unit, on completion **and** on pause/escalation — quit the Editor + clean up                                                  |
-| `post_run`              | once, on clean finish             | once, on clean finish — reclaim per-run scratch (the Unity plugin clears the MCP server's `/tmp` zips + truncates its editor log) |
+| Stage                            | shared mode                                                  | per_worktree mode                                                                                                                 |
+| -------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `pre_worktree_setup`             | not run                                                      | per unit, right after the worktree is cut — make it a usable project + launch its Editor                                          |
+| `pre_ready_gate`                 | once, before the first session                               | per unit, after setup, before the agent runs — block until Editor + MCP are ready                                                 |
+| (agent dev/review)               | drives the operator's live Editor                            | drives the worktree's managed Editor                                                                                              |
+| `pre_worktree_teardown`          | not run                                                      | per unit, on completion **and** on pause/escalation — quit the Editor + clean up                                                  |
+| `pre_rollback` / `post_rollback` | per failed attempt, around the rollback's `git reset --hard` | same — quiesce the Editor (save + close open scenes) before the reset rewrites tracked files under it, refresh assets after       |
+| `post_run`                       | once, on clean finish                                        | once, on clean finish — reclaim per-run scratch (the Unity plugin clears the MCP server's `/tmp` zips + truncates its editor log) |
 
 A **blocking** hook at `pre_ready_gate` or `pre_worktree_setup` whose command
 exits non-zero **defers the unit** — bmad-loop never starts a session against a
-half-open Editor. `pre_worktree_teardown` is **observe-only** for veto purposes
-(a veto can't un-tear-down) but the command still **runs** — best-effort, even
-when a unit pauses or escalates, so a managed Editor never outlives its worktree.
+half-open Editor. `pre_worktree_teardown`, `pre_rollback`, and `post_rollback` are
+**observe-only** for veto purposes (a veto can't un-tear-down or un-reset) but the
+command still **runs** — best-effort, even when a unit pauses or escalates, so a
+managed Editor never outlives its worktree and a rollback is never stalled by a
+wedged Editor. The Unity plugin uses `pre_rollback` to save + close open scenes
+before the reset, so a shared Editor holding a dirty scene never raises the
+run-freezing "scene changed on disk" modal.
 
 You can implement these as **declarative** `[hooks.<stage>]` shell commands (the
 smallest thing that works), or as an **in-process** `[python]` module when you need

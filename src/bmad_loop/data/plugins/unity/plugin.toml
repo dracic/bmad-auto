@@ -39,7 +39,10 @@ seed_globs = [".claude/skills/*"]
 # Editor setup/teardown, MCP agent routing, Library priming, and the
 # editor_mode<->scm.isolation coupling validation. It hooks the engine's
 # lifecycle stages (pre_ready_gate / pre_worktree_setup / pre_worktree_teardown)
-# and vetoes (defers) the unit when the Editor can't be made ready.
+# and vetoes (defers) the unit when the Editor can't be made ready. It also
+# quiesces the Editor around a failed-attempt rollback (pre_rollback /
+# post_rollback) so a git reset --hard can't leave a shared Editor showing a
+# run-freezing scene-changed-on-disk modal — best effort, never blocks the reset.
 [python]
 module = "unity_plugin.py"
 class = "UnityPlugin"
@@ -95,3 +98,18 @@ type = "str"
 default = "Assets/BmadLoop/Editor"
 label = "Scene guard install dir"
 help = "project-relative dir the scene auto-save guard is seeded into (must live under the project's asset root, e.g. Assets/)"
+
+[[settings]]
+key = "quiesce_on_rollback"
+type = "bool"
+default = true
+label = "Quiesce Editor before rollback"
+help = "save open scenes + open an empty untitled scene via the MCP CLI before git reset, refresh assets after; best-effort, never blocks the rollback"
+
+[[settings]]
+key = "quiesce_timeout_sec"
+type = "int"
+default = 60
+min = 1
+label = "Rollback quiesce timeout (sec)"
+help = "overall budget for the pre/post-rollback quiesce helper; the loop hard-kills it past this so a wedged Editor can never stall a rollback"
