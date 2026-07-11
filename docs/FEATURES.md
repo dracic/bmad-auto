@@ -51,7 +51,7 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 
 - The follow-up review is a re-invocation of `bmad-dev-auto` on the `done` spec — a fresh-context session with no anchoring bias from the implementer (BMAD-METHOD#2508 routes a `done` spec to a fresh step-04 review pass), so there is no separate review skill.
 - Parallel adversarial layers resolved from the skill's `customize.toml` (defaults: Adversarial-General, Edge-Case-Hunter, and Verification-Gap — the third added by BMAD-METHOD#2550) → verify findings against code → triage → auto-apply patches → log → defer ambiguity → commit. Each layer invokes an upstream `bmad-review-*` skill, so all three are bmm prerequisites the `bmad-loop validate` preflight checks for.
-- Bounded review loop (`limits.max_review_cycles`, default 3 cycles); done when the pass finishes `done` and no longer recommends a follow-up. This bound is also the oscillation guard for skill-recommended follow-up review.
+- Bounded review loop (`limits.max_review_cycles`, default 3 cycles); done when the pass finishes `done` and no longer recommends a follow-up. A second guard, `limits.max_followup_reviews` (default 1), damps the structurally non-convergent case: a finalized pass that keeps recommending its own follow-up is honored only this many times, after which the round converges (verify + commit) and the lingering recommendation is re-filed to the deferred-work ledger instead of burning cycles to the hard cap. `0` never honors a pass's own recommendation.
 - Optional (`[review].enabled`, default `true`): set `false` to skip the follow-up review session. The dev pass's own inline review (same layers, in-context) is then the only review and it finalizes the story to `done` — one session per story instead of two. Verify commands still gate the commit. Applies to story runs and deferred-work sweeps alike.
 - Trigger (`[review].trigger`, default `recommended`): when review is enabled, decides _when_ the follow-up pass runs. `recommended` runs it only when `bmad-dev-auto` sets `followup_review_recommended` on a `done` spec (it self-reviews inline and flags an independent pass only when its review-driven changes were significant — BMAD-METHOD#2505). `always` runs it on every story (pre-0.7.0 behavior).
 
@@ -142,7 +142,7 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 
 - Single policy file written by `init`, snapshotted at run start (applies to new runs and resumes; editable live from the TUI).
 - Sections: `[gates]`, `[limits]`, `[verify]`, `[notify]`, `[review]`, `[adapter]` (+ per-stage), `[sweep]`, `[scm]` (worktree isolation + merge-back), `[cleanup]` (run-dir retention + disk reclamation), `[plugins]` (trust allowlist + per-plugin `[plugins.<name>]` config — e.g. the opt-in game-engine layer via `[plugins.unity]`, off by default), `[tui]` (`low_frame_rate` for slow/SSH links; persisted dashboard pane sizes).
-- Tunable limits: `max_review_cycles`, `max_dev_attempts`, `session_timeout_min`, `stop_without_result_nudges`, `dev_stall_grace_s`, `dev_stall_nudges`, `max_tokens_per_story`.
+- Tunable limits: `max_review_cycles`, `max_dev_attempts`, `max_followup_reviews`, `session_timeout_min`, `stop_without_result_nudges`, `dev_stall_grace_s`, `dev_stall_nudges`, `max_tokens_per_story`.
 
 ### TUI dashboard
 

@@ -9,6 +9,18 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **Follow-up-review damping (`limits.max_followup_reviews`, default 1).** Bounds how many extra
+  review rounds a story is granted _solely_ because a completed round finalized `status: done` yet
+  still set `followup_review_recommended: true`. Once spent, the next such round force-converges —
+  verify, then re-file the lingering recommendation to the deferred-work ledger, then commit —
+  instead of burning cycles up to `max_review_cycles`. This damps the structurally non-convergent
+  case where every review pass patches findings and therefore recommends another pass. The damped
+  converge is the expected steady state and stays quiet (no ATTENTION); only the re-review cap (a
+  story that itself originated from a `review-budget-followup` entry and still won't converge) still
+  notifies. Verify-repair rounds, non-terminal rounds, and `PAUSE`/`DEFER`/`RETRY` never spend the
+  grant; `0` never honors a pass's own recommendation. `runs.rearm_escalation` resets the counter so
+  a human-resolved re-drive gets a fresh budget.
+
 - **Resizable dashboard panes.** Every pane boundary is now adjustable by mouse-drag (divider
   bars, which also carry the Sprint / Deferred Work headings) or a keyboard resize mode (`ctrl+w`,
   then `←`/`→` for the sidebar, `↑`/`↓` for the active horizontal split, `Tab` to pick it, `Esc` to
@@ -71,6 +83,15 @@ breaking changes may land in a minor release.
   the three `_escalated_run` fixtures collapse into one parameterized conftest builder. (closes #84)
 
 ### Fixed
+
+- **Review leg repairs a finalize-tail death.** A review session that died between writing its
+  terminal `## Auto Run Result` (`Status: done`) and flipping the spec frontmatter off the transient
+  `in-review` marker left the orchestrator re-reviewing already-finished work — a burned review
+  cycle. The review leg now runs the same terminal-status reconcile the dev leg does: when the prose
+  says done and the frontmatter sits at a reconcilable non-terminal status, it advances the spec to
+  `done` and re-folds the frontmatter's `followup_review_recommended` flag (only when present) before
+  the convergence/damping gate reads it. Bookkeeping-only — every deterministic verify gate still
+  runs against real on-disk/git state, so it cannot pass uncompleted work.
 
 - **Claude sessions launch with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` (#109).** Claude Code
   could bias a dev session toward backgrounding its implementation sub-agent despite the

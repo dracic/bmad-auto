@@ -1639,8 +1639,11 @@ class Engine:
         # didn't, skip the separate session and let the deterministic gates +
         # commit run (_skip_review_and_commit still validates them). "always"
         # keeps the pre-#2505 behavior of reviewing every story. Either way the
-        # loop below is bounded by limits.max_review_cycles — the oscillation guard
-        # for orchestrator-applied follow-up review.
+        # loop below is bounded by limits.max_review_cycles (the hard outer cap)
+        # and damped by limits.max_followup_reviews — the guard against the
+        # structurally non-convergent case where every finalized round still
+        # recommends its own follow-up: once the damping grant is spent, such a
+        # round converges + refiles instead of burning cycles to the outer cap.
         if self.policy.review.trigger == "recommended" and not task.followup_review_recommended:
             self.journal.append("review-not-recommended", story_key=task.story_key)
             self._skip_review_and_commit(task)
@@ -1710,23 +1713,49 @@ class Engine:
             # Convergence = the pass finished `done` and no longer recommends an
             # independent follow-up. A blocked pass is already handled above
             # (decide_review_session PAUSEs on its synthesized CRITICAL).
+            # A review pass can die between writing terminal prose (## Auto Run
+            # Result: done) and flipping frontmatter off the transient `in-review`
+            # marker. Mirror the dev leg (engine.py:1541): repair the spec BEFORE
+            # reading status/followup below — otherwise the stale `in-review`
+            # frontmatter burns a review cycle re-reviewing already-finished work.
+            # On the generic path this advances `in-review`→`done` and re-folds the
+            # frontmatter's followup flag into `rj` (only when present), so the
+            # convergence/damping gate below sees the finalized state.
+            self._reconcile_generic_terminal_status(task, rj)
             status = str(rj.get("status", "")).strip()
             followup = bool(rj.get("followup_review_recommended", False))
             task.followup_review_recommended = followup  # latest pass wins
             refileable_followup = status == "done" and followup
+            # Damping: a finalized round that still recommends its own follow-up is
+            # honored only while the story has damping grants left. Once
+            # followup_reviews_spent has reached limits.max_followup_reviews, such a
+            # round force-converges (verify → refile the recommendation → commit)
+            # instead of burning another cycle on a structurally non-convergent
+            # recommendation (every review pass patches findings and recommends
+            # another pass). max_review_cycles stays the hard outer bound.
+            damped = refileable_followup and (
+                task.followup_reviews_spent >= self.policy.limits.max_followup_reviews
+            )
             self.journal.append(
                 "review-result",
                 story_key=task.story_key,
                 cycle=task.review_cycle,
                 status=status,
                 followup_review_recommended=followup,
+                followup_damped=damped,
             )
             self._emit("post_review_result", task, role="review", result_json=rj)
             if self._run_workflows("post_review_result", task, task.review_cycle):
                 return
-            if status == "done" and not followup:
+            if status == "done" and (not followup or damped):
                 outcome = self._verify_review(task)
                 if outcome.ok:
+                    if damped:
+                        # refile BEFORE break so the ledger edit squashes into the
+                        # same story commit (mirrors the exhaustion rescue ordering).
+                        # Verify-green here is the same authority as the converged /
+                        # rescue paths — never ships uncompleted work.
+                        self._record_review_budget_followup(task, damped=True)
                     clean = True
                     break
                 self.journal.append(
@@ -1737,11 +1766,23 @@ class Engine:
                 if outcome.fixable and task.review_cycle < self.policy.limits.max_review_cycles:
                     # failing verify commands are dev work, not review work: a
                     # re-review of the same tree cannot make them pass. Repair
-                    # with the failing output as feedback, then re-review.
+                    # with the failing output as feedback, then re-review. This
+                    # verify-repair round never spends the damping cap.
                     if not self._fix_phase(task, outcome.reason):
                         self._defer(task, "verify commands kept failing after clean review")
                         return
                 continue
+            if refileable_followup:
+                # Spend one damping grant for honoring this pass's own follow-up
+                # recommendation. Deliberately AFTER the
+                # _run_workflows("post_review_result") gate: the increment is
+                # persisted only by the NEXT cycle's _save(), by which point
+                # _resumable_session can no longer replay this result — so a
+                # crash-replay re-derives the spend exactly once instead of
+                # double-counting it. (A non-terminal status or a non-followup
+                # done — the two other ways to reach here — never sets
+                # refileable_followup, so neither spends the cap.)
+                task.followup_reviews_spent += 1
             # still recommends a follow-up (or a non-terminal status): loop runs a
             # fresh review pass on the newly-patched tree, bounded by max_review_cycles
 
@@ -2406,28 +2447,49 @@ class Engine:
                 return True
         return False
 
-    def _record_review_budget_followup(self, task: StoryTask) -> None:
-        """The review loop exhausted its budget on a *finalized, verify-green*
-        story that the pass kept recommending a follow-up for. The work is being
-        committed (not rolled back); preserve the lingering recommendation as a
-        new open deferred-work entry so a later, deliberate review can pick it up,
-        and notify the human. Called immediately before ``_commit`` so the ledger
+    def _record_review_budget_followup(self, task: StoryTask, damped: bool = False) -> None:
+        """A *finalized, verify-green* story that the review pass kept recommending
+        a follow-up for is being committed (not rolled back); preserve the lingering
+        recommendation as a new open deferred-work entry so a later, deliberate
+        review can pick it up. Called immediately before ``_commit`` so the ledger
         edit is squashed into the same commit.
+
+        Two callers, distinguished by ``damped``:
+          * ``damped=False`` — the review loop *exhausted* its ``max_review_cycles``
+            budget while still recommending a follow-up. A noteworthy event: always
+            notify the human.
+          * ``damped=True`` — the follow-up-review damping cap
+            (``limits.max_followup_reviews``) was spent, so the orchestrator
+            force-converged this finalized round instead of burning another cycle.
+            The expected steady state: stay quiet (no ATTENTION notice) unless the
+            re-review cap also fires.
 
         Re-review cap: if this story itself *originated* from such an entry (a
         sweep bundle closing a ``review-budget-followup`` id), don't re-file again
         — commit + notify only, so a second non-convergence reaches a human
-        instead of slowly looping across sweeps."""
+        instead of slowly looping across sweeps. The loud re-review notice fires on
+        both paths (a capped story that still won't converge must reach a human even
+        under damping)."""
         cycles = self.policy.limits.max_review_cycles
+        cap = self.policy.limits.max_followup_reviews
         spec = Path(task.spec_file).name if task.spec_file else task.story_key
         ledger = self.workspace.paths.deferred_work
-        reason = (
-            f"Review budget ({cycles} cycles) was exhausted with the story finalized "
-            f"(status: done, verify green) while the review pass kept recommending an "
-            f"independent follow-up. The work was committed by bmad-loop run "
-            f"{self.state.run_id}; this entry preserves the lingering follow-up "
-            f"recommendation for a deliberate later review."
-        )
+        if damped:
+            reason = (
+                f"The follow-up-review damping cap (limits.max_followup_reviews = {cap}) "
+                f"was spent with the story finalized (status: done, verify green) while "
+                f"the review pass still recommended an independent follow-up. The work "
+                f"was committed by bmad-loop run {self.state.run_id}; this entry "
+                f"preserves the lingering recommendation for a deliberate later review."
+            )
+        else:
+            reason = (
+                f"Review budget ({cycles} cycles) was exhausted with the story finalized "
+                f"(status: done, verify green) while the review pass kept recommending an "
+                f"independent follow-up. The work was committed by bmad-loop run "
+                f"{self.state.run_id}; this entry preserves the lingering follow-up "
+                f"recommendation for a deliberate later review."
+            )
         re_review = False
         if task.dw_ids and ledger.is_file():
             entries = {
@@ -2442,22 +2504,33 @@ class Engine:
             )
         refiled: str | None = None
         if not re_review:
+            tail = "the damping cap was spent" if damped else "the review budget was exhausted"
+            title = f"Follow-up review still recommended for {task.story_key} after {tail}"
             refiled = deferredwork.append_entry(
                 ledger,
-                title=f"Follow-up review still recommended for {task.story_key} "
-                f"after the review budget was exhausted",
-                origin="review-budget-followup",
+                title=title,
+                origin="review-budget-followup",  # verbatim: re-review cap + replay dedupe key on it
                 source_spec=spec,
                 reason=reason,
                 severity="low",
             )
-        self.journal.append(
-            "review-budget-committed",
-            story_key=task.story_key,
-            cycles=cycles,
-            refiled=refiled,
-            re_review_capped=re_review,
-        )
+        if damped:
+            self.journal.append(
+                "review-followup-damped",
+                story_key=task.story_key,
+                cycle=task.review_cycle,
+                cap=cap,
+                refiled=refiled,
+                re_review_capped=re_review,
+            )
+        else:
+            self.journal.append(
+                "review-budget-committed",
+                story_key=task.story_key,
+                cycles=cycles,
+                refiled=refiled,
+                re_review_capped=re_review,
+            )
         note = reason
         if re_review:
             note = (
@@ -2465,12 +2538,17 @@ class Engine:
                 f"still won't converge — a human should review whether the recommended "
                 f"follow-up is real before sweeping it again."
             )
-        gates.notify(
-            self.policy,
-            self.run_dir,
-            f"review budget reached, work committed: {task.story_key}",
-            note,
-        )
+        # Exhaustion always notifies. Damped convergence is the expected steady
+        # state and stays quiet — EXCEPT when the re-review cap fires: a story that
+        # itself originated from a review-budget-followup entry still won't converge
+        # and must reach a human even under damping.
+        if not damped or re_review:
+            gates.notify(
+                self.policy,
+                self.run_dir,
+                f"review budget reached, work committed: {task.story_key}",
+                note,
+            )
 
     def _defer(self, task: StoryTask, reason: str) -> None:
         task.defer_reason = reason

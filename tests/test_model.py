@@ -92,6 +92,17 @@ def test_followup_review_recommended_defaults_false_for_legacy_state():
     assert StoryTask.from_dict(doc).followup_review_recommended is False
 
 
+def test_followup_reviews_spent_round_trips():
+    task = StoryTask(story_key="1-1-a", epic=1, followup_reviews_spent=2)
+    assert StoryTask.from_dict(task.to_dict()).followup_reviews_spent == 2
+
+
+def test_followup_reviews_spent_defaults_zero_for_legacy_state():
+    doc = StoryTask(story_key="1-1-a", epic=1).to_dict()
+    del doc["followup_reviews_spent"]  # state.json from before the field existed
+    assert StoryTask.from_dict(doc).followup_reviews_spent == 0
+
+
 def test_resolved_redrive_round_trips():
     task = StoryTask(story_key="1-1-a", epic=1, resolved_redrive=True)
     assert StoryTask.from_dict(task.to_dict()).resolved_redrive is True

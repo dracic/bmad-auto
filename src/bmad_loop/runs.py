@@ -700,6 +700,7 @@ def rearm_escalation(
     task.phase = Phase.PENDING
     task.attempt = 0
     task.review_cycle = 0
+    task.followup_reviews_spent = 0  # human-resolved re-drive gets a fresh damping budget
     task.defer_reason = None
     task.rearmed = True  # resume-time recovery notice describes a clean rebuild,
     # not a failed attempt (engine._finish_inflight clears it once the rebuild runs)

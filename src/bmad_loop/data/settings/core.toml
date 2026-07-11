@@ -77,6 +77,12 @@ kind = "int"
 minimum = 1
 default_ref = "LimitsPolicy.max_dev_attempts"
 [[section.field]]
+key = "max_followup_reviews"
+kind = "int"
+minimum = 0
+default_ref = "LimitsPolicy.max_followup_reviews"
+description = "additional review rounds granted solely because a finalized (status: done) round still recommended a follow-up; once spent, such a round converges + refiles the recommendation instead of burning another cycle · 0 = never honor a pass's own recommendation"
+[[section.field]]
 key = "session_timeout_min"
 kind = "int"
 minimum = 1
