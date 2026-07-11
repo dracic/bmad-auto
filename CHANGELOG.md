@@ -84,6 +84,15 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **Review leg repairs a finalize-tail death.** A review session that died between writing its
+  terminal `## Auto Run Result` (`Status: done`) and flipping the spec frontmatter off the transient
+  `in-review` marker left the orchestrator re-reviewing already-finished work — a burned review
+  cycle. The review leg now runs the same terminal-status reconcile the dev leg does: when the prose
+  says done and the frontmatter sits at a reconcilable non-terminal status, it advances the spec to
+  `done` and re-folds the frontmatter's `followup_review_recommended` flag (only when present) before
+  the convergence/damping gate reads it. Bookkeeping-only — every deterministic verify gate still
+  runs against real on-disk/git state, so it cannot pass uncompleted work.
+
 - **Claude sessions launch with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` (#109).** Claude Code
   could bias a dev session toward backgrounding its implementation sub-agent despite the
   bmad-dev-auto prompt ban; the session then ended its turn to await a completion notification,

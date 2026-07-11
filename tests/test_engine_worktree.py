@@ -347,9 +347,7 @@ def test_branch_per_run_kept_failure_defers_next_unit_gracefully(project):
     next unit can't mount it. That degrades to a deferral, never a crash."""
     commit_sprint(project, {"1-1-a": "ready-for-dev", "1-2-b": "ready-for-dev"})
     script = _defer_script(project, "1-1-a") + [wt_dev_effect(project, "1-2-b")]
-    engine, _ = make_engine(
-        project, script, policy=wt_policy(branch_per="run", limits=_NO_DAMP)
-    )
+    engine, _ = make_engine(project, script, policy=wt_policy(branch_per="run", limits=_NO_DAMP))
     summary = engine.run()
 
     assert summary.deferred == 2 and summary.done == 0 and not summary.paused

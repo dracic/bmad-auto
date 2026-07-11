@@ -1713,7 +1713,15 @@ class Engine:
             # Convergence = the pass finished `done` and no longer recommends an
             # independent follow-up. A blocked pass is already handled above
             # (decide_review_session PAUSEs on its synthesized CRITICAL).
-            # [Phase 2 inserts: self._reconcile_generic_terminal_status(task, rj)]
+            # A review pass can die between writing terminal prose (## Auto Run
+            # Result: done) and flipping frontmatter off the transient `in-review`
+            # marker. Mirror the dev leg (engine.py:1541): repair the spec BEFORE
+            # reading status/followup below — otherwise the stale `in-review`
+            # frontmatter burns a review cycle re-reviewing already-finished work.
+            # On the generic path this advances `in-review`→`done` and re-folds the
+            # frontmatter's followup flag into `rj` (only when present), so the
+            # convergence/damping gate below sees the finalized state.
+            self._reconcile_generic_terminal_status(task, rj)
             status = str(rj.get("status", "")).strip()
             followup = bool(rj.get("followup_review_recommended", False))
             task.followup_review_recommended = followup  # latest pass wins

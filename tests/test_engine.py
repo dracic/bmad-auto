@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from conftest import (
     _file_exists_cmd,
+    _spec_baseline,
     committing_crash_state,
     dev_effect,
     fault_read_text,
@@ -2124,7 +2125,9 @@ def test_followup_damping_resume_replay_does_not_double_count(project):
     assert crashed.followup_reviews_spent == 0
     assert crashed.sessions[-1].result_json is not None
 
-    resumed, adapter = resume_engine(project, engine, [review_effect(project, "1-1-a", clean=False)])
+    resumed, adapter = resume_engine(
+        project, engine, [review_effect(project, "1-1-a", clean=False)]
+    )
     summary = resumed.run()
 
     assert summary.done == 1 and not summary.crashed
@@ -2139,6 +2142,112 @@ def test_followup_damping_resume_replay_does_not_double_count(project):
         if e.open and "origin: review-budget-followup" in e.body
     ]
     assert len(open_refiled) == 1  # exactly one, even across the crash/replay
+
+
+def _tail_death_review_effect(paths, story_key, *, followup: bool):
+    """A review session that dies between writing terminal prose (## Auto Run
+    Result: done) and flipping the frontmatter off the transient ``in-review``
+    marker. The spec is left at ``in-review`` with the followup flag written but
+    the prose already finalized; the synthesized result the orchestrator sees for
+    such a non-done spec reports the (unflipped) frontmatter status and drops the
+    followup key. Exercises the review-leg terminal-status reconcile."""
+
+    def effect(spec):
+        sp = spec_path(paths, story_key)
+        baseline = _spec_baseline(sp)
+        flag = "true" if followup else "false"
+        sp.write_text(
+            f"---\ntitle: 'test'\ntype: 'feature'\nstatus: 'in-review'\n"
+            f"baseline_revision: '{baseline}'\nfollowup_review_recommended: {flag}\n---\n\n"
+            "## Intent\n\ntest spec\n\n## Auto Run Result\n\n- Status: done\n",
+            encoding="utf-8",
+        )
+        return SessionResult(
+            status="completed",
+            result_json={
+                "workflow": "auto-dev",
+                "story_key": story_key,
+                "spec_file": str(sp),
+                "baseline_commit": baseline,
+                "status": "in-review",  # frontmatter not yet flipped; synth reports it
+                # NO followup_review_recommended key: synth drops it for a non-done spec
+                "escalations": [],
+            },
+        )
+
+    return effect
+
+
+def test_review_leg_reconciles_finalize_tail_death_followup_false(project):
+    """A review session that dies in its finalize tail — terminal prose says done
+    but the frontmatter is stuck at the transient ``in-review`` marker — is repaired
+    by the review leg's terminal-status reconcile (mirroring the dev leg at
+    engine.py:1541). Without it the stale ``in-review`` frontmatter would fail the
+    review-verify gate and burn a review cycle re-reviewing already-finished work.
+    Here the finalized spec no longer recommends a follow-up (frontmatter followup
+    false), so the reconciled ``done`` converges the loop on that first review
+    round: one cycle, spec repaired to done on disk, one spec-status-reconciled
+    (in-review -> done), nothing damped."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, adapter = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), _tail_death_review_effect(project, "1-1-a", followup=False)],
+    )
+    summary = engine.run()
+
+    assert summary.done == 1 and summary.deferred == 0 and not summary.paused
+    task = engine.state.tasks["1-1-a"]
+    assert task.phase == Phase.DONE
+    assert task.review_cycle == 1  # converged on the reconciled first review round
+    assert task.followup_reviews_spent == 0  # followup false -> no grant honored
+    assert [s.role for s in adapter.sessions] == ["dev", "review"]
+    recon = [e for e in engine.journal.entries() if e["kind"] == "spec-status-reconciled"]
+    assert len(recon) == 1 and recon[0]["frm"] == "in-review" and recon[0]["to"] == "done"
+    # the spec on disk was repaired to done
+    assert verify.status_of(read_frontmatter(spec_path(project, "1-1-a"))) == "done"
+    assert "review-followup-damped" not in [e["kind"] for e in engine.journal.entries()]
+
+
+def test_review_leg_reconciles_finalize_tail_death_followup_true(project):
+    """Finalize-tail death on a review pass that still recommends a follow-up: the
+    reconcile advances in-review -> done AND re-attaches the frontmatter's followup
+    flag (folded because the key is present), so the pass is treated as a
+    finalized-but-still-recommending round rather than being re-reviewed from a
+    stale ``in-review``. Under the default damping cap (1) that round spends the
+    grant and loops; a second, clean review then converges normally. Three sessions
+    total, exactly one spec-status-reconciled (only the tail-death round needed
+    repair), and — converging on a clean pass — nothing is damped or refiled."""
+    from bmad_loop import deferredwork
+
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, adapter = make_engine(
+        project,
+        [
+            dev_effect(project, "1-1-a"),
+            _tail_death_review_effect(project, "1-1-a", followup=True),  # spends the grant
+            review_effect(project, "1-1-a", clean=True),  # round 2 converges
+        ],
+    )
+    summary = engine.run()
+
+    assert summary.done == 1 and not summary.paused
+    task = engine.state.tasks["1-1-a"]
+    assert task.phase == Phase.DONE
+    assert task.review_cycle == 2
+    assert task.followup_reviews_spent == 1  # the reconciled followup-true round spent it
+    assert [s.role for s in adapter.sessions] == ["dev", "review", "review"]
+    recon = [e for e in engine.journal.entries() if e["kind"] == "spec-status-reconciled"]
+    assert len(recon) == 1 and recon[0]["frm"] == "in-review" and recon[0]["to"] == "done"
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    # normal early convergence on round 2 — not a damped/exhausted force-converge
+    assert "review-followup-damped" not in kinds and "review-budget-committed" not in kinds
+    ledger = project.deferred_work.read_text() if project.deferred_work.exists() else ""
+    open_refiled = [
+        e
+        for e in deferredwork.parse_ledger(ledger)
+        if e.open and "origin: review-budget-followup" in e.body
+    ]
+    assert not open_refiled  # a clean convergence refiles nothing
 
 
 def test_defer_preserves_deferred_work_additions(project):
