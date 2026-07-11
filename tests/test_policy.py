@@ -280,6 +280,20 @@ def test_workflow_stall_nudges_cap_default_parse_and_template():
         policy.loads("[limits]\nworkflow_stall_nudges_cap = -1\n")
 
 
+def test_max_followup_reviews_default_parse_and_template():
+    import tomllib
+
+    assert policy.loads("").limits.max_followup_reviews == 1  # default: honor one follow-up
+    assert policy.loads("[limits]\nmax_followup_reviews = 0\n").limits.max_followup_reviews == 0
+    assert policy.loads("[limits]\nmax_followup_reviews = 3\n").limits.max_followup_reviews == 3
+    # the emitted template documents the knob at its dataclass default
+    doc = tomllib.loads(policy.POLICY_TEMPLATE)
+    assert doc["limits"]["max_followup_reviews"] == policy.LimitsPolicy.max_followup_reviews
+    # >= 0 validation is a separate check from the neighbors' >= 1 requirement
+    with pytest.raises(policy.PolicyError, match="max_followup_reviews"):
+        policy.loads("[limits]\nmax_followup_reviews = -1\n")
+
+
 def test_cache_read_weight_default_and_override(tmp_path):
     assert policy.load(None).limits.cache_read_weight == 0.1
     p = tmp_path / "policy.toml"
@@ -522,6 +536,7 @@ def test_to_dict_roundtrips_for_snapshot():
     pol = policy.load(None)
     snapshot = pol.to_dict()
     assert snapshot["limits"]["max_review_cycles"] == 3
+    assert snapshot["limits"]["max_followup_reviews"] == 1
 
 
 # ---------------------------------------------------------------------------

@@ -57,6 +57,17 @@ class GatesPolicy:
 class LimitsPolicy:
     max_review_cycles: int = 3
     max_dev_attempts: int = 2
+    # additional review rounds the orchestrator grants *solely* because a
+    # completed round finalized the story (status: done) yet still set
+    # `followup_review_recommended: true`. Once this many such self-recommended
+    # follow-ups have been honored, the next finalized-but-still-recommending
+    # round force-converges instead of burning another cycle: verify → refile the
+    # lingering recommendation to the deferred-work ledger → commit. Damps the
+    # structurally non-convergent step-04 rule (every review pass patches findings
+    # and therefore recommends another pass). max_review_cycles stays the hard
+    # outer bound. 0 = never honor a pass's own follow-up recommendation
+    # (converge + refile on the first finalized round that still recommends one).
+    max_followup_reviews: int = 1
     session_timeout_min: int = 90
     stop_without_result_nudges: int = 1
     # how long a dev session may sit on a result-less Stop — i.e. it ended its
@@ -119,8 +130,11 @@ class ReviewPolicy:
     #       and the story commits without a second review session.
     #   "always" — run the second-opinion review on every story (pre-PR-#2505
     #       behavior). The skill's recommendation flag is recorded but ignored.
-    # Either way the review loop is bounded by limits.max_review_cycles, which is
-    # the oscillation guard for orchestrator-applied follow-up review.
+    # Either way the review loop is bounded by two limits: limits.max_review_cycles
+    # is the hard outer cap on cycles, and limits.max_followup_reviews damps the
+    # structurally non-convergent case — a round that finalizes the story yet keeps
+    # recommending an independent follow-up — by converging + refiling once the
+    # damping grant is spent instead of looping to the outer cap.
     trigger: str = "recommended"
 
 
@@ -531,6 +545,9 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
     limits = LimitsPolicy(
         max_review_cycles=int(limits_d.get("max_review_cycles", LimitsPolicy.max_review_cycles)),
         max_dev_attempts=int(limits_d.get("max_dev_attempts", LimitsPolicy.max_dev_attempts)),
+        max_followup_reviews=int(
+            limits_d.get("max_followup_reviews", LimitsPolicy.max_followup_reviews)
+        ),
         session_timeout_min=int(
             limits_d.get("session_timeout_min", LimitsPolicy.session_timeout_min)
         ),
@@ -549,6 +566,10 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
     )
     if limits.max_review_cycles < 1 or limits.max_dev_attempts < 1:
         raise PolicyError("limits.max_review_cycles and limits.max_dev_attempts must be >= 1")
+    if limits.max_followup_reviews < 0:
+        raise PolicyError(
+            f"limits.max_followup_reviews must be >= 0: got {limits.max_followup_reviews}"
+        )
     if not 0.0 <= limits.cache_read_weight <= 1.0:
         raise PolicyError(
             f"limits.cache_read_weight must be between 0 and 1: got {limits.cache_read_weight}"
@@ -789,6 +810,7 @@ retrospective = "notify"     # never | notify | auto (auto unsupported in v1)
 [limits]
 max_review_cycles = 3
 max_dev_attempts = 2
+max_followup_reviews = 1     # additional review rounds granted solely because a finalized (status: done) round still recommended a follow-up; once spent, such a round converges + refiles the recommendation instead of burning another cycle. 0 = never honor a pass's own recommendation
 session_timeout_min = 90
 stop_without_result_nudges = 1
 dev_stall_grace_s = 600      # grace for a dev session that ended its turn awaiting a background process (e.g. a slow PlayMode/test run) before it is called stalled; each re-invocation resets it. 0 = fail fast on the first result-less Stop
@@ -816,7 +838,9 @@ enabled = true
 #                    `followup_review_recommended: true` (it self-reviews inline
 #                    and flags this when its changes warrant an independent pass).
 #   "always"      -> run the second-opinion review on every story.
-# The loop is bounded by limits.max_review_cycles either way.
+# The loop is bounded by limits.max_review_cycles (hard cap) and damped by
+# limits.max_followup_reviews (a round that finalizes the story yet keeps
+# recommending a follow-up converges + refiles once the grant is spent) either way.
 trigger = "recommended"
 
 [stories]

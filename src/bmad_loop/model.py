@@ -133,6 +133,13 @@ class StoryTask:
     phase: Phase = Phase.PENDING
     attempt: int = 0
     review_cycle: int = 0
+    # count of review rounds granted *solely* because a completed round finalized
+    # the story (status: done) yet still set `followup_review_recommended: true`.
+    # Bounded by limits.max_followup_reviews: once spent, the next such round
+    # force-converges (verify → refile the recommendation to the ledger → commit)
+    # rather than burning another cycle. Reset to 0 by runs.rearm_escalation so a
+    # human-resolved re-drive gets a fresh damping budget. Survives the round-trip.
+    followup_reviews_spent: int = 0
     # set from the bmad-dev-auto session's `followup_review_recommended`
     # frontmatter (PR #2505): when True and review.trigger = "recommended", the
     # orchestrator runs a follow-up review pass (bmad-dev-auto re-invoked on the
@@ -232,6 +239,7 @@ class StoryTask:
             "phase": str(self.phase),
             "attempt": self.attempt,
             "review_cycle": self.review_cycle,
+            "followup_reviews_spent": self.followup_reviews_spent,
             "followup_review_recommended": self.followup_review_recommended,
             "baseline_commit": self.baseline_commit,
             "baseline_untracked": self.baseline_untracked,
@@ -274,6 +282,7 @@ class StoryTask:
             phase=Phase(d["phase"]),
             attempt=int(d.get("attempt", 0)),
             review_cycle=int(d.get("review_cycle", 0)),
+            followup_reviews_spent=int(d.get("followup_reviews_spent", 0)),
             followup_review_recommended=bool(d.get("followup_review_recommended", False)),
             baseline_commit=d.get("baseline_commit"),
             baseline_untracked=(

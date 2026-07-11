@@ -707,6 +707,24 @@ def test_rearm_plain_mode_sets_ready_for_dev_and_clears_stale_latch(tmp_path):
     assert entry["restore"] is False
 
 
+def test_rearm_resets_followup_reviews_spent(tmp_path):
+    """A human-resolved re-drive gets a fresh damping budget: rearm_escalation
+    zeroes followup_reviews_spent alongside review_cycle, so the clean rebuild
+    against the corrected spec can honor a follow-up again."""
+    run_dir, _ = _escalated_run(tmp_path, _SPEC_WITH_ARR)
+    # seed a spent damping budget from the escalated attempt
+    state = load_state(run_dir)
+    state.tasks["1-1-a"].followup_reviews_spent = 3
+    state.tasks["1-1-a"].review_cycle = 2
+    save_state(run_dir, state)
+
+    runs.rearm_escalation(run_dir)
+
+    task = load_state(run_dir).tasks["1-1-a"]
+    assert task.followup_reviews_spent == 0
+    assert task.review_cycle == 0  # reset in lockstep with the counter
+
+
 # --------------------------------------------- #90: abandoned restore-latch residue
 
 

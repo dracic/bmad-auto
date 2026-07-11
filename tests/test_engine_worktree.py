@@ -25,7 +25,7 @@ from bmad_loop.adapters.mock import MockAdapter
 from bmad_loop.engine import Engine
 from bmad_loop.journal import Journal, load_state
 from bmad_loop.model import Phase, RunState, SessionRecord, StoryTask, TokenUsage
-from bmad_loop.policy import GatesPolicy, NotifyPolicy, Policy, ScmPolicy
+from bmad_loop.policy import GatesPolicy, LimitsPolicy, NotifyPolicy, Policy, ScmPolicy
 from bmad_loop.verify import (
     branch_exists,
     current_branch,
@@ -37,11 +37,12 @@ from bmad_loop.verify import (
 QUIET = NotifyPolicy(desktop=False, file=True)
 
 
-def wt_policy(**scm) -> Policy:
+def wt_policy(*, limits: LimitsPolicy | None = None, **scm) -> Policy:
     return Policy(
         gates=GatesPolicy(mode="none"),
         notify=QUIET,
         scm=ScmPolicy(isolation="worktree", **scm),
+        limits=limits if limits is not None else LimitsPolicy(),
     )
 
 
@@ -272,15 +273,25 @@ def test_worktree_squash_merge_linear_history(project):
 
 
 def _defer_script(project, key):
-    """Dev succeeds, then review never converges → plateau defer."""
+    """Dev succeeds, then review never converges → plateau defer. Consumers must
+    pin ``limits=LimitsPolicy(max_followup_reviews=99)`` so the default damping cap
+    (1) doesn't force-converge round 2 — this script tests the exhaustion/defer
+    plateau, not damping."""
     return [wt_dev_effect(project, key)] + [
         wt_review_effect(project, key, clean=False, patched=1) for _ in range(3)
     ]
 
 
+# damping pinned high so _defer_script's 3 non-clean rounds reach the exhaustion
+# plateau instead of force-converging at the cap
+_NO_DAMP = LimitsPolicy(max_followup_reviews=99)
+
+
 def test_worktree_defer_keeps_failed_unit(project):
     commit_sprint(project, {"1-1-a": "ready-for-dev"})
-    engine, _ = make_engine(project, _defer_script(project, "1-1-a"))
+    engine, _ = make_engine(
+        project, _defer_script(project, "1-1-a"), policy=wt_policy(limits=_NO_DAMP)
+    )
     summary = engine.run()
 
     assert summary.deferred == 1 and summary.done == 0 and not summary.paused
@@ -302,7 +313,9 @@ def test_worktree_defer_keeps_failed_unit(project):
 def test_worktree_defer_without_keep_drops_worktree_but_saves_patch(project):
     commit_sprint(project, {"1-1-a": "ready-for-dev"})
     engine, _ = make_engine(
-        project, _defer_script(project, "1-1-a"), policy=wt_policy(keep_failed=False)
+        project,
+        _defer_script(project, "1-1-a"),
+        policy=wt_policy(keep_failed=False, limits=_NO_DAMP),
     )
     summary = engine.run()
 
@@ -321,7 +334,7 @@ def test_worktree_defer_then_next_story_succeeds(project):
         wt_dev_effect(project, "1-2-b"),
         wt_review_effect(project, "1-2-b", clean=True),
     ]
-    engine, _ = make_engine(project, script)
+    engine, _ = make_engine(project, script, policy=wt_policy(limits=_NO_DAMP))
     summary = engine.run()
 
     assert summary.deferred == 1 and summary.done == 1
@@ -334,12 +347,48 @@ def test_branch_per_run_kept_failure_defers_next_unit_gracefully(project):
     next unit can't mount it. That degrades to a deferral, never a crash."""
     commit_sprint(project, {"1-1-a": "ready-for-dev", "1-2-b": "ready-for-dev"})
     script = _defer_script(project, "1-1-a") + [wt_dev_effect(project, "1-2-b")]
-    engine, _ = make_engine(project, script, policy=wt_policy(branch_per="run"))
+    engine, _ = make_engine(
+        project, script, policy=wt_policy(branch_per="run", limits=_NO_DAMP)
+    )
     summary = engine.run()
 
     assert summary.deferred == 2 and summary.done == 0 and not summary.paused
     assert "could not open worktree" in engine.state.tasks["1-2-b"].defer_reason
     assert "worktree-open-failed" in journal_kinds(engine)
+
+
+def test_worktree_followup_damped_commits_and_integrates(project):
+    """Damping fires the same in worktree isolation (default cap 1, no _isolated
+    guard): a finalized unit whose review keeps recommending a follow-up converges
+    after one honored round, the work MERGES into the main repo, and the refiled
+    follow-up lands in the MAIN repo's ledger — not stranded inside the discarded
+    unit worktree. Exempting isolation would leave isolated runs non-convergent AND
+    deferred (strictly worse), which this locks out."""
+    from bmad_loop import deferredwork
+
+    commit_sprint(project, {"1-1-a": "ready-for-dev"})
+    script = [wt_dev_effect(project, "1-1-a")] + [
+        wt_review_effect(project, "1-1-a", clean=False) for _ in range(3)
+    ]
+    engine, _ = make_engine(project, script)  # default wt_policy() → cap 1
+    summary = engine.run()
+
+    assert summary.done == 1 and summary.deferred == 0 and not summary.paused
+    task = engine.state.tasks["1-1-a"]
+    assert task.phase == Phase.DONE
+    assert task.review_cycle == 2 and task.followup_reviews_spent == 1
+    # the unit's work merged into the main repo (target branch checkout)
+    assert "change for 1-1-a" in (project.project / "src.txt").read_text()
+    kinds = journal_kinds(engine)
+    assert "review-followup-damped" in kinds and "unit-merged" in kinds
+    assert "story-deferred" not in kinds
+    # the refiled follow-up is in the MAIN repo ledger, integrated from the worktree
+    open_refiled = [
+        e
+        for e in deferredwork.parse_ledger(project.deferred_work.read_text(encoding="utf-8"))
+        if e.open and "origin: review-budget-followup" in e.body
+    ]
+    assert len(open_refiled) == 1
 
 
 # ----------------------------------------------------------------- configured target

@@ -1701,10 +1701,18 @@ def test_sweep_bundle_budget_exhausted_commits_and_refiles(project):
         ["DW-1"],
         bundles=[{"name": "fix-it", "dw_ids": ["DW-1"], "intent": "fix it"}],
     )
+    # pin the damping cap high so this exercises the max_review_cycles exhaustion
+    # path (the damped force-converge has its own sweep test below).
     engine, _ = make_sweep(
         project,
         [triage_effect(plan), bundle_dev_effect(project, "fix-it", ["DW-1"])]
         + [bundle_review_effect(project, "fix-it", clean=False) for _ in range(3)],
+        policy=Policy(
+            gates=GatesPolicy(mode="none"),
+            notify=QUIET,
+            scm=ScmPolicy(rollback_on_failure=True),
+            limits=LimitsPolicy(max_followup_reviews=99),
+        ),
     )
     summary = engine.run()
 
@@ -1735,6 +1743,84 @@ def test_sweep_bundle_budget_followup_not_refiled_twice(project):
         ["DW-1"],
         bundles=[{"name": "fix-it", "dw_ids": ["DW-1"], "intent": "fix it"}],
     )
+    # pin the damping cap high so this exercises the max_review_cycles exhaustion
+    # re-review cap (the damped re-review cap has its own sweep test below).
+    engine, _ = make_sweep(
+        project,
+        [triage_effect(plan), bundle_dev_effect(project, "fix-it", ["DW-1"])]
+        + [bundle_review_effect(project, "fix-it", clean=False) for _ in range(3)],
+        policy=Policy(
+            gates=GatesPolicy(mode="none"),
+            notify=QUIET,
+            scm=ScmPolicy(rollback_on_failure=True),
+            limits=LimitsPolicy(max_followup_reviews=99),
+        ),
+    )
+    summary = engine.run()
+
+    assert summary.deferred == 0 and not summary.paused
+    assert engine.state.tasks["dw-fix-it"].phase == Phase.DONE
+    entries = ledger_entries(project)
+    assert entries["DW-1"].status.startswith("done")  # the worked entry still closes
+    open_followups = [
+        e for e in entries.values() if e.open and "origin: review-budget-followup" in e.body
+    ]
+    assert open_followups == []  # no second follow-up entry created
+    capped = [e for e in engine.journal.entries() if e["kind"] == "review-budget-committed"]
+    assert len(capped) == 1 and capped[0]["re_review_capped"] is True
+
+
+def test_sweep_bundle_followup_damped_commits_and_refiles(project):
+    """Default damping cap (1): a bundle whose review keeps recommending a follow-up
+    converges after ONE honored round instead of burning the whole review budget.
+    The lingering follow-up is re-filed once, the work is committed, and — the
+    steady state — the damped converge stays quiet (no review-budget ATTENTION)."""
+    write_ledger(project, {"DW-1": "open"})
+    plan = triage_result(
+        ["DW-1"],
+        bundles=[{"name": "fix-it", "dw_ids": ["DW-1"], "intent": "fix it"}],
+    )
+    engine, _ = make_sweep(
+        project,
+        [triage_effect(plan), bundle_dev_effect(project, "fix-it", ["DW-1"])]
+        + [bundle_review_effect(project, "fix-it", clean=False) for _ in range(3)],
+    )
+    summary = engine.run()
+
+    assert summary.deferred == 0 and not summary.paused
+    task = engine.state.tasks["dw-fix-it"]
+    assert task.phase == Phase.DONE
+    assert task.review_cycle == 2  # converged after one honored follow-up (3rd review unused)
+    assert task.followup_reviews_spent == 1
+    entries = ledger_entries(project)
+    assert entries["DW-1"].status.startswith("done")  # the worked item closed
+    refiled = [e for e in entries.values() if e.open and "origin: review-budget-followup" in e.body]
+    assert len(refiled) == 1
+    kinds = {e["kind"] for e in engine.journal.entries()}
+    assert "review-followup-damped" in kinds
+    assert "review-budget-committed" not in kinds and "story-deferred" not in kinds
+    attention = engine.run_dir / "ATTENTION"
+    assert not attention.exists() or "review budget reached" not in attention.read_text()
+
+
+def test_sweep_bundle_damped_re_review_capped_notifies_not_refiles(project):
+    """Re-review cap survives damping: when a bundle itself closes a
+    `review-budget-followup` entry and still won't converge, the damped force-
+    converge commits but does NOT re-file again — and, unlike an ordinary quiet
+    damped converge, it raises an ATTENTION notice so a human sees the repeat."""
+    ledger = (
+        "# Deferred Work\n\n"
+        "### DW-1: follow-up still recommended for dw-prior\n"
+        "origin: review-budget-followup\nsource_spec: `spec-dw-fix-it.md`\n"
+        "severity: low\nreason: a prior budget exhaustion.\nstatus: open\n"
+    )
+    project.deferred_work.write_text(ledger, encoding="utf-8")
+    git(project.project, "add", "-A")
+    git(project.project, "commit", "-q", "-m", "ledger")
+    plan = triage_result(
+        ["DW-1"],
+        bundles=[{"name": "fix-it", "dw_ids": ["DW-1"], "intent": "fix it"}],
+    )
     engine, _ = make_sweep(
         project,
         [triage_effect(plan), bundle_dev_effect(project, "fix-it", ["DW-1"])]
@@ -1750,8 +1836,10 @@ def test_sweep_bundle_budget_followup_not_refiled_twice(project):
         e for e in entries.values() if e.open and "origin: review-budget-followup" in e.body
     ]
     assert open_followups == []  # no second follow-up entry created
-    capped = [e for e in engine.journal.entries() if e["kind"] == "review-budget-committed"]
+    capped = [e for e in engine.journal.entries() if e["kind"] == "review-followup-damped"]
     assert len(capped) == 1 and capped[0]["re_review_capped"] is True
+    # the loud re-review path fires even under damping — a human must see it
+    assert "review budget reached" in (engine.run_dir / "ATTENTION").read_text(encoding="utf-8")
 
 
 # ------------------------------ in-flight bundle recovery on resume (#94)

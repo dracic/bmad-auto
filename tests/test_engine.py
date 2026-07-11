@@ -1821,7 +1821,14 @@ def test_review_loop_converges_within_budget(project):
     )
     summary = engine.run()
     assert summary.done == 1
-    assert engine.state.tasks["1-1-a"].review_cycle == 2
+    task = engine.state.tasks["1-1-a"]
+    assert task.review_cycle == 2
+    # round 1 (clean=False, still recommends) spent one damping grant; round 2
+    # converged on its own (clean=True), so damping never fired — this is normal
+    # early convergence, not a damped force-converge.
+    assert task.followup_reviews_spent == 1
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "review-followup-damped" not in kinds
 
 
 def test_budget_exhausted_finalized_work_commits(project):
@@ -1832,10 +1839,18 @@ def test_budget_exhausted_finalized_work_commits(project):
     from bmad_loop import deferredwork
 
     write_sprint(project, {"1-1-a": "ready-for-dev"})
+    # pin the damping cap high so this test exercises the max_review_cycles
+    # exhaustion path (the damped force-converge has its own tests below).
     engine, _ = make_engine(
         project,
         [dev_effect(project, "1-1-a")]
         + [review_effect(project, "1-1-a", clean=False, patched=1) for _ in range(3)],
+        policy=Policy(
+            gates=GatesPolicy(mode="none"),
+            notify=QUIET,
+            scm=ScmPolicy(rollback_on_failure=True),
+            limits=LimitsPolicy(max_followup_reviews=99),
+        ),
     )
     summary = engine.run()
 
@@ -1916,6 +1931,214 @@ def test_budget_exhausted_failed_review_sessions_defer_not_commit(project):
     assert rev_parse_head(project.project) == task.baseline_commit
     kinds = [e["kind"] for e in engine.journal.entries()]
     assert "story-deferred" in kinds and "review-budget-committed" not in kinds
+
+
+def _damp_policy(max_followup_reviews: int) -> Policy:
+    return Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),
+        limits=LimitsPolicy(max_followup_reviews=max_followup_reviews),
+    )
+
+
+def test_followup_damping_converges_at_cap(project):
+    """Default damping cap (1): a finalized story whose review keeps recommending
+    an independent follow-up converges after honoring exactly ONE self-recommended
+    follow-up. Round 1 spends the grant; round 2 (still recommending) is damped →
+    verify, refile, commit. The 3rd scripted review never runs, and — being the
+    expected steady state — the damped converge stays quiet (no ATTENTION)."""
+    from bmad_loop import deferredwork
+
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, adapter = make_engine(
+        project,
+        [dev_effect(project, "1-1-a")]
+        + [review_effect(project, "1-1-a", clean=False, patched=1) for _ in range(3)],
+    )
+    summary = engine.run()
+
+    assert summary.done == 1 and summary.deferred == 0 and not summary.paused
+    task = engine.state.tasks["1-1-a"]
+    assert task.phase == Phase.DONE
+    assert task.review_cycle == 2  # dev + 2 review rounds; the 3rd scripted review unused
+    assert task.followup_reviews_spent == 1  # exactly one grant honored
+    assert task.commit_sha and task.commit_sha != task.baseline_commit
+    assert "change for 1-1-a" in (project.project / "src.txt").read_text()
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "review-followup-damped" in kinds
+    assert "review-budget-committed" not in kinds  # not the exhaustion path
+    assert "story-deferred" not in kinds
+    # the lingering follow-up is preserved as exactly one open DW entry
+    open_refiled = [
+        e
+        for e in deferredwork.parse_ledger(project.deferred_work.read_text())
+        if e.open and "origin: review-budget-followup" in e.body
+    ]
+    assert len(open_refiled) == 1
+    # damped convergence is the steady state — no review-budget ATTENTION notice
+    # (the always-on run-finished notice is the only thing in the file).
+    attention = engine.run_dir / "ATTENTION"
+    assert not attention.exists() or "review budget reached" not in attention.read_text()
+    # only dev + 2 review sessions ran (3rd scripted review never consumed)
+    assert [s.role for s in adapter.sessions] == ["dev", "review", "review"]
+
+
+def test_followup_damping_cap_zero_converges_immediately(project):
+    """Cap 0: the orchestrator never honors a pass's own follow-up. The first
+    finalized round that still recommends one is damped immediately — verify,
+    refile, commit — after a single review round, with nothing spent."""
+    from bmad_loop import deferredwork
+
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=False)],
+        policy=_damp_policy(0),
+    )
+    summary = engine.run()
+
+    assert summary.done == 1
+    task = engine.state.tasks["1-1-a"]
+    assert task.phase == Phase.DONE
+    assert task.review_cycle == 1  # damped on the very first review round
+    assert task.followup_reviews_spent == 0  # cap 0 grants nothing to spend
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "review-followup-damped" in kinds
+    open_refiled = [
+        e
+        for e in deferredwork.parse_ledger(project.deferred_work.read_text())
+        if e.open and "origin: review-budget-followup" in e.body
+    ]
+    assert len(open_refiled) == 1
+
+
+def test_nonterminal_rounds_do_not_spend_damping_cap(project):
+    """A review round that does NOT finalize the spec (status stays non-terminal)
+    consumes a review cycle but never spends a damping grant — only a finalized
+    round that still recommends its own follow-up does. A later clean round then
+    converges normally with the cap untouched."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(
+        project,
+        [
+            dev_effect(project, "1-1-a"),
+            review_effect(project, "1-1-a", clean=False, finalized=False),
+            review_effect(project, "1-1-a", clean=True),
+        ],
+    )
+    summary = engine.run()
+
+    assert summary.done == 1
+    task = engine.state.tasks["1-1-a"]
+    assert task.review_cycle == 2  # the non-terminal round still consumed a cycle
+    assert task.followup_reviews_spent == 0  # but spent no damping grant
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "review-followup-damped" not in kinds
+
+
+def test_verify_fix_rounds_do_not_spend_damping_cap(project):
+    """A clean review whose patch breaks the verify gate routes to a dev fix
+    session and a fresh review cycle. Those verify-repair cycles are dev work, not
+    honored follow-ups — they never spend the damping cap. Convergence lands with
+    followup_reviews_spent == 0."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    marker = project.project / "fixed.marker"
+
+    def dev_with_marker(spec):
+        marker.write_text("ok\n")
+        return dev_effect(project, "1-1-a")(spec)
+
+    def breaking_review(spec):
+        marker.unlink()  # the review's "patch" broke the verify gate
+        return review_effect(project, "1-1-a", clean=True)(spec)
+
+    def fix(spec):
+        marker.write_text("ok\n")
+        return SessionResult(
+            status="completed", result_json={"workflow": "auto-dev", "escalations": []}
+        )
+
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        verify=VerifyPolicy(commands=(_file_exists_cmd(marker),)),
+    )
+    engine, adapter = make_engine(
+        project,
+        [dev_with_marker, breaking_review, fix, review_effect(project, "1-1-a", clean=True)],
+        policy=policy,
+    )
+    summary = engine.run()
+
+    assert summary.done == 1
+    task = engine.state.tasks["1-1-a"]
+    assert task.review_cycle == 2 and task.attempt == 2
+    assert task.followup_reviews_spent == 0  # verify-repair never spends the cap
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "review-followup-damped" not in kinds
+
+
+def test_followup_damping_resume_replay_does_not_double_count(project):
+    """A host death in the post-session window of the grant-spending review round
+    must not double-count the damping spend on resume. The recorded round-1 result
+    replays (re-deriving the spend), then round 2 damps and converges: the story
+    reaches DONE with followup_reviews_spent == 1 (not 2) and exactly one refiled
+    entry — append_entry's open-dedupe keeps a replayed refile from duplicating.
+    Modeled on test_resume_final_review_cycle_replays_clean_result."""
+    from bmad_loop import deferredwork
+
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    # cap 1, max_review_cycles 2: round 1 spends the grant, round 2 is damped.
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        limits=LimitsPolicy(max_review_cycles=2, max_followup_reviews=1),
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(
+        project,
+        [
+            dev_effect(project, "1-1-a"),
+            review_effect(project, "1-1-a", clean=False),  # round 1: spends the grant
+            review_effect(project, "1-1-a", clean=False),  # round 2 (runs on resume): damped
+        ],
+        policy=policy,
+    )
+    post_sessions = []
+
+    def crashing_emit(stage, *args, **kwargs):
+        if stage == "post_session":
+            post_sessions.append(stage)
+            if len(post_sessions) == 2:  # crash in round 1's review post-session window
+                raise RuntimeError("host died in the post-session window")
+        return original_emit(stage, *args, **kwargs)
+
+    original_emit = engine._emit
+    engine._emit = crashing_emit
+    assert engine.run().crashed
+    crashed = load_state(engine.run_dir).tasks["1-1-a"]
+    assert crashed.phase == Phase.REVIEW_RUNNING
+    # the round-1 spend had not persisted yet (increment is after the workflow gate,
+    # saved only by the next cycle) — so the resume must re-derive it exactly once.
+    assert crashed.followup_reviews_spent == 0
+    assert crashed.sessions[-1].result_json is not None
+
+    resumed, adapter = resume_engine(project, engine, [review_effect(project, "1-1-a", clean=False)])
+    summary = resumed.run()
+
+    assert summary.done == 1 and not summary.crashed
+    final = load_state(resumed.run_dir).tasks["1-1-a"]
+    assert final.phase == Phase.DONE
+    assert final.review_cycle == 2
+    assert final.followup_reviews_spent == 1  # re-derived once, never double-counted
+    assert len(adapter.sessions) == 1  # only round 2 re-ran; round 1 was replayed
+    open_refiled = [
+        e
+        for e in deferredwork.parse_ledger(project.deferred_work.read_text())
+        if e.open and "origin: review-budget-followup" in e.body
+    ]
+    assert len(open_refiled) == 1  # exactly one, even across the crash/replay
 
 
 def test_defer_preserves_deferred_work_additions(project):
