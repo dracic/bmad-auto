@@ -20,6 +20,18 @@ The helper scripts (``unity_ready.py`` / ``unity_setup.py`` / ``unity_teardown.p
 are unchanged; they read the same ``BMAD_LOOP_*`` environment this module injects,
 so the env contract a Unity operator relies on is identical to the engine layer it
 replaces.
+
+A newer helper, ``unity_seed_assets.py``, seeds a **scene auto-save guard** into
+the project (see ``unity_assets/``). Unity-MCP GameObject tools mark scenes dirty
+but never save, so a shared editor's scene sits chronically dirty — the state that
+raises the two run-stalling modal dialogs (scene-changed-on-disk reload, and
+save-before-quit) that freeze the MCP dispatch loop. The guard is seeded *before*
+the Editor's first import in both modes (at ``pre_worktree_setup`` in per_worktree
+mode, ahead of ``unity_setup.py``; at ``pre_ready_gate`` in shared mode, where
+``unity_setup.py`` never runs). Seeding is best-effort — a failure is logged, never
+vetoes — and happens pre-baseline, so ``verify.safe_rollback`` never reclaims it.
+The seeded guard is committed into the consumer project by story-finalize's
+``git add -A`` — intended.
 """
 
 from __future__ import annotations
@@ -36,6 +48,9 @@ EDITOR_MODES = ("shared", "per_worktree")
 # best-effort teardown bound so a hung Editor-quit can't stall the loop for the
 # full readiness budget on every unit (was Engine._ENGINE_TEARDOWN_TIMEOUT).
 _TEARDOWN_TIMEOUT = 120
+# scene-guard seeding is a handful of small file copies; bound it small so a wedged
+# filesystem can't eat into the readiness budget (it never vetoes either way).
+_SEED_TIMEOUT = 60
 
 
 class UnityPlugin(Plugin):
@@ -80,7 +95,13 @@ class UnityPlugin(Plugin):
 
     def on_pre_ready_gate(self, ctx) -> None:
         """Block until the Editor + MCP report ready before a unit runs (both
-        modes). A non-zero exit vetoes (defers) the unit."""
+        modes). A non-zero exit vetoes (defers) the unit.
+
+        In shared mode ``unity_setup.py`` never runs (isolation=none has no
+        per_worktree setup stage), so this is where the scene guard is seeded —
+        before the readiness gate blocks on the live Editor."""
+        if self._editor_mode() == "shared":
+            self._seed_scene_guard(ctx)
         rc, tail = self._run_script("unity_ready.py", ctx, timeout=self._ready_timeout())
         if rc != 0:
             ctx.veto("defer", f"Unity Editor not ready (rc={rc}): {tail}".rstrip())
@@ -90,6 +111,9 @@ class UnityPlugin(Plugin):
         its managed Editor before the agent runs. A failure defers the unit."""
         if self._editor_mode() != "per_worktree":
             return
+        # Seed the scene guard BEFORE unity_setup launches the Editor, so the
+        # Editor's very first import already sees it. Best effort — never vetoes.
+        self._seed_scene_guard(ctx)
         rc, tail = self._run_script("unity_setup.py", ctx, timeout=self._ready_timeout())
         if rc != 0:
             ctx.veto("defer", f"Unity worktree setup failed (rc={rc}): {tail}".rstrip())
@@ -122,6 +146,22 @@ class UnityPlugin(Plugin):
         except (TypeError, ValueError):
             return 600
 
+    def _install_scene_guard(self) -> bool:
+        return bool(self.settings.get("install_scene_guard", True))
+
+    def _seed_scene_guard(self, ctx) -> None:
+        """Seed the scene auto-save guard into the project so a chronically-dirty
+        scene never raises the run-stalling modal dialogs (which freeze the MCP
+        dispatch loop). Skipped when ``install_scene_guard`` is off. Best effort:
+        the seeder never mutates tracked history and a failure is logged, never
+        vetoes — the guard is a convenience, and its absence must not defer a
+        unit."""
+        if not self._install_scene_guard():
+            return
+        rc, tail = self._run_script("unity_seed_assets.py", ctx, timeout=_SEED_TIMEOUT)
+        if rc != 0:
+            sys.stderr.write(f"unity: scene-guard seeding failed (rc={rc}): {tail}".rstrip() + "\n")
+
     def engine_env(self, ctx) -> dict[str, str]:
         """The ``BMAD_LOOP_*`` environment the helper scripts read — identity +
         worktree from the context, the Editor knobs from this plugin's settings,
@@ -143,6 +183,10 @@ class UnityPlugin(Plugin):
                 "BMAD_LOOP_ENGINE_READY_GRACE": str(self.settings.get("ready_grace_sec", -1)),
                 "BMAD_LOOP_UNITY_PATH": str(self.settings.get("unity_path", "")),
                 "BMAD_LOOP_CLEAN_TMP": "1" if self._clean_tmp else "0",
+                "BMAD_LOOP_UNITY_INSTALL_SCENE_GUARD": "1" if self._install_scene_guard() else "0",
+                "BMAD_LOOP_UNITY_SCENE_GUARD_DIR": str(
+                    self.settings.get("scene_guard_dir", "Assets/BmadLoop/Editor")
+                ),
             }
         )
         # Tell the per_worktree setup which agent MCP configs to point at the

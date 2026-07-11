@@ -50,8 +50,32 @@ def test_builtin_unity_plugin_loads():
 
 def test_builtin_unity_plugin_ships_its_scripts():
     scripts = os.listdir(get_plugin("unity").scripts_dir)
-    for name in ("unity_plugin.py", "unity_ready.py", "unity_setup.py", "unity_teardown.py"):
+    for name in (
+        "unity_plugin.py",
+        "unity_ready.py",
+        "unity_setup.py",
+        "unity_teardown.py",
+        "unity_seed_assets.py",
+    ):
         assert name in scripts, name
+
+
+def test_builtin_unity_plugin_ships_scene_guard_payload():
+    """The scene auto-save guard payload (source + asmdef + fixed-GUID metas) ships
+    with the plugin so the seeder can copy it into consumer projects."""
+    payload = os.path.join(get_plugin("unity").scripts_dir, "unity_assets")
+    for name in (
+        "SceneAutoSaveGuard.cs",
+        "SceneAutoSaveGuard.cs.meta",
+        "BmadLoop.Unity.Editor.asmdef",
+        "BmadLoop.Unity.Editor.asmdef.meta",
+    ):
+        assert os.path.isfile(os.path.join(payload, name)), name
+    for name in ("BmadLoop.meta", "Editor.meta"):
+        assert os.path.isfile(os.path.join(payload, "_folders", name)), name
+    # the guard carries a machine-parseable version header (the seeder's contract)
+    with open(os.path.join(payload, "SceneAutoSaveGuard.cs"), encoding="utf-8") as fh:
+        assert "bmad-loop-scene-guard-version:" in fh.read()
 
 
 def test_builtin_unity_plugin_settings_schema():
@@ -63,11 +87,16 @@ def test_builtin_unity_plugin_settings_schema():
         "unity_path",
         "ready_timeout_sec",
         "ready_grace_sec",
+        "install_scene_guard",
+        "scene_guard_dir",
     }
     assert by_key["editor_mode"].type == "select"
     assert by_key["editor_mode"].options == ("shared", "per_worktree")
     assert by_key["editor_mode"].default == "shared"
     assert by_key["ready_timeout_sec"].default == 600
+    assert by_key["install_scene_guard"].type == "bool"
+    assert by_key["install_scene_guard"].default is True
+    assert by_key["scene_guard_dir"].default == "Assets/BmadLoop/Editor"
 
 
 def test_unity_is_trust_gated():
@@ -103,6 +132,8 @@ def _make_unity(settings, scripts_dir):
         "unity_path": "",
         "ready_timeout_sec": 600,
         "ready_grace_sec": -1,
+        "install_scene_guard": True,
+        "scene_guard_dir": "Assets/BmadLoop/Editor",
     }
     full.update(settings)
     return cls(manifest, full)
@@ -203,6 +234,117 @@ def test_engine_env_omits_agents_when_none(tmp_path):
     inst = _make_unity({}, tmp_path)
     env = inst.engine_env(_ctx("pre_ready_gate", tmp_path, agents=()))
     assert "BMAD_LOOP_ENGINE_AGENTS" not in env
+
+
+def test_engine_env_carries_scene_guard_settings(tmp_path):
+    on = _make_unity(
+        {"install_scene_guard": True, "scene_guard_dir": "Assets/Vendor/Editor"}, tmp_path
+    )
+    env = on.engine_env(_ctx("pre_ready_gate", tmp_path))
+    assert env["BMAD_LOOP_UNITY_INSTALL_SCENE_GUARD"] == "1"
+    assert env["BMAD_LOOP_UNITY_SCENE_GUARD_DIR"] == "Assets/Vendor/Editor"
+    off_env = _make_unity({"install_scene_guard": False}, tmp_path).engine_env(
+        _ctx("pre_ready_gate", tmp_path)
+    )
+    assert off_env["BMAD_LOOP_UNITY_INSTALL_SCENE_GUARD"] == "0"
+
+
+# ----------------------------------------- scene-guard seeding wired into the hooks
+
+
+def _real_unity(settings):
+    """A UnityPlugin whose {scripts} dir is the REAL bundled plugin dir, so its
+    hooks run the real unity_seed_assets.py against the ctx worktree."""
+    cls = _unity_plugin_module().UnityPlugin
+    manifest = PluginManifest(
+        name="unity", api_version=1, scripts_dir=get_plugin("unity").scripts_dir
+    )
+    full = {
+        "editor_mode": "shared",
+        "mcp": "ivanmurzak",
+        "unity_path": "",
+        "ready_timeout_sec": 600,
+        "ready_grace_sec": -1,
+        "install_scene_guard": True,
+        "scene_guard_dir": "Assets/BmadLoop/Editor",
+    }
+    full.update(settings)
+    return cls(manifest, full)
+
+
+def _worktree_ctx(stage, worktree):
+    return HookContext(
+        stage,
+        run_id="r",
+        story_key="1-1-a",
+        repo_root=str(worktree),
+        run_dir=str(worktree),
+        worktree=str(worktree),
+    )
+
+
+def test_seed_scene_guard_installs_via_plugin(tmp_path):
+    (tmp_path / "Assets").mkdir()
+    inst = _real_unity({"editor_mode": "per_worktree"})
+    inst._seed_scene_guard(_worktree_ctx("pre_worktree_setup", tmp_path))
+    guard = tmp_path / "Assets" / "BmadLoop" / "Editor" / "SceneAutoSaveGuard.cs"
+    assert guard.is_file()
+    assert "bmad-loop-scene-guard-version:" in guard.read_text()
+
+
+def test_seed_scene_guard_honours_custom_dir_setting(tmp_path):
+    (tmp_path / "Assets").mkdir()
+    inst = _real_unity({"scene_guard_dir": "Assets/Third/Editor"})
+    inst._seed_scene_guard(_worktree_ctx("pre_ready_gate", tmp_path))
+    assert (tmp_path / "Assets" / "Third" / "Editor" / "SceneAutoSaveGuard.cs").is_file()
+
+
+def test_seed_scene_guard_skipped_when_disabled(tmp_path):
+    (tmp_path / "Assets").mkdir()
+    inst = _real_unity({"install_scene_guard": False})
+    inst._seed_scene_guard(_worktree_ctx("pre_ready_gate", tmp_path))
+    assert not (tmp_path / "Assets" / "BmadLoop").exists()
+
+
+def test_seed_scene_guard_never_vetoes_on_failure(tmp_path, monkeypatch):
+    """A seeding failure is logged, never vetoes — the guard is a convenience, not a
+    gate. Point the seeder at a bogus interpreter path so _run_script returns rc!=0."""
+    inst = _real_unity({"editor_mode": "per_worktree"})
+    monkeypatch.setattr(inst, "_run_script", lambda *a, **k: (1, "boom"))
+    ctx = _worktree_ctx("pre_worktree_setup", tmp_path)
+    inst._seed_scene_guard(ctx)  # must not raise, must not veto
+    assert not ctx.vetoed
+
+
+def test_pre_worktree_setup_seeds_before_editor_launch(tmp_path, monkeypatch):
+    """In per_worktree mode the guard is seeded strictly BEFORE unity_setup.py
+    launches the Editor, so the Editor's first import already sees it. A setup
+    failure still vetoes (defers) — the seed does not swallow it."""
+    inst = _real_unity({"editor_mode": "per_worktree"})
+    order = []
+    monkeypatch.setattr(inst, "_seed_scene_guard", lambda ctx: order.append("seed"))
+
+    def fake_run(name, ctx, *, timeout):
+        order.append(name)
+        return (2, "no editor")
+
+    monkeypatch.setattr(inst, "_run_script", fake_run)
+    ctx = _worktree_ctx("pre_worktree_setup", tmp_path)
+    inst.on_pre_worktree_setup(ctx)
+    assert order == ["seed", "unity_setup.py"]  # seed runs first
+    assert ctx.resolved_veto().action == "defer"
+
+
+def test_pre_ready_gate_seeds_only_in_shared_mode(tmp_path, monkeypatch):
+    """The ready gate fires in both modes, but seeding here is a shared-mode-only
+    job (per_worktree already seeded at pre_worktree_setup)."""
+    for mode, expect_seed in (("shared", True), ("per_worktree", False)):
+        inst = _real_unity({"editor_mode": mode})
+        seeded = []
+        monkeypatch.setattr(inst, "_seed_scene_guard", lambda ctx: seeded.append(True))
+        monkeypatch.setattr(inst, "_run_script", lambda *a, **k: (0, ""))
+        inst.on_pre_ready_gate(_worktree_ctx("pre_ready_gate", tmp_path))
+        assert bool(seeded) is expect_seed, mode
 
 
 # --------------------------------------------------- editor_mode↔isolation coupling
