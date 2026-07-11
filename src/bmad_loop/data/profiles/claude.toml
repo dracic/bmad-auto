@@ -22,8 +22,19 @@ seed_files = [
 # page. The classic renderer keeps output in native scrollback, so the capture
 # scrolls normally and the Log tab reconstructs the whole session. This env var
 # overrides any `tui` setting (user/project/local/seeded) per Claude Code docs.
+#
+# Disable background tasks (issue #109): Claude Code can bias a session toward
+# backgrounding Agent/bash work (run_in_background) despite the bmad-dev-auto
+# prompt ban on it. A session that ends its turn to await a background sub-agent
+# yields a result-less Stop — and if the CLI then exits, the in-process sub-agent
+# is stranded mid-implementation with the story stuck in-progress. The var forces
+# every subagent and bash call to run synchronously, which is the behavior the
+# skill contract already requires; bmad-loop has no background-completion
+# re-invocation, so nothing sanctioned is lost. To opt out, copy this profile
+# into .bmad-loop/profiles/ and drop the var.
 [env]
 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1"
+CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1"
 
 [hooks]
 dialect = "claude-settings-json"

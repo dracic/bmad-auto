@@ -72,6 +72,14 @@ breaking changes may land in a minor release.
 
 ### Fixed
 
+- **Claude sessions launch with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` (#109).** Claude Code
+  could bias a dev session toward backgrounding its implementation sub-agent despite the
+  bmad-dev-auto prompt ban; the session then ended its turn to await a completion notification,
+  and a harness exit at that turn boundary stranded the sub-agent with the story stuck
+  `in-progress` → manual-rollback pause. The shipped claude profile now forces subagents and bash
+  to run synchronously — the behavior the skill contract already requires. Opt out with a custom
+  profile in `.bmad-loop/profiles/`.
+
 - **Resume no longer discards a story that already passed its pre-commit gates.** A host death in
   the COMMITTING window (phase persisted before `finalize_commit` ran and the DONE save stamped
   `commit_sha`) matched no resume arm — there is no COMMITTING-keyed session record to replay — and
