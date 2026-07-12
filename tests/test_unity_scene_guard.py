@@ -173,10 +173,46 @@ def test_seed_custom_dir_keys_folder_metas_by_name(tmp_path, monkeypatch):
     assert not (tmp_path / "Assets" / "Vendor.meta").exists()
 
 
+# ------------------------------------------------------------- invalid dirs
+
+
+def test_seed_rejects_absolute_guard_dir(tmp_path, monkeypatch):
+    mod = _load_seeder()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    worktree = tmp_path / "wt"
+    (worktree / "Assets").mkdir(parents=True)
+    _set_env(monkeypatch, worktree, guard_dir=str(outside / "Editor"))
+
+    assert mod.main() == 2  # a real error, not a crash (relative_to would raise)
+    assert not (outside / "Editor").exists()  # nothing written at the absolute target
+
+
+def test_seed_rejects_parent_traversal_guard_dir(tmp_path, monkeypatch):
+    mod = _load_seeder()
+    # the escape target's parent (tmp_path) exists, so an unguarded seeder would
+    # really create escaped/ out there — the mutate-check is meaningful
+    worktree = tmp_path / "wt"
+    (worktree / "Assets").mkdir(parents=True)
+    _set_env(monkeypatch, worktree, guard_dir="Assets/../../escaped/Editor")
+
+    assert mod.main() == 2
+    assert not (tmp_path / "escaped").exists()  # no write outside the worktree
+
+
+def test_seed_rejects_windows_flavored_escapes_on_any_platform(tmp_path, monkeypatch):
+    mod = _load_seeder()
+    (tmp_path / "Assets").mkdir()
+    for evil in ("C:\\evil", "C:evil", "\\evil", "..\\evil"):
+        _set_env(monkeypatch, tmp_path, guard_dir=evil)
+        assert mod.main() == 2, evil
+    assert not (tmp_path / "Assets" / "BmadLoop").exists()  # nothing seeded
+
+
 # ------------------------------------------------------------ version parsing
 
 
-def test_parse_version_tuple_and_missing(tmp_path, monkeypatch):
+def test_parse_version_tuple_and_missing():
     mod = _load_seeder()
     assert mod._parse_version("// bmad-loop-scene-guard-version: 1.2.3\n") == (1, 2, 3)
     assert mod._parse_version("no header here") is None

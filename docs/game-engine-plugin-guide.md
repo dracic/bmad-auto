@@ -271,6 +271,13 @@ That dirty state is what makes the Editor raise:
 2. **"Do you want to save the changes you made…?"** — pops on Editor quit with a
    dirty scene, e.g. when a `per_worktree` Editor is torn down.
 
+> **Clean scenes are not safe from dialog 1.** Live verification on Unity 6.5.2
+> showed the "changed on disk" dialog can pop for a **clean** open scene too — and
+> even after dismissal the Editor could stay hard-wedged. Keeping scenes saved
+> (layer 1) is therefore necessary but **not sufficient** on the rollback path;
+> the quiesce's scene-close (layer 2), which leaves no tracked scene open during
+> the reset, is the real protection there.
+
 ### 1. `SceneAutoSaveGuard` (seeded editor script)
 
 `unity_seed_assets.py` copies an editor-only C# guard —
@@ -281,7 +288,8 @@ mode, at `pre_ready_gate` in shared mode where setup never runs). The guard fixe
 the **root cause**: it debounce-saves any loaded, on-disk scene ~5 s after it goes
 dirty, and on quit it saves pathed scenes (discarding an unsaveable _untitled_
 scene by swapping in a fresh empty one, since saving it would itself pop a "Save
-As" modal). An operator can toggle it live from the Editor's **`BmadLoop` menu**
+As" modal). The quit hook is `EditorApplication.wantsToQuit`; a hard
+`EditorApplication.Exit` bypasses it (along with every other quit handler). An operator can toggle it live from the Editor's **`BmadLoop` menu**
 ("Scene Auto-Save Guard" on/off, "Save Open Scenes Now"); the toggle persists in
 `EditorPrefs`, default **on**.
 
@@ -308,7 +316,9 @@ the Editor is already unresponsive it fails fast and the quiesce is skipped, at 
 cost of one call timeout rather than the whole budget. Every call carries both the
 CLI's own `--timeout` and a subprocess-level kill, and the plugin hard-kills the
 whole helper past `quiesce_timeout_sec` — so a wedged Editor can **never stall the
-rollback**. Disable with `quiesce_on_rollback = false`.
+rollback**. The quiesce logs to stderr and writes no journal events of its own —
+the rollback's journal marker remains `rollback-auto`. Disable with
+`quiesce_on_rollback = false`.
 
 ### 3. Prompt-fact injection (`pre_session`)
 
@@ -338,7 +348,10 @@ argv-scan backstop. Tune with `dialog_probe_interval_sec` and
 > live Linux Editor build and kept broad on purpose; detection is advisory, so a
 > miss degrades to the pre-existing behavior (a human notices the frozen run),
 > never worse. Override `BMAD_LOOP_UNITY_DIALOG_PROBE_CLASS` or the phrase list in a
-> project-local plugin copy if your build differs.
+> project-local plugin copy if your build differs. Detection **is** verified on
+> XWayland — but synthetic input (xdotool/ydotool) is unreliable there, one more
+> reason the probe only reports: dismissing a detected dialog must stay a human
+> action.
 
 ## Platform behavior (Linux fast paths, Windows fallbacks)
 

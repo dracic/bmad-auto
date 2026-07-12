@@ -40,7 +40,7 @@ import os
 import re
 import shutil
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 # The guard's version header line, e.g. "// bmad-loop-scene-guard-version: 1.0.0".
 # The payload's value is the source of truth; a target with an older (or missing)
@@ -54,6 +54,20 @@ _GUARD_CS = "SceneAutoSaveGuard.cs"
 # the set copied into the install dir.
 _FOLDERS_SUBDIR = "_folders"
 _DEFAULT_GUARD_DIR = "Assets/BmadLoop/Editor"
+
+
+def _is_absolute(value: str) -> bool:
+    """True if ``value`` is rooted or drive-qualified in *either* POSIX or Windows
+    terms (mirrors ``bmad_loop.platform_util.is_absolute_path`` — this deployed
+    script is stdlib-only and cannot import core)."""
+    win = PureWindowsPath(value)
+    return PurePosixPath(value).is_absolute() or bool(win.drive or win.root)
+
+
+def _has_parent_ref(value: str) -> bool:
+    """True if ``value`` contains a ``..`` segment in *either* POSIX or Windows
+    terms (mirrors ``bmad_loop.platform_util.has_parent_ref``)."""
+    return ".." in PurePosixPath(value).parts or ".." in PureWindowsPath(value).parts
 
 
 def _truthy(value: str | None, default: bool) -> bool:
@@ -151,11 +165,14 @@ def main() -> int:
     payload_version = _read_version(guard_src)
 
     guard_dir = os.environ.get("BMAD_LOOP_UNITY_SCENE_GUARD_DIR", "").strip() or _DEFAULT_GUARD_DIR
-    target_dir = worktree / guard_dir
     rel = Path(guard_dir)
-    if not rel.parts:
+    # The install dir must stay inside the worktree: an absolute/drive-qualified
+    # path would make _install's relative_to() raise, and a ".." segment would
+    # let the copy escape the project tree.
+    if not rel.parts or _is_absolute(guard_dir) or _has_parent_ref(guard_dir):
         print(f"unity_seed_assets: invalid scene guard dir {guard_dir!r}", file=sys.stderr)
         return 2
+    target_dir = worktree / guard_dir
 
     # Only seed into a project whose asset root is actually checked out. A worktree
     # without it is not (yet) a Unity project, and scattering an Assets/ tree into
