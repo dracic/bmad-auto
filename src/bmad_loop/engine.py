@@ -1845,6 +1845,14 @@ class Engine:
         if not outcome.ok and outcome.fixable and self._fix_phase(task, outcome.reason):
             outcome = self._verify_review(task)
         if not outcome.ok:
+            # same event kind as the review-enabled loop so journal consumers
+            # see the structured env_fault flag on this path too
+            self.journal.append(
+                "review-verify-failed",
+                story_key=task.story_key,
+                reason=outcome.reason,
+                env_fault=outcome.env_fault,
+            )
             if not outcome.retryable:
                 # escalate-grade failure (environment fault, git error): a
                 # defer would just replay it on the next story — pause the run

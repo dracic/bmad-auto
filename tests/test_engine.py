@@ -3763,6 +3763,8 @@ def test_skip_review_env_fault_escalates_not_defers(project):
     assert [s.role for s in adapter.sessions] == ["dev"]  # no fix session either
     assert engine.state.tasks["1-1-a"].phase == Phase.ESCALATED
     assert "rc=126" in engine.state.paused_reason
+    failed = [e for e in engine.journal.entries() if e["kind"] == "review-verify-failed"][-1]
+    assert failed["env_fault"] is True
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="sh env-fault exit codes (cmd reports 9009)")

@@ -295,6 +295,18 @@ def test_verify_commands_missing_binary_is_env_fault(tmp_path):
     assert out.env_fault and "rc=127" in out.reason
 
 
+def test_env_fault_takes_precedence_over_earlier_ordinary_failure(tmp_path):
+    """A mixed run must not classify by the first failure it sees: an env
+    fault later in the command list still escalates — a repair session
+    dispatched for the earlier rc=1 would run in the broken environment."""
+    policy = Policy(verify=VerifyPolicy(commands=("exit 1", "exit 127")))
+    out = verify.verify_commands_outcome(policy, tmp_path)
+    assert not out.ok
+    assert out.env_fault
+    assert not out.retryable and not out.fixable
+    assert "rc=127" in out.reason
+
+
 def test_verify_commands_rc1_stays_fixable_retry(tmp_path):
     """Ordinary failures (tests failing) keep the fixable-retry classification."""
     policy = Policy(verify=VerifyPolicy(commands=("exit 1",)))

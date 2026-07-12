@@ -1432,8 +1432,12 @@ def verify_commands_outcome(policy: Policy, cwd: Path) -> VerifyOutcome:
     """Run the policy's deterministic verify commands. Failures are fixable:
     the captured output is concrete feedback a repair session can act on —
     except environment faults (ENV_FAULT_RCS), which escalate so the run
-    pauses for an environment fix instead of burning story budgets."""
-    for result in run_verify_commands(policy, cwd):
+    pauses for an environment fix instead of burning story budgets. An env
+    fault anywhere in the run wins over earlier ordinary failures: a repair
+    session dispatched for the ordinary failure would still run in the
+    broken environment."""
+    results = run_verify_commands(policy, cwd)
+    for result in results:
         if result.returncode in ENV_FAULT_RCS:
             return VerifyOutcome.escalate(
                 f"verify environment fault (rc={result.returncode}): {result.command}\n"
@@ -1443,6 +1447,7 @@ def verify_commands_outcome(policy: Policy, cwd: Path) -> VerifyOutcome:
                 f"{result.output_tail}",
                 env_fault=True,
             )
+    for result in results:
         if result.returncode != 0:
             return VerifyOutcome.retry(
                 f"verify command failed (rc={result.returncode}): {result.command}\n"
