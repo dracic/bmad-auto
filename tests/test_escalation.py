@@ -46,6 +46,16 @@ def test_noncompleted_session_reescalates_resolved_redrive():
     assert decide_dev(task, crashed, None, POLICY).action == Action.PAUSE
 
 
+def test_env_fault_outcome_pauses_even_with_budget_left():
+    """An environment-fault verify outcome (rc 126/127 → CRITICAL escalate)
+    pauses immediately — the attempt budget is never consulted for it."""
+    task = _task(attempt=1)  # 1 < 2 -> budget remains
+    env_fault = VerifyOutcome.escalate("verify environment fault (rc=127): pint", env_fault=True)
+    decision = decide_dev(task, COMPLETED, env_fault, POLICY)
+    assert decision.action == Action.PAUSE
+    assert "rc=127" in decision.reason
+
+
 def test_review_exhausted_defers_normal_story():
     task = _task(review_cycle=2)  # 2 == max_review_cycles
     crashed = SessionResult(status="crashed")

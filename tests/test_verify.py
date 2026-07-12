@@ -1,6 +1,7 @@
 import dataclasses
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -267,6 +268,50 @@ def test_verify_review_sprint_not_done(project):
     task.spec_file = str(sp)
     out = verify.verify_review(task, project, Policy())
     assert not out.ok and "sprint-status" in out.reason
+
+
+# --------------------------------------------------- verify command exit codes (issue #126)
+
+
+@pytest.mark.parametrize("rc", [126, 127])
+def test_verify_commands_env_fault_rc_escalates(tmp_path, rc):
+    """The shell's environment faults (126 = not executable, 127 = not found)
+    escalate instead of retrying: a repair session cannot fix the environment,
+    so they must never charge the story's attempt budget."""
+    policy = Policy(verify=VerifyPolicy(commands=(f"exit {rc}",)))
+    out = verify.verify_commands_outcome(policy, tmp_path)
+    assert not out.ok
+    assert out.severity == "CRITICAL"
+    assert out.env_fault
+    assert not out.retryable and not out.fixable
+    assert f"rc={rc}" in out.reason
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="cmd reports 9009, not 127")
+def test_verify_commands_missing_binary_is_env_fault(tmp_path):
+    """Realism check: an actual missing command yields sh's 127 → env fault."""
+    policy = Policy(verify=VerifyPolicy(commands=("definitely-not-a-real-cmd-126126",)))
+    out = verify.verify_commands_outcome(policy, tmp_path)
+    assert out.env_fault and "rc=127" in out.reason
+
+
+def test_verify_commands_rc1_stays_fixable_retry(tmp_path):
+    """Ordinary failures (tests failing) keep the fixable-retry classification."""
+    policy = Policy(verify=VerifyPolicy(commands=("exit 1",)))
+    out = verify.verify_commands_outcome(policy, tmp_path)
+    assert not out.ok and out.fixable and out.retryable and not out.env_fault
+
+
+def test_verify_commands_timeout_stays_charged(tmp_path, monkeypatch):
+    """A timeout is plausibly the story's own tests hanging — it keeps the
+    fixable-retry classification, not the env-fault escalate."""
+    monkeypatch.setattr(
+        verify,
+        "run_verify_commands",
+        lambda policy, cwd: [verify.CommandResult("pytest", -1, "timed out")],
+    )
+    out = verify.verify_commands_outcome(Policy(), tmp_path)
+    assert not out.ok and out.fixable and not out.env_fault
 
 
 def make_bundle_task(paths, dw_ids=("DW-1", "DW-2")):

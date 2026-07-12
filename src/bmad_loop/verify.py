@@ -61,6 +61,10 @@ class VerifyOutcome:
     # fixable failures carry concrete evidence (failing command output) that a
     # feedback-driven repair session can act on; non-fixable retries start over
     fixable: bool = False
+    # the failure is the run environment's, not the story's (verify command
+    # not found / not executable): no repair session can fix it and every
+    # story shares the same commands, so it must never charge attempt budgets
+    env_fault: bool = False
 
     @classmethod
     def passed(cls) -> "VerifyOutcome":
@@ -71,8 +75,10 @@ class VerifyOutcome:
         return cls(ok=False, reason=reason, fixable=fixable)
 
     @classmethod
-    def escalate(cls, reason: str, severity: str = "CRITICAL") -> "VerifyOutcome":
-        return cls(ok=False, reason=reason, severity=severity)
+    def escalate(
+        cls, reason: str, severity: str = "CRITICAL", env_fault: bool = False
+    ) -> "VerifyOutcome":
+        return cls(ok=False, reason=reason, severity=severity, env_fault=env_fault)
 
     @property
     def retryable(self) -> bool:
@@ -1393,6 +1399,14 @@ class CommandResult:
     output_tail: str
 
 
+# sh launcher convention (verify commands run shell=True): 126 = command found
+# but not executable, 127 = command not found. Both are environment faults —
+# deterministic for a given tree, unfixable by a repair session (issue #126:
+# seeded worktrees that lost +x burned dev attempts on no-op repairs). Windows
+# cmd signals these as 9009/1 instead, so it keeps the charged behavior.
+ENV_FAULT_RCS = frozenset({126, 127})
+
+
 def run_verify_commands(policy: Policy, cwd: Path) -> list[CommandResult]:
     results = []
     for command in policy.verify.commands:
@@ -1416,8 +1430,19 @@ def run_verify_commands(policy: Policy, cwd: Path) -> list[CommandResult]:
 
 def verify_commands_outcome(policy: Policy, cwd: Path) -> VerifyOutcome:
     """Run the policy's deterministic verify commands. Failures are fixable:
-    the captured output is concrete feedback a repair session can act on."""
+    the captured output is concrete feedback a repair session can act on —
+    except environment faults (ENV_FAULT_RCS), which escalate so the run
+    pauses for an environment fix instead of burning story budgets."""
     for result in run_verify_commands(policy, cwd):
+        if result.returncode in ENV_FAULT_RCS:
+            return VerifyOutcome.escalate(
+                f"verify environment fault (rc={result.returncode}): {result.command}\n"
+                "command not found / not executable — this is the run environment, "
+                "not the story; fix the environment, then re-arm the escalation "
+                "(the attempt budget resets on re-arm)\n"
+                f"{result.output_tail}",
+                env_fault=True,
+            )
         if result.returncode != 0:
             return VerifyOutcome.retry(
                 f"verify command failed (rc={result.returncode}): {result.command}\n"
