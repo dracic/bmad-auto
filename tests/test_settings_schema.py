@@ -290,7 +290,20 @@ def test_unity_plugin_is_trust_gated_and_renders_settings():
     assert unity.trust_needed is True  # has [python] -> enabling grants trust
     assert unity.enabled is False
     keys = [f.key for f in unity.fields]
-    assert keys == ["editor_mode", "mcp", "unity_path", "ready_timeout_sec", "ready_grace_sec"]
+    assert keys == [
+        "editor_mode",
+        "mcp",
+        "unity_path",
+        "ready_timeout_sec",
+        "ready_grace_sec",
+        "install_scene_guard",
+        "scene_guard_dir",
+        "quiesce_on_rollback",
+        "quiesce_timeout_sec",
+        "dialog_probe",
+        "dialog_probe_interval_sec",
+        "dialog_probe_notify",
+    ]
     editor_mode = next(f for f in unity.fields if f.key == "editor_mode")
     assert editor_mode.kind == "select"
     assert editor_mode.options == ("shared", "per_worktree")

@@ -374,14 +374,15 @@ there.
 
 ### Story / unit
 
-| Stage                                              | When                                  | Mutable surface                                    |
-| -------------------------------------------------- | ------------------------------------- | -------------------------------------------------- |
-| `pre_story` / `post_story`                         | around one story                      | veto (`pre_`)                                      |
-| `pre_worktree_setup` / `post_worktree_setup`       | around isolated-worktree provisioning | —                                                  |
-| `pre_ready_gate` / `post_ready_gate`               | around the engine-ready gate          | veto (`pre_`)                                      |
-| `pre_worktree_teardown` / `post_worktree_teardown` | around teardown (in a `finally`)      | **observe-only** — a veto here cannot un-tear-down |
-| `pre_integrate`                                    | before integrating a finished unit    | —                                                  |
-| `pre_merge` / `post_merge`                         | around the local branch merge         | —                                                  |
+| Stage                                              | When                                                                              | Mutable surface                                       |
+| -------------------------------------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `pre_story` / `post_story`                         | around one story                                                                  | veto (`pre_`)                                         |
+| `pre_worktree_setup` / `post_worktree_setup`       | around isolated-worktree provisioning                                             | —                                                     |
+| `pre_ready_gate` / `post_ready_gate`               | around the engine-ready gate                                                      | veto (`pre_`)                                         |
+| `pre_worktree_teardown` / `post_worktree_teardown` | around teardown (in a `finally`)                                                  | **observe-only** — a veto here cannot un-tear-down    |
+| `pre_rollback` / `post_rollback`                   | around a failed attempt's `git reset --hard` (only when a rollback actually runs) | **observe-only** — a veto here cannot block the reset |
+| `pre_integrate`                                    | before integrating a finished unit                                                | —                                                     |
+| `pre_merge` / `post_merge`                         | around the local branch merge                                                     | —                                                     |
 
 ### Dev
 

@@ -90,16 +90,24 @@ def latest_run_dir(project: Path) -> Path | None:
     return candidates[-1] if candidates else None
 
 
+def write_named_pid(pidfile: Path, pid: int) -> None:
+    """Record ``pid`` plus its identity to ``pidfile``, so a later liveness read can
+    tell our process from a stranger that inherited a reused pid (immediate on
+    Windows). One whitespace-delimited line: ``"<pid>"`` (legacy) or
+    ``"<pid> <identity>"``; the identity token is omitted when the platform can't
+    provide one. The parameterized form :func:`write_pid` builds on — reused for the
+    Unity dialog probe's own ``unity-dialog-probe.pid`` handle."""
+    identity = get_process_host().identity(pid)
+    line = f"{pid} {identity}" if identity is not None else str(pid)
+    pidfile.write_text(line, encoding="utf-8")
+
+
 def write_pid(run_dir: Path) -> None:
     """Record the engine pid plus its identity, so a later liveness read can tell
     our engine from a stranger that inherited a reused pid (immediate on Windows).
-    One whitespace-delimited line: ``"<pid>"`` (legacy) or ``"<pid> <identity>"``;
-    the identity token is omitted when the platform can't provide one. Never
-    deleted: a stale pid that reads as gone is the signal a run was interrupted."""
-    pid = os.getpid()
-    identity = get_process_host().identity(pid)
-    line = f"{pid} {identity}" if identity is not None else str(pid)
-    (run_dir / PID_FILE).write_text(line, encoding="utf-8")
+    Never deleted: a stale pid that reads as gone is the signal a run was
+    interrupted."""
+    write_named_pid(run_dir / PID_FILE, os.getpid())
 
 
 def session_name(run_id: str) -> str:
@@ -182,13 +190,20 @@ def read_pid(run_dir: Path) -> int | None:
 
 
 def read_pid_identity(run_dir: Path) -> tuple[int | None, float | None]:
-    """The recorded engine pid and its persisted identity. ``(None, None)`` when the
-    file is missing or the pid is unparseable; identity ``None`` for a legacy
+    """The recorded engine pid and its persisted identity, from ``<run_dir>/engine.pid``.
+    Thin wrapper over :func:`read_named_pid_identity` (which other pid files — the
+    Unity dialog probe's — reuse)."""
+    return read_named_pid_identity(run_dir / PID_FILE)
+
+
+def read_named_pid_identity(pidfile: Path) -> tuple[int | None, float | None]:
+    """The pid and its persisted identity recorded in ``pidfile``. ``(None, None)``
+    when the file is missing or the pid is unparseable; identity ``None`` for a legacy
     pid-only file (callers then degrade to a bare existence check). A malformed
     second token is not legacy: it returns an impossible identity so reuse guards
     fail closed. First token is the pid, an optional second token the identity float."""
     try:
-        tokens = (run_dir / PID_FILE).read_text(encoding="utf-8").split()
+        tokens = pidfile.read_text(encoding="utf-8").split()
     except OSError:
         return None, None
     if not tokens:

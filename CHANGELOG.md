@@ -9,6 +9,19 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **Unity modal-dialog guards (`[plugins.unity]`).** A chronically-dirty Unity scene raises modal
+  Editor dialogs ("scene changed on disk", "save changes before closing") that freeze the MCP
+  dispatch loop and stall the whole run. The bundled Unity plugin now defends in depth: it seeds an
+  editor-only `SceneAutoSaveGuard` into the project (`install_scene_guard`, default on), quiesces
+  the Editor around a failed-attempt rollback so `git reset --hard` can't leave a stale scene open
+  (`quiesce_on_rollback`, default on), and appends the scene-save discipline (from a shipped
+  `unity_facts.md`) to every dev/review prompt so the agent saves at the boundaries that would
+  otherwise trip a modal. As a last-resort observability net, an opt-in **detect-only** probe
+  (`dialog_probe`, default off) watches — via xdotool, X11/Linux only — for those dialogs and
+  _reports_ any it sees (a JSONL record, an `ATTENTION` line, and a best-effort `notify-send`); it
+  never clicks or keys anything, no-ops where there is no X display, and self-reaps when the engine
+  exits (`dialog_probe_interval_sec`, `dialog_probe_notify`).
+
 - **Follow-up-review damping (`limits.max_followup_reviews`, default 1).** Bounds how many extra
   review rounds a story is granted _solely_ because a completed round finalized `status: done` yet
   still set `followup_review_recommended: true`. Once spent, the next such round force-converges —
