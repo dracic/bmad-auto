@@ -3,6 +3,7 @@
 import os
 import re
 import signal
+import sys
 from pathlib import Path
 
 import pytest
@@ -3676,6 +3677,138 @@ def test_verify_commands_never_pass_defers_at_dev(project):
     assert summary.deferred == 1 and summary.done == 0
     assert [s.role for s in adapter.sessions] == ["dev", "dev"]
     assert "Resume the autonomous" in adapter.sessions[1].prompt
+
+
+# --------------------------------------------------- verify env faults (issue #126)
+
+
+def test_verify_env_fault_pauses_dev_without_burning_budget(project):
+    """rc 127 at the dev gate is the run environment's fault, not the story's:
+    the run pauses at the first story instead of spending max_dev_attempts on
+    repair sessions that cannot fix the environment."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        verify=VerifyPolicy(commands=("exit 127",)),
+    )
+    # only one dev session scripted: a repair session must never be requested
+    engine, adapter = make_engine(project, [dev_effect(project, "1-1-a")], policy=policy)
+    summary = engine.run()
+
+    assert summary.paused and summary.escalated == 1 and summary.deferred == 0
+    assert [s.role for s in adapter.sessions] == ["dev"]
+    task = engine.state.tasks["1-1-a"]
+    assert task.phase == Phase.ESCALATED
+    assert task.attempt == 1  # budget untouched beyond the one real session
+    assert engine.state.paused_stage == PAUSE_ESCALATION
+    assert "rc=127" in engine.state.paused_reason
+    decision = [e for e in engine.journal.entries() if e["kind"] == "dev-decision"][-1]
+    assert decision["env_fault"] is True
+
+
+def _self_disarming_script(project, name="check.sh"):
+    """A verify script that passes once, then strips its own exec bit — the
+    next invocation dies rc=126 (the issue's seeded-worktree fault, exactly)."""
+    script = project.project / name
+    script.write_text(f'#!/bin/sh\nchmod 644 "{script}"\nexit 0\n', encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="sh env-fault exit codes (cmd reports 9009)")
+def test_review_verify_env_fault_escalates_instead_of_fix_session(project):
+    """An env fault at the review gate pauses the run — no fix session is
+    dispatched and no review cycles are burned re-verifying a broken environment."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    script = _self_disarming_script(project)
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        verify=VerifyPolicy(commands=(f'"{script}"',)),
+    )
+    engine, adapter = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+        policy=policy,
+    )
+    summary = engine.run()
+
+    assert summary.paused and summary.escalated == 1 and summary.deferred == 0
+    assert [s.role for s in adapter.sessions] == ["dev", "review"]  # no fix session
+    assert engine.state.tasks["1-1-a"].phase == Phase.ESCALATED
+    assert "rc=126" in engine.state.paused_reason
+    failed = [e for e in engine.journal.entries() if e["kind"] == "review-verify-failed"][-1]
+    assert failed["env_fault"] is True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="sh env-fault exit codes (cmd reports 9009)")
+def test_skip_review_env_fault_escalates_not_defers(project):
+    """review.enabled = false: an env fault at the commit gates pauses the run
+    instead of deferring the story as if its code were broken."""
+    from bmad_loop.policy import ReviewPolicy
+
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    script = _self_disarming_script(project)
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        review=ReviewPolicy(enabled=False),
+        verify=VerifyPolicy(commands=(f'"{script}"',)),
+    )
+    engine, adapter = make_engine(project, [dev_effect(project, "1-1-a")], policy=policy)
+    summary = engine.run()
+
+    assert summary.paused and summary.escalated == 1 and summary.deferred == 0
+    assert [s.role for s in adapter.sessions] == ["dev"]  # no fix session either
+    assert engine.state.tasks["1-1-a"].phase == Phase.ESCALATED
+    assert "rc=126" in engine.state.paused_reason
+    failed = [e for e in engine.journal.entries() if e["kind"] == "review-verify-failed"][-1]
+    assert failed["env_fault"] is True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="sh env-fault exit codes (cmd reports 9009)")
+def test_fix_phase_env_fault_escalates_instead_of_looping(project):
+    """An env fault surfacing mid-fix-loop stops the loop — the remaining dev
+    budget is not spent on repair sessions against an unfixable environment."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    marker = project.project / "fixed.marker"
+    script = project.project / "check.sh"
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+
+    def dev_with_marker(spec):
+        marker.write_text("ok\n")
+        return dev_effect(project, "1-1-a")(spec)
+
+    def breaking_review(spec):
+        marker.unlink()  # ordinary fixable failure: routes to a fix session
+        return review_effect(project, "1-1-a", clean=True)(spec)
+
+    def env_breaking_fix(spec):
+        marker.write_text("ok\n")
+        script.chmod(0o644)  # the re-verify now dies rc=126 — env fault
+        return SessionResult(
+            status="completed", result_json={"workflow": "auto-dev", "escalations": []}
+        )
+
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        verify=VerifyPolicy(commands=(_file_exists_cmd(marker), f'"{script}"')),
+        limits=LimitsPolicy(max_dev_attempts=3),  # budget left — must not be spent
+    )
+    engine, adapter = make_engine(
+        project, [dev_with_marker, breaking_review, env_breaking_fix], policy=policy
+    )
+    summary = engine.run()
+
+    assert summary.paused and summary.escalated == 1 and summary.deferred == 0
+    assert [s.role for s in adapter.sessions] == ["dev", "review", "dev"]  # one fix, then stop
+    assert engine.state.tasks["1-1-a"].phase == Phase.ESCALATED
+    assert "rc=126" in engine.state.paused_reason
+    fix = [e for e in engine.journal.entries() if e["kind"] == "fix-decision"][-1]
+    assert fix["env_fault"] is True
 
 
 def test_max_stories_limit(project):

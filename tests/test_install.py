@@ -1,5 +1,8 @@
 import json
+import sys
+import zipfile
 
+import pytest
 from conftest import git
 
 from bmad_loop import verify
@@ -8,6 +11,7 @@ from bmad_loop.install import (
     BASE_SKILLS,
     LEGACY_MODULE_SKILLS,
     MODULE_SKILLS,
+    _copy_traversable,
     install_into,
     merge_hooks,
     missing_base_skills,
@@ -788,3 +792,48 @@ def test_provision_worktree_seed_globs_shielded_in_local_exclude(project, tmp_pa
     exclude = (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8").splitlines()
     assert "/.claude/skills/tests-run" in exclude
     assert git(wt, "status", "--short", "--", ".claude/skills/tests-run") == ""
+
+
+# ----------------------------------------------------------------- seed file modes (issue #126)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX exec bits")
+def test_provision_worktree_seed_preserves_exec_bit(tmp_path):
+    """A seeded executable (vendor/bin/*) keeps +x in the worktree — a byte-only
+    copy would strip the mode and the first verify command dies rc=127."""
+    wt, repo = tmp_path / "wt", tmp_path / "repo"
+    tool = repo / "vendor" / "bin" / "tool"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    tool.chmod(0o755)
+
+    provision_worktree(wt, [], repo, seed_files=["vendor/bin/tool"])
+
+    assert (wt / "vendor" / "bin" / "tool").stat().st_mode & 0o111
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX exec bits")
+def test_provision_worktree_seed_globs_preserve_exec_bit(tmp_path):
+    """Exec bits survive the recursive directory walk of a glob-seeded tree."""
+    wt, repo = tmp_path / "wt", tmp_path / "repo"
+    tool = repo / "node_modules" / ".bin" / "eslint"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    tool.chmod(0o755)
+
+    provision_worktree(wt, [], repo, seed_globs=["node_modules/*"])
+
+    assert (wt / "node_modules" / ".bin" / "eslint").stat().st_mode & 0o111
+
+
+def test_copy_traversable_zip_source_copies_content(tmp_path):
+    """The zip-import fallback: a zipfile.Path source has no .stat(), so the
+    copy must stay content-only and not crash (the docstring's contract)."""
+    zf_path = tmp_path / "pkg.zip"
+    with zipfile.ZipFile(zf_path, "w") as zf:
+        zf.writestr("pkg/skill/SKILL.md", "tool")
+    dst = tmp_path / "out"
+
+    _copy_traversable(zipfile.Path(zf_path, "pkg/"), dst)
+
+    assert (dst / "skill" / "SKILL.md").read_text() == "tool"

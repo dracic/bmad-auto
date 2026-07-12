@@ -330,7 +330,12 @@ def _copy_traversable(src, dst: Path) -> None:
         dst.mkdir(parents=True, exist_ok=True)
         for child in src.iterdir():
             _copy_traversable(child, dst / child.name)
+    elif isinstance(src, Path):
+        # real filesystem source (worktree seeds, non-zip package data): copy2
+        # preserves the mode so a seeded vendor/bin/* keeps +x (issue #126)
+        shutil.copy2(src, dst)
     else:
+        # zip-imported Traversable exposes no stat: content-only copy
         dst.write_bytes(src.read_bytes())
 
 

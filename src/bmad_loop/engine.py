@@ -1585,6 +1585,7 @@ class Engine:
                 session_status=result.status,
                 action=str(decision.action),
                 reason=decision.reason,
+                env_fault=bool(outcome is not None and outcome.env_fault),
             )
             self._save()
             if decision.action == Action.PROCEED:
@@ -1772,7 +1773,13 @@ class Engine:
                     "review-verify-failed",
                     story_key=task.story_key,
                     reason=outcome.reason,
+                    env_fault=outcome.env_fault,
                 )
+                if not outcome.retryable:
+                    # escalate-grade failure (environment fault, git error): a
+                    # repair session cannot fix it and another review cycle
+                    # would replay it — pause the run instead of burning budget
+                    self._escalate(task, outcome.reason)
                 if outcome.fixable and task.review_cycle < self.policy.limits.max_review_cycles:
                     # failing verify commands are dev work, not review work: a
                     # re-review of the same tree cannot make them pass. Repair
@@ -1838,6 +1845,18 @@ class Engine:
         if not outcome.ok and outcome.fixable and self._fix_phase(task, outcome.reason):
             outcome = self._verify_review(task)
         if not outcome.ok:
+            # same event kind as the review-enabled loop so journal consumers
+            # see the structured env_fault flag on this path too
+            self.journal.append(
+                "review-verify-failed",
+                story_key=task.story_key,
+                reason=outcome.reason,
+                env_fault=outcome.env_fault,
+            )
+            if not outcome.retryable:
+                # escalate-grade failure (environment fault, git error): a
+                # defer would just replay it on the next story — pause the run
+                self._escalate(task, outcome.reason)
             self._defer(task, f"verify failed with review disabled: {outcome.reason}")
             return
         self._commit(task)
@@ -2451,7 +2470,13 @@ class Engine:
                 attempt=task.attempt,
                 session_status=result.status,
                 ok=ok,
+                env_fault=bool(outcome is not None and outcome.env_fault),
             )
+            if outcome is not None and not outcome.ok and not outcome.retryable:
+                # escalate-grade failure (environment fault): another repair
+                # session cannot fix the run environment — stop spending the
+                # dev budget and pause for a human instead
+                self._escalate(task, outcome.reason)
             self._save()
             if ok:
                 return True
