@@ -196,7 +196,7 @@ def test_pre_script_execute_carries_newscene_csharp(tmp_path, monkeypatch):
     seen = {}
 
     def capture(cmd):
-        seen["code"] = _input_of(cmd)["code"]
+        seen["input"] = _input_of(cmd)
         return _FakeProc(0, "ok")
 
     _stub_cli(
@@ -206,9 +206,15 @@ def test_pre_script_execute_carries_newscene_csharp(tmp_path, monkeypatch):
     )
 
     assert mod.main() == 0
+    # The IvanMurzak script-execute schema requires csharpCode (+ className/methodName);
+    # sending a bare "code" key makes the call fail silently and the modal-avoidance no-op.
+    assert "code" not in seen["input"]
     assert (
-        "EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single)" in seen["code"]
+        "EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single)"
+        in seen["input"]["csharpCode"]
     )
+    assert seen["input"]["className"] == "BmadQuiesce"
+    assert seen["input"]["methodName"] == "Main"
 
 
 # ----------------------------------------------------------------- post phase

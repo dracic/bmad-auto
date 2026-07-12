@@ -139,7 +139,7 @@ def _parse_opened_scenes(output: str) -> list[str]:
     return _scene_names_from(data)
 
 
-_NAME_KEYS = ("openedSceneName", "sceneName", "name", "path")
+_NAME_KEYS = ("openedSceneName", "sceneName", "name", "Name", "path")
 _LIST_KEYS = ("scenes", "openedScenes", "result", "data", "value")
 
 
@@ -193,7 +193,9 @@ def _quiesce_pre(cli: str) -> int:
     _run_tool(
         cli,
         "script-execute",
-        input_json=json.dumps({"code": _QUIESCE_CSHARP}),
+        input_json=json.dumps(
+            {"csharpCode": _QUIESCE_CSHARP, "className": "BmadQuiesce", "methodName": "Main"}
+        ),
         timeout_ms=call_ms,
     )
     return 0
