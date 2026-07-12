@@ -211,16 +211,28 @@ module (see the [authoring guide](plugin-authoring-guide.md#in-process-hooks)).
 
 The canonical example lives at `src/bmad_loop/data/plugins/unity/`:
 
-- `plugin.toml` — a `[python]` module + five `[[settings]]` (`editor_mode`, `mcp`,
-  `unity_path`, `ready_timeout_sec`, `ready_grace_sec`) + `seed_globs =
-[".claude/skills/*"]`.
+- `plugin.toml` — a `[python]` module + twelve `[[settings]]` (`editor_mode`, `mcp`,
+  `unity_path`, `ready_timeout_sec`, `ready_grace_sec`, plus the modal-dialog knobs
+  `install_scene_guard`, `scene_guard_dir`, `quiesce_on_rollback`,
+  `quiesce_timeout_sec`, `dialog_probe`, `dialog_probe_interval_sec`,
+  `dialog_probe_notify`) + `seed_globs = [".claude/skills/*"]`.
 - `unity_plugin.py` — the in-process brain: the readiness gate
   (`on_pre_ready_gate`), `per_worktree` Editor setup/teardown, MCP agent routing,
-  Library priming, and the `editor_mode`↔`scm.isolation` coupling validation.
+  Library priming, the `editor_mode`↔`scm.isolation` coupling validation, and the
+  modal-dialog defense (scene-guard seeding, rollback quiesce, prompt-fact
+  injection, and the detached detect-only probe — see the next section).
 - `unity_ready.py` — readiness gate script (branches on `BMAD_LOOP_ENGINE_MCP`).
 - `unity_setup.py` — `per_worktree` Library priming, `.mcp.json` write, Custom-mode
   pin, and Editor launch.
-- `unity_teardown.py` — Editor quit + MCP-server reap + symlink-Library cleanup.
+- `unity_teardown.py` — Editor quit + MCP-server reap + symlink-Library cleanup +
+  dialog-probe reap.
+- `unity_seed_assets.py` + `unity_assets/` — seed the `SceneAutoSaveGuard` editor
+  script (with fixed-GUID `.meta` files) into the project.
+- `unity_quiesce.py` — save + close open scenes before a rollback's `git reset
+--hard`, refresh assets after.
+- `unity_facts.md` — the scene-save discipline appended to every dev/review prompt.
+- `unity_dialog_probe.py` — the detached, detect-only modal-dialog watcher (X11
+  only, opt-in).
 
 > **Tuning long PlayMode dev sessions.** The readiness knobs above
 > (`ready_timeout_sec` / `ready_grace_sec`) gate Editor _startup_, not dev-session
@@ -235,6 +247,98 @@ Each script's module docstring documents every env knob it reads — the
 authoritative source if a default ever changes. The [Game Engine MCP guide](game-engine-mcp-guide.md)
 distills those into a single reference table and explains the IvanMurzak vs
 CoplayDev differences.
+
+## Preventing Editor modal-dialog stalls (Unity)
+
+A live Unity Editor can raise a **modal dialog** — a window that blocks
+`EditorApplication.update`, the pump the Unity-MCP plugin uses to dispatch every
+tool call. While it is up, all MCP calls time out and the run wedges. The bundled
+Unity plugin defends against the two that a bmad-loop run can trip, **in depth**,
+so no single failure lets one appear. All four layers are best-effort and none can
+block or veto the run.
+
+### The two dialogs, and why they open
+
+The **root cause** is that Unity-MCP GameObject tools
+(`com.ivanmurzak.unity.mcp`) call `MarkSceneDirty` but **never save**, so a
+project driven by the shared Editor accumulates a chronically **dirty** open scene.
+That dirty state is what makes the Editor raise:
+
+1. **"Scene '…' has been changed on disk. Reload the scene?"** — pops when git or
+   an agent rewrites the open scene's `.unity` file underneath the Editor. A
+   failed-attempt rollback does exactly this: `git reset --hard` rewrites the
+   tracked scene file the Editor still holds dirty in memory.
+2. **"Do you want to save the changes you made…?"** — pops on Editor quit with a
+   dirty scene, e.g. when a `per_worktree` Editor is torn down.
+
+### 1. `SceneAutoSaveGuard` (seeded editor script)
+
+`unity_seed_assets.py` copies an editor-only C# guard —
+`Assets/BmadLoop/Editor/SceneAutoSaveGuard.cs` plus its asmdef, with
+pre-generated fixed-GUID `.meta` files — into the project, so the Editor's very
+first import already sees it (seeded at `pre_worktree_setup` in `per_worktree`
+mode, at `pre_ready_gate` in shared mode where setup never runs). The guard fixes
+the **root cause**: it debounce-saves any loaded, on-disk scene ~5 s after it goes
+dirty, and on quit it saves pathed scenes (discarding an unsaveable _untitled_
+scene by swapping in a fresh empty one, since saving it would itself pop a "Save
+As" modal). An operator can toggle it live from the Editor's **`BmadLoop` menu**
+("Scene Auto-Save Guard" on/off, "Save Open Scenes Now"); the toggle persists in
+`EditorPrefs`, default **on**.
+
+Seeding is idempotent + version-aware (a `bmad-loop-scene-guard-version` header
+gates reinstall), never rewrites a file it didn't ship, and a missing `Assets/`
+tree is a graceful skip. Because it happens **pre-baseline**, the run's rollback
+never treats the guard as a created-this-unit file and never reclaims it — and
+**story-finalize's `git add -A` commits the seeded guard into the consumer
+project**. That is intended: the guard travels with the repo, so any Editor that
+later opens the project is protected. Disable with `install_scene_guard = false`;
+relocate with `scene_guard_dir`.
+
+### 2. Rollback quiesce (`pre_rollback` / `post_rollback`)
+
+The seeded guard cannot help a scene that goes dirty _during_ a failed attempt
+that is about to be rolled back, so the plugin also **quiesces the Editor around
+the reset**. At `pre_rollback` (before `verify.safe_rollback` runs `git reset
+--hard`) `unity_quiesce.py` saves every open scene, then opens a fresh empty
+untitled scene so **no tracked `.unity` file is open** when the reset rewrites it —
+closing the "changed on disk" dialog's window before it can open. At
+`post_rollback` it refreshes assets so the Editor drops its stale in-memory copies
+and re-imports the reverted tree. The first call doubles as a **wedge probe**: if
+the Editor is already unresponsive it fails fast and the quiesce is skipped, at the
+cost of one call timeout rather than the whole budget. Every call carries both the
+CLI's own `--timeout` and a subprocess-level kill, and the plugin hard-kills the
+whole helper past `quiesce_timeout_sec` — so a wedged Editor can **never stall the
+rollback**. Disable with `quiesce_on_rollback = false`.
+
+### 3. Prompt-fact injection (`pre_session`)
+
+At `pre_session` the plugin appends the scene-save discipline (shipped as
+`unity_facts.md`) to every non-empty dev/review prompt, so the agent itself saves
+dirty scenes at the boundaries that would otherwise trip a modal — a prompt-only
+nudge that complements the automatic guard. A project-local plugin-dir copy of
+`unity_facts.md` overrides the shipped text.
+
+### 4. Detect-only dialog probe (opt-in, `dialog_probe`, default off)
+
+The last-resort **observability** net for a modal the first three layers didn't
+prevent. When `dialog_probe = true`, the plugin launches a detached
+`unity_dialog_probe.py` (shared mode: at `pre_run`; `per_worktree`: per unit at
+`pre_worktree_setup`) that polls **xdotool** for a visible Unity-owned window whose
+title matches a known dialog phrase and, on a fresh detection, **reports it and
+nothing more** — a JSONL record (`<run_dir>/unity-dialog-probe.jsonl`), an
+`ATTENTION` line, and a best-effort `notify-send`. **It never clicks, keys, or
+closes any window**; clicking a Unity dialog blind could discard work. It is
+**X11/Linux only** (a no-op where `DISPLAY` is unset or `xdotool` is absent, so
+Windows/macOS fall straight through), self-reaps when the engine pid dies, and is
+reaped at `post_run` / worktree teardown via a pid-file handle plus a `/proc`
+argv-scan backstop. Tune with `dialog_probe_interval_sec` and
+`dialog_probe_notify`.
+
+> The exact dialog titles and the `Unity` window class are **unverified** against a
+> live Linux Editor build and kept broad on purpose; detection is advisory, so a
+> miss degrades to the pre-existing behavior (a human notices the frozen run),
+> never worse. Override `BMAD_LOOP_UNITY_DIALOG_PROBE_CLASS` or the phrase list in a
+> project-local plugin copy if your build differs.
 
 ## Platform behavior (Linux fast paths, Windows fallbacks)
 
