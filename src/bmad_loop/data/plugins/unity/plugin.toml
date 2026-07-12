@@ -43,6 +43,9 @@ seed_globs = [".claude/skills/*"]
 # quiesces the Editor around a failed-attempt rollback (pre_rollback /
 # post_rollback) so a git reset --hard can't leave a shared Editor showing a
 # run-freezing scene-changed-on-disk modal — best effort, never blocks the reset.
+# On pre_session it appends the scene-save discipline (unity_facts.md) to every
+# dev/review prompt, and (when dialog_probe is on) it launches + reaps a detached,
+# DETECT-ONLY modal-dialog probe (pre_run / post_run / pre_worktree_setup).
 [python]
 module = "unity_plugin.py"
 class = "UnityPlugin"
@@ -113,3 +116,25 @@ default = 60
 min = 1
 label = "Rollback quiesce timeout (sec)"
 help = "overall budget for the pre/post-rollback quiesce helper; the loop hard-kills it past this so a wedged Editor can never stall a rollback"
+
+[[settings]]
+key = "dialog_probe"
+type = "bool"
+default = false
+label = "Detect-only modal-dialog probe"
+help = "launch a detached, DETECT-ONLY probe (unity_dialog_probe.py) that watches — via xdotool, X11/Linux only — for the run-freezing Unity modal dialogs and REPORTS them (JSONL + ATTENTION + notify-send). It never clicks or keys anything; it is the last-resort observability net for a modal the scene guard + prompt facts did not prevent. No-op where DISPLAY is unset or xdotool is absent (Windows/macOS out of scope). Off by default."
+
+[[settings]]
+key = "dialog_probe_interval_sec"
+type = "int"
+default = 5
+min = 1
+label = "Dialog probe poll interval (sec)"
+help = "how often the dialog probe polls xdotool for a visible Unity modal dialog"
+
+[[settings]]
+key = "dialog_probe_notify"
+type = "bool"
+default = true
+label = "Dialog probe desktop notification"
+help = "on a fresh detection, also fire a best-effort notify-send desktop notification (guarded by shutil.which); the JSONL + ATTENTION records are written regardless"

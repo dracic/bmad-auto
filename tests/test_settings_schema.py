@@ -300,6 +300,9 @@ def test_unity_plugin_is_trust_gated_and_renders_settings():
         "scene_guard_dir",
         "quiesce_on_rollback",
         "quiesce_timeout_sec",
+        "dialog_probe",
+        "dialog_probe_interval_sec",
+        "dialog_probe_notify",
     ]
     editor_mode = next(f for f in unity.fields if f.key == "editor_mode")
     assert editor_mode.kind == "select"

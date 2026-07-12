@@ -43,10 +43,12 @@ PATH_ALLOW = {
     "verify.py",
 }
 
-# The two detach helpers that legitimately request POSIX `start_new_session`.
+# The detach helpers that legitimately request POSIX `start_new_session` (each
+# branches on `sys.platform` for a Windows creationflags fallback).
 DETACH_ALLOW = {
     "platform_util.py",
     "data/plugins/unity/unity_setup.py",
+    "data/plugins/unity/unity_plugin.py",
 }
 
 # `os.kill(pid, 0)` is a read-only existence probe on POSIX but *destructive* on

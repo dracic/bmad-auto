@@ -17,6 +17,15 @@ top of the generic plugin framework:
     Unity-specific branch in the loop;
   * **MCP agent routing** reads ``ctx.agents`` (the dev + review CLIs in the
     worktree) so every agent's MCP config is pointed at the worktree's Editor;
+  * **prompt-fact injection** (``on_pre_session``) appends the Unity scene-save
+    discipline (from the shipped ``unity_facts.md``) to every dev/review session
+    prompt, so the agent saves dirty scenes at the boundaries that would otherwise
+    raise the run-freezing modals — a plugin-only change, no engine edit;
+  * a **detect-only dialog probe** (``on_pre_run`` / ``on_post_run`` /
+    ``on_pre_worktree_setup``) launches a detached ``unity_dialog_probe.py`` that
+    watches (via xdotool, X11 only) for the modal dialogs and *reports* them
+    (JSONL + ATTENTION + notify-send) — it never clicks or keys anything. It is the
+    last-resort observability net for a modal the guard + facts didn't prevent;
   * **editor_mode↔scm.isolation coupling** is validated in ``validate`` at startup
     (it moved out of core ``policy.loads`` — a flat per-key schema can't express a
     cross-section coupling).
@@ -41,15 +50,20 @@ The seeded guard is committed into the consumer project by story-finalize's
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 from bmad_loop.plugins.model import Plugin, PluginError
+from bmad_loop.process_host import get_process_host
 
 # editor modes this plugin supports; the operator picks one via [plugins.unity].
 EDITOR_MODES = ("shared", "per_worktree")
+# the detached detect-only modal-dialog probe + its pid-file reap handle.
+_DIALOG_PROBE_SCRIPT = "unity_dialog_probe.py"
+_DIALOG_PROBE_PID_FILE = "unity-dialog-probe.pid"
 # best-effort teardown bound so a hung Editor-quit can't stall the loop for the
 # full readiness budget on every unit (was Engine._ENGINE_TEARDOWN_TIMEOUT).
 _TEARDOWN_TIMEOUT = 120
@@ -123,6 +137,10 @@ class UnityPlugin(Plugin):
         # Seed the scene guard BEFORE unity_setup launches the Editor, so the
         # Editor's very first import already sees it. Best effort — never vetoes.
         self._seed_scene_guard(ctx)
+        # Launch this unit's detect-only dialog probe (scoped to the worktree path
+        # so teardown's argv scan can find it) before the Editor comes up, so it is
+        # already watching. Best effort — a launch failure never blocks setup.
+        self._start_dialog_probe(ctx, ctx.worktree or "")
         rc, tail = self._run_script("unity_setup.py", ctx, timeout=self._ready_timeout())
         if rc != 0:
             ctx.veto("defer", f"Unity worktree setup failed (rc={rc}): {tail}".rstrip())
@@ -152,12 +170,40 @@ class UnityPlugin(Plugin):
         effort — same never-veto contract as ``on_pre_rollback``."""
         self._quiesce("post", ctx)
 
+    def on_pre_session(self, ctx) -> None:
+        """Append the Unity scene-save discipline to every dev/review session prompt
+        so the agent saves dirty scenes at the boundaries that raise the run-freezing
+        modals. Only the whitelisted ``proposed_prompt`` is mutated, and only when
+        it is non-empty — a fast-path emit with no prompt is left untouched. The
+        facts text ships as ``unity_facts.md`` next to the helper scripts; a
+        project-local plugin-dir copy overrides it (the loader points ``scripts_dir``
+        at the override)."""
+        if not ctx.proposed_prompt:
+            return
+        facts = self._session_facts()
+        if facts:
+            ctx.proposed_prompt = ctx.proposed_prompt + "\n\n" + facts
+
+    def on_pre_run(self, ctx) -> None:
+        """Run start: sweep a stale dialog probe recorded in this run dir (a resume
+        re-enters with the same run dir + a re-stamped engine pid, so a prior probe
+        would otherwise linger until its next self-reap poll), then in shared mode
+        launch a fresh detect-only probe that shadows the live Editor for the whole
+        run. per_worktree launches its probe per unit at ``pre_worktree_setup``."""
+        self._reap_dialog_probe(ctx)
+        if self._editor_mode() == "shared":
+            self._start_dialog_probe(ctx, ctx.repo_root or "")
+
     def on_post_run(self, ctx) -> None:
-        """Run finished cleanly: reclaim the IvanMurzak MCP server's /tmp scratch
-        (downloaded server zips) and truncate its unbounded editor log. Best
-        effort — observe-only, runs once per run in both editor modes, after the
-        loop so it never races an in-flight setup-mcp download. CoplayDev uses a
-        shared server with no per-project /tmp download, so it is skipped."""
+        """Run finished cleanly: reap the shared-mode dialog probe (per_worktree
+        probes are reaped at worktree teardown; the reap is idempotent + mode-
+        agnostic so it is safe here in both modes), then reclaim the IvanMurzak MCP
+        server's /tmp scratch (downloaded server zips) and truncate its unbounded
+        editor log. Best effort — observe-only, runs once per run in both editor
+        modes, after the loop so it never races an in-flight setup-mcp download.
+        CoplayDev uses a shared server with no per-project /tmp download, so the
+        cleanup is skipped."""
+        self._reap_dialog_probe(ctx)
         if not self._clean_tmp:
             return
         if str(self.settings.get("mcp", "ivanmurzak")) != "ivanmurzak":
@@ -214,13 +260,98 @@ class UnityPlugin(Plugin):
         if rc != 0:
             sys.stderr.write(f"unity: scene-guard seeding failed (rc={rc}): {tail}".rstrip() + "\n")
 
+    def _session_facts(self) -> str:
+        """The Unity operating facts appended to every session prompt, read once from
+        the shipped (or project-overridden) ``unity_facts.md``. Cached on the
+        instance; a missing/unreadable file degrades to no injection."""
+        cached = getattr(self, "_facts_text", None)
+        if cached is not None:
+            return cached
+        try:
+            text = (
+                (Path(self.manifest.scripts_dir) / "unity_facts.md")
+                .read_text(encoding="utf-8")
+                .strip()
+            )
+        except OSError:
+            text = ""
+        self._facts_text = text
+        return text
+
+    # ----------------------------------------------------- detect-only dialog probe
+
+    def _dialog_probe(self) -> bool:
+        return bool(self.settings.get("dialog_probe", False))
+
+    def _dialog_probe_interval(self) -> int:
+        try:
+            return max(1, int(self.settings.get("dialog_probe_interval_sec", 5)))
+        except (TypeError, ValueError):
+            return 5
+
+    def _dialog_probe_notify(self) -> bool:
+        return bool(self.settings.get("dialog_probe_notify", True))
+
+    def _probe_pid_path(self, ctx) -> Path | None:
+        return Path(ctx.run_dir) / _DIALOG_PROBE_PID_FILE if ctx.run_dir else None
+
+    def _start_dialog_probe(self, ctx, scan_path: str) -> None:
+        """Launch the detached detect-only dialog probe (only when enabled). Reaps
+        any probe recorded in this run dir first so a re-entry never leaves two
+        running. The probe self-reaps when the engine pid dies, so a leak is bounded
+        regardless. ``scan_path`` (the worktree in per_worktree mode, the repo root
+        in shared) is passed in argv so teardown's argv scan can find the process —
+        its exe basename is ``python``, invisible to the Editor sweep. Best effort:
+        a launch failure is logged, never blocks the caller."""
+        if not self._dialog_probe():
+            return
+        self._reap_dialog_probe(ctx)  # never run two
+        script = Path(self.manifest.scripts_dir) / _DIALOG_PROBE_SCRIPT
+        # detach so the probe outlives this hook (mirrors unity_setup's Editor launch)
+        detach: dict[str, Any] = {"start_new_session": True}  # portability: POSIX detach kwarg
+        if sys.platform == "win32":  # pragma: no cover - probe is X11/Linux-only
+            detach = {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+        try:
+            subprocess.Popen(  # nosec B603 - operator-enabled engine plugin script
+                [sys.executable, str(script), scan_path],
+                cwd=ctx.worktree or ctx.repo_root or None,
+                env=self.engine_env(ctx),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **detach,
+            )
+        except OSError as e:
+            sys.stderr.write(f"unity: dialog-probe launch failed: {e}\n")
+
+    def _reap_dialog_probe(self, ctx) -> None:
+        """Terminate a dialog probe recorded in this run dir's pid file, identity-
+        guarded so a kernel-recycled pid is never signalled. Best effort + idempotent:
+        a missing/stale handle is a no-op. The probe handles SIGTERM by exiting its
+        loop, so a polite terminate suffices; the run-end teardown / self-reap poll
+        are the backstops."""
+        path = self._probe_pid_path(ctx)
+        if path is None:
+            return
+        from bmad_loop import runs  # noqa: PLC0415 - lazy: keep import cost off the hot path
+
+        pid, identity = runs.read_named_pid_identity(path)
+        if pid is not None:
+            host = get_process_host()
+            if host.alive_and_ours(pid, identity):
+                try:
+                    host.terminate(pid)
+                except OSError:
+                    pass
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
     def engine_env(self, ctx) -> dict[str, str]:
         """The ``BMAD_LOOP_*`` environment the helper scripts read — identity +
         worktree from the context, the Editor knobs from this plugin's settings,
         and the MCP agent ids from ``ctx.agents`` (dev + review CLIs). Identical
         to the contract the bespoke ``Engine._run_engine_hook`` used to inject."""
-        import os
-
         worktree = ctx.worktree or ctx.repo_root or ""
         env = dict(os.environ)
         env.update(
@@ -239,6 +370,9 @@ class UnityPlugin(Plugin):
                 "BMAD_LOOP_UNITY_SCENE_GUARD_DIR": str(
                     self.settings.get("scene_guard_dir", "Assets/BmadLoop/Editor")
                 ),
+                "BMAD_LOOP_UNITY_DIALOG_PROBE": "1" if self._dialog_probe() else "0",
+                "BMAD_LOOP_UNITY_DIALOG_PROBE_INTERVAL_SEC": str(self._dialog_probe_interval()),
+                "BMAD_LOOP_UNITY_DIALOG_PROBE_NOTIFY": "1" if self._dialog_probe_notify() else "0",
             }
         )
         # Tell the per_worktree setup which agent MCP configs to point at the
