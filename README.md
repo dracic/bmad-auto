@@ -187,14 +187,14 @@ sprint-status.yaml: 1-2-account-mgmt: ready-for-dev
   │
   ├─ DEV     tmux window: claude "/bmad-dev-auto 1-2-account-mgmt"
   │          bmad-dev-auto: plans a 1.5–4k-token spec, auto-approves it,
-  │          implements, self-reviews inline (Blind + Edge-Case hunters),
+  │          implements, self-reviews inline (parallel review layers),
   │          commits, finalizes spec → done … Stop hook signals the orchestrator
   ├─ VERIFY  spec exists · status done · baseline matches · diff non-empty
   │          · run [verify].commands (pytest, ruff…) — a broken build never
   │          reaches review; a failure spawns a fix session fed the output
   ├─ REVIEW  fresh window: claude "/bmad-dev-auto <done spec>" — re-invoking on a
-  │  (gated) done spec runs a fresh independent step-04 review pass (Blind + Edge-Case
-  │          hunters → triage → auto-apply patches → ledger → defer ambiguity →
+  │  (gated) done spec runs a fresh independent step-04 review pass (parallel review
+  │          layers → triage → auto-apply patches → ledger → defer ambiguity →
   │          commit). Gated on the skill's `followup_review_recommended` flag
   │          (review.trigger = "recommended") or every story ("always"); bounded
   │          loop, default 3 cycles
@@ -339,7 +339,7 @@ file = true                # append the same alerts to the run's ATTENTION file
 
 [review]
 enabled = true             # false = skip the separate review session; the dev pass
-                           # runs quick-dev's own internal triple-review and finalizes to done
+                           # runs bmad-dev-auto's own inline review layers and finalizes to done
 trigger = "recommended"    # when enabled: "recommended" runs the separate review only when
                            # bmad-dev-auto flags followup_review_recommended; "always" = every story
                            # (the loop is bounded by limits.max_review_cycles either way)
@@ -411,7 +411,7 @@ low_frame_rate = false     # true = cap to 15fps + disable animations (= bmad-lo
 
 > In **stories mode** the `stories.yaml` list is flat — there are no epics — so the default `per-epic` gate never fires (nothing to bound). Use the per-story `spec_checkpoint` / `done_checkpoint` flags for HITL there, or `per-story-spec-approval` for a run-global spec gate. `none` and `per-story-spec-approval` behave the same as in sprint mode.
 
-**Review:** `[review].enabled = false` drops the separate fresh-context review session; the dev pass instead runs `bmad-dev-auto`'s own internal three-layer review (Blind Hunter / Edge Case Hunter / Verification Gap) and finalizes the story straight to `done` — one session per story instead of two, verify commands still gating the commit. Governs deferred-work sweeps too. When review is enabled, `[review].trigger` decides _when_ that separate pass runs: `recommended` (default) only when the `bmad-dev-auto` session flags `followup_review_recommended` — it already triple-reviews inline and recommends an independent pass only when its changes were significant; `always` runs it every story. The follow-up loop is bounded by `limits.max_review_cycles` (default 3), which caps oscillation.
+**Review:** `[review].enabled = false` drops the separate fresh-context review session; the dev pass instead runs `bmad-dev-auto`'s own internal review layers (Blind Hunter / Edge Case Hunter / Verification Gap / Intent Alignment) and finalizes the story straight to `done` — one session per story instead of two, verify commands still gating the commit. Governs deferred-work sweeps too. When review is enabled, `[review].trigger` decides _when_ that separate pass runs: `recommended` (default) only when the `bmad-dev-auto` session flags `followup_review_recommended` — it already reviews inline and computes the flag from a severity-weighted score over the final pass's patched findings (BMAD-METHOD#2580); `always` runs it every story. The follow-up loop is bounded by `limits.max_review_cycles` (default 3), which caps oscillation.
 
 `bmad-loop init` (without `--cli`) registers hooks for every CLI profile the policy references, so a dual-client setup needs no extra flags.
 

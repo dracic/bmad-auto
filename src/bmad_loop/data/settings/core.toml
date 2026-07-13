@@ -37,7 +37,7 @@ key = "enabled"
 kind = "switch"
 default_ref = "ReviewPolicy.enabled"
 label = "separate review session"
-description = "ON: triple review runs in a dedicated 2nd session · OFF: quick-dev runs its own tri-review inline, story straight to done"
+description = "ON: adversarial review runs in a dedicated 2nd session · OFF: the dev pass runs its own review layers inline, story straight to done"
 [[section.field]]
 key = "trigger"
 kind = "select"
