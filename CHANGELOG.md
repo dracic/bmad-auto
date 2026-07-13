@@ -75,6 +75,12 @@ breaking changes may land in a minor release.
 
 ### Changed
 
+- **Docs: `followup_review_recommended` is now scored upstream.** BMAD-METHOD#2580 replaced the
+  skill's convergence-prone significance judgment with a severity-weighted score over patched
+  findings and added a fourth default review layer (Intent Alignment Auditor, #2560). README,
+  FEATURES, TUI guide, the `[review].enabled` setting description, and the engine's damping
+  comments now describe the scored flag; `limits.max_followup_reviews` is unchanged and remains
+  the orchestrator-side bound.
 - **`bmad-loop init` now gitignores `.bmad-loop/policy.toml`.** Policy is per-machine-per-repo —
   it carries the machine-specific `[mux] backend` choice (and the TUI settings editor rewrites
   it), so it must not travel to teammates on other machines or OSes. A `.gitignore` entry does not

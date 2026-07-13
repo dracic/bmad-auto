@@ -1645,16 +1645,18 @@ class Engine:
         #
         # review.trigger = "recommended" (default) gates that loop per-story on the
         # bmad-dev-auto session's `followup_review_recommended` signal (PR #2505):
-        # the skill already self-reviews inline every story and only recommends an
-        # independent pass when its review-driven changes were significant. When it
-        # didn't, skip the separate session and let the deterministic gates +
-        # commit run (_skip_review_and_commit still validates them). "always"
-        # keeps the pre-#2505 behavior of reviewing every story. Either way the
-        # loop below is bounded by limits.max_review_cycles (the hard outer cap)
-        # and damped by limits.max_followup_reviews — the guard against the
-        # structurally non-convergent case where every finalized round still
-        # recommends its own follow-up: once the damping grant is spent, such a
-        # round converges + refiles instead of burning cycles to the outer cap.
+        # the skill already self-reviews inline every story and recommends an
+        # independent pass from a severity-weighted score over its patched
+        # findings (upstream #2580). When it didn't, skip the separate session
+        # and let the deterministic gates + commit run (_skip_review_and_commit
+        # still validates them). "always" keeps the pre-#2505 behavior of
+        # reviewing every story. Either way the loop below is bounded by
+        # limits.max_review_cycles (the hard outer cap) and damped by
+        # limits.max_followup_reviews — the guard against a finalized round that
+        # keeps recommending its own follow-up (structural before upstream #2580
+        # scored the flag; kept as the orchestrator-side bound): once the damping
+        # grant is spent, such a round converges + refiles instead of burning
+        # cycles to the outer cap.
         if self.policy.review.trigger == "recommended" and not task.followup_review_recommended:
             self.journal.append("review-not-recommended", story_key=task.story_key)
             self._skip_review_and_commit(task)
@@ -1741,9 +1743,10 @@ class Engine:
             # honored only while the story has damping grants left. Once
             # followup_reviews_spent has reached limits.max_followup_reviews, such a
             # round force-converges (verify → refile the recommendation → commit)
-            # instead of burning another cycle on a structurally non-convergent
-            # recommendation (every review pass patches findings and recommends
-            # another pass). max_review_cycles stays the hard outer bound.
+            # instead of burning another cycle on a runaway recommendation
+            # (pre-#2580, every review pass patched findings and recommended
+            # another pass; the upstream severity-scored flag has since made
+            # that the exception). max_review_cycles stays the hard outer bound.
             damped = refileable_followup and (
                 task.followup_reviews_spent >= self.policy.limits.max_followup_reviews
             )
