@@ -20,15 +20,18 @@ of the README.
 ## Platform prerequisites
 
 - **Python 3.11+** and a supported coding CLI (`claude` by default).
-- **tmux** — the orchestrator drives agent sessions through a terminal multiplexer, and
-  tmux is the only backend shipped today. It is required for launching, attaching, and
-  driving runs (pure TUI observation works without it). The multiplexer sits behind a
-  pluggable seam (`TerminalMultiplexer`), so a native-Windows backend can be added later
-  without changing the engine — contributors should start with
+- **A terminal multiplexer** — the orchestrator drives agent sessions through a terminal
+  multiplexer: **tmux** is the default backend, and **herdr** ships as an opt-in
+  alternative (`bmad-loop mux set herdr` — see
+  [Terminal multiplexer backends](multiplexer-backends.md) for what changes from the
+  operator's seat, chiefly a manual `ctrl+b q` detach). A backend is required for
+  launching, attaching, and driving runs (pure TUI observation works without one). The
+  multiplexer sits behind a pluggable seam (`TerminalMultiplexer`), so a native-Windows
+  backend can be added later without changing the engine — contributors should start with
   [Porting bmad-loop to a new OS](porting-to-a-new-os.md). `bmad-loop mux` lists the
-  registered backends and shows which is selected (and why); once more than one is
-  available, `bmad-loop mux set <name>` — or the `[mux] backend` policy key, or the
-  `BMAD_LOOP_MUX_BACKEND` env var — forces the choice per machine.
+  registered backends and shows which is selected (and why); `bmad-loop mux set <name>` —
+  or the `[mux] backend` policy key, or the `BMAD_LOOP_MUX_BACKEND` env var — forces the
+  choice per machine.
 - **OS** — Linux or macOS. **Windows is supported via WSL**, which _is_ Linux: tmux and
   every POSIX path work unchanged there, so no special setup is needed. **Native Windows
   is not yet shipped** — it awaits a non-tmux multiplexer backend (tracked in

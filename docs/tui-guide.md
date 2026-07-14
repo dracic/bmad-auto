@@ -14,12 +14,13 @@ cd /path/to/your/bmad/project
 bmad-loop tui              # or: bmad-loop tui --project /path/to/project
 ```
 
-`--project` defaults to the current directory. tmux — the orchestrator's only
-registered terminal-multiplexer backend today — must be on PATH for the launch/attach keys
-(`r` `s` `e` `a`); pure observation works without it. (WSL counts as Linux, so
-tmux works there unchanged; native Windows awaits a non-tmux backend.) Once a second
-backend registers, `bmad-loop mux` shows which is selected and why, and the Settings
-editor's `mux.backend` (or the `BMAD_LOOP_MUX_BACKEND` env var) forces the choice per machine.
+`--project` defaults to the current directory. The selected terminal-multiplexer
+backend — tmux by default, herdr opt-in; see
+[Terminal multiplexer backends](multiplexer-backends.md) — must be on PATH for the
+launch/attach keys (`r` `s` `e` `a`); pure observation works without it. (WSL counts as
+Linux, so tmux works there unchanged; native Windows awaits a Windows-capable backend.)
+`bmad-loop mux` shows which backend is selected and why, and the Settings editor's
+`mux.backend` (or the `BMAD_LOOP_MUX_BACKEND` env var) forces the choice per machine.
 
 Over a slow or high-latency link (SSH, Tailscale), a 60fps update stream can't
 drain in time and partial frames paint over old ones. Launch with
@@ -369,7 +370,7 @@ disambiguate the spec. When it has recorded a resolution, the same window prompt
 `re-arm <story> and resume run <id>? [y/N]`; answer `y` and it re-arms the story
 (`escalated → pending`, spec status reset to `ready-for-dev`) and resumes the run
 in place — a clean rebuild against the corrected spec, then on through the rest
-of the sprint. Detach (`Ctrl-b d`) to return to the dashboard, which observes the
+of the sprint. Detach (`Ctrl-b d`; herdr: `ctrl+b q`) to return to the dashboard, which observes the
 resumed run like any other. Exiting the agent without recording a resolution
 leaves the story escalated and the run paused — the safe default.
 
@@ -421,7 +422,10 @@ the run header name the stage so you know which viewer `p` will open.
 If the TUI itself is running inside tmux, attach uses `switch-client` — the
 TUI keeps running and you switch back with your usual tmux client commands.
 Outside tmux, the TUI suspends, runs `tmux attach`, and resumes when you
-detach (`ctrl-b d`).
+detach (`ctrl-b d`). On the herdr backend the same two paths apply (a tab switch
+inside herdr, a suspended blocking attach outside); the detach chord is `ctrl+b q`,
+and one hand-back is manual — see
+[Terminal multiplexer backends](multiplexer-backends.md#detach-is-manual-press-ctrlb-q).
 
 ### Answering a sweep decision
 
@@ -434,7 +438,9 @@ toast. Then:
    orchestrator window, where the prompt is waiting.
 2. Answer the prompt (build / close / keep-open, with the triage
    recommendation shown).
-3. Detach with `ctrl-b d`.
+3. Detach with `ctrl-b d`. (On tmux this step is belt-and-suspenders — answering
+   already hands your terminal back. On herdr the hand-back cannot be automatic:
+   press `ctrl+b q`.)
 
 The banner clears on the next poll after the sweep journals anything further
 (the answer is recorded as a `decision:` line in `deferred-work.md`). Sweeps

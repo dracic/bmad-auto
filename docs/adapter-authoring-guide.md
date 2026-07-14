@@ -129,7 +129,9 @@ a tmux tee would (`generic._log_activity_key`'s stall re-arm and `probe`'s marke
 discovery). Its module docstring is a **degradation ledger** of every such
 divergence (sidecar options, poller `pipe_pane`, no-op `detach_client`, the attach
 argv, the advisory geometry, the protocol-version policy) — the reference for what
-"implement fresh" costs when the host has no tmux-shaped CLI.
+"implement fresh" costs when the host has no tmux-shaped CLI. The operator-facing
+view — what a herdr _user_ notices and does — is
+[Terminal multiplexer backends](multiplexer-backends.md).
 
 The hard part of a new profile isn't the TOML — it's the **facts that live in no
 doc**: the CLI's exact hook payload shape (field names and casing, whether

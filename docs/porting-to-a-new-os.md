@@ -100,7 +100,9 @@ version, and the current selection. (The result is cached — see
   JSON sidecar for options, a polling tee for `pipe_pane`, a per-window return
   file for the parked trailer, a no-op detach); that **degradation ledger** is
   the module docstring, and it is the template for what "implement fresh" costs
-  in practice.
+  in practice. (The operator-facing view of those degradations — what a herdr
+  _user_ notices and does — is
+  [Terminal multiplexer backends](multiplexer-backends.md).)
 
 `available()` gates whether the backend is usable on the current host (e.g. its
 binary is on PATH); the optional `version()` feeds the diagnostic dump and the
