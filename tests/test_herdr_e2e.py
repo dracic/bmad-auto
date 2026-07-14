@@ -28,15 +28,11 @@ import pytest
 # Lift the deterministic fake-claude recipe wholesale (scaffold + assertions).
 # Prepend import mode makes this cross-module import work (no tests/__init__.py);
 # see the Phase-2/3 notes on the same pattern for test_herdr_poller.
+from test_herdr_integration import _teardown_session
 from test_stories_e2e import CLI, _commit_count, _entry, _scaffold, _status
 
 HAVE_HERDR = sys.platform != "win32" and shutil.which("herdr") is not None
 pytestmark = pytest.mark.skipif(not HAVE_HERDR, reason="stories E2E needs herdr")
-
-
-def _teardown_session(name: str) -> None:
-    for verb in ("stop", "delete"):
-        subprocess.run(["herdr", "session", verb, name], capture_output=True, text=True)
 
 
 @pytest.fixture

@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 import pytest
-from test_herdr_backend import FakeHerdr
+from test_herdr_backend import install_fake_herdr
 
 from bmad_loop.adapters import herdr_backend
 from bmad_loop.adapters.herdr_backend import HerdrMultiplexer
@@ -25,11 +25,7 @@ from bmad_loop.adapters.herdr_backend import HerdrMultiplexer
 
 @pytest.fixture
 def fake(monkeypatch, tmp_path):
-    f = FakeHerdr()
-    monkeypatch.setattr(herdr_backend.subprocess, "run", f)
-    monkeypatch.setattr(herdr_backend.shutil, "which", lambda _name: "/usr/bin/herdr")
-    monkeypatch.setenv("BMAD_LOOP_HERDR_STATE", str(tmp_path / "herdr-state.json"))
-    monkeypatch.delenv("HERDR_ENV", raising=False)
+    f = install_fake_herdr(monkeypatch, tmp_path)
     # Tight cadence so thread-level tests don't sleep a real second per tick, and
     # a short not-found streak so self-retire happens fast. Read from the module
     # globals by _PanePoller.__init__, so these apply to pipe_pane-started tees.

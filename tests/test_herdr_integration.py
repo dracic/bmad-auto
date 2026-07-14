@@ -190,29 +190,32 @@ def test_herdr_pipe_pane_log_grows_under_real_pane(tmp_path, herdr_session, monk
     assert isinstance(mux, herdr_backend.HerdrMultiplexer)
     session = "bmad-loop-grow"
     mux.new_session(session, tmp_path)
-    window_id = mux.new_window(session, "grow", tmp_path, {}, str(script))
-    log_file = tmp_path / "grow.log"
-    mux.pipe_pane(window_id, log_file)
+    try:
+        window_id = mux.new_window(session, "grow", tmp_path, {}, str(script))
+        log_file = tmp_path / "grow.log"
+        mux.pipe_pane(window_id, log_file)
 
-    # pipe_pane primes the first snapshot synchronously, so the log exists at once;
-    # wait for a later poll to append more (growth == the activity signal).
-    first_size: int | None = None
-    grew = False
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if log_file.exists():
-            size = log_file.stat().st_size
-            if first_size is None:
-                first_size = size
-            elif size > first_size:
-                grew = True
-                break
-        time.sleep(0.2)
+        # pipe_pane primes the first snapshot synchronously, so the log exists at
+        # once; wait for a later poll to append more (growth == the activity signal).
+        first_size: int | None = None
+        grew = False
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if log_file.exists():
+                size = log_file.stat().st_size
+                if first_size is None:
+                    first_size = size
+                elif size > first_size:
+                    grew = True
+                    break
+            time.sleep(0.2)
 
-    assert grew, "pipe_pane poller never grew the log under a producing pane"
-    assert "MARKER" in log_file.read_text(encoding="utf-8")  # probe-marker discoverability
-
-    # kill_session stops the session's tees (poller registry emptied), so no
-    # daemon keeps polling a vanished pane.
-    mux.kill_session(session)
+        assert grew, "pipe_pane poller never grew the log under a producing pane"
+        assert "MARKER" in log_file.read_text(encoding="utf-8")  # probe-marker discoverability
+    finally:
+        # kill_session stops the session's tees (poller registry emptied) even
+        # when an assertion above fails — a leaked poller would outlive the
+        # fixture's server teardown (transport failures never self-retire it)
+        # and spin subprocess reads for the rest of the pytest worker's life.
+        mux.kill_session(session)
     assert mux._pollers == {}
