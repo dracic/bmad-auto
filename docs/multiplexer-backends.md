@@ -28,8 +28,9 @@ version as part of the preflight.
 
 tmux is the reference backend: everything else in these docs — the `bmad-loop-<run-id>`
 and `bmad-loop-ctl` session names, the `ctrl-b d` detach chord — describes tmux behavior.
-It is required for launching, attaching, and driving runs; pure TUI observation works
-without it.
+While tmux is the selected backend it is required for launching, attaching, and driving
+runs (an external backend brings its own session mechanism instead); pure TUI observation
+works without any backend.
 
 ## External backends
 

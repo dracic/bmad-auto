@@ -99,7 +99,8 @@ module-level `parse_target()` — or the backend's own **native id** (whatever y
 syntax), so `BaseTmuxBackend` passes it straight through. A native-id backend
 calls `parse_target()` first — `None` means "already a native id, use as-is",
 otherwise resolve `(session, window)` yourself; the herdr adapter's
-`_parse_target` ([backend.py](https://github.com/pbean/bmad-loop-adapter-herdr))
+`_parse_target`
+([backend.py](https://github.com/pbean/bmad-loop-adapter-herdr/blob/main/src/bmad_loop_adapter_herdr/backend.py))
 is the worked example (workspace-by-label → tab-by-name → root pane, resolved
 lazily at use time). You MAY override `target()` to emit native ids, but the token must
 stay a stable _by-name_ reference: core formats targets ahead of use (a parked
