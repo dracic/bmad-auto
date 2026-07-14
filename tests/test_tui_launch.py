@@ -19,6 +19,12 @@ import pytest
 from bmad_loop.adapters import tmux_base
 from bmad_loop.tui import launch
 
+# Every test here asserts tmux-specific argv/behaviour through the multiplexer
+# seam. Now that the win32-matching herdr backend is registered, get_multiplexer()
+# no longer bottom-falls-back to tmux on the Windows CI leg, so pin tmux by name
+# (a no-op on POSIX, where tmux is already the default).
+pytestmark = pytest.mark.usefixtures("force_tmux_backend")
+
 
 class FakeRun:
     """Records argv; scripts the returncode of `tmux has-session`."""

@@ -173,11 +173,13 @@ def test_write_pid(tmp_path):
         assert float(tokens[1]) > 0
 
 
+@pytest.mark.usefixtures("force_tmux_backend")  # attach_argv goes through the seam
 def test_attach_argv_outside_tmux(monkeypatch):
     monkeypatch.delenv("TMUX", raising=False)
     assert runs.attach_argv("r1") == ["tmux", "attach", "-t", "=bmad-loop-r1"]
 
 
+@pytest.mark.usefixtures("force_tmux_backend")  # attach_argv goes through the seam
 def test_attach_argv_inside_tmux(monkeypatch):
     monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")
     assert runs.attach_argv("r1") == ["tmux", "switch-client", "-t", "=bmad-loop-r1"]

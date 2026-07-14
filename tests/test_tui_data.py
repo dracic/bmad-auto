@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from conftest import install_bmad_config, write_sprint
 
 from bmad_loop import deferredwork
@@ -184,6 +185,7 @@ def test_discover_runs_legacy_no_pid_is_unknown(tmp_path, monkeypatch):
     assert data.discover_runs(tmp_path)[0].status == data.UNKNOWN
 
 
+@pytest.mark.usefixtures("force_tmux_backend")  # asserts tmux liveness through the seam
 def test_legacy_run_with_live_tmux_session_is_running(tmp_path, monkeypatch):
     run_dir = make_run(tmp_path, "20260611-100000-aaaa")
     monkeypatch.setattr(tmux_base.shutil, "which", lambda _: "/usr/bin/tmux")

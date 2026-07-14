@@ -11,12 +11,14 @@ missing ``available()`` reads as unavailable); availability-sensitive tests use
 the tiny :class:`_Stub` instead.
 """
 
+import shutil
 import sys
 from pathlib import Path
 
 import pytest
 
 from bmad_loop.adapters import multiplexer as m
+from bmad_loop.adapters.herdr_backend import HerdrMultiplexer
 from bmad_loop.adapters.multiplexer import MultiplexerError
 from bmad_loop.adapters.tmux_backend import TmuxMultiplexer
 
@@ -67,9 +69,12 @@ def fresh_registry(monkeypatch):
     m.get_multiplexer.cache_clear()
 
 
-def test_default_is_tmux(fresh_registry):
+def test_default_is_tmux(fresh_registry, monkeypatch):
     """No override, POSIX host → tmux, selected via the loop's platform match (the
-    builtin registers ``matches=p != 'win32'``), not just the bottom fallback."""
+    builtin registers ``matches=p != 'win32'``). Pin a POSIX platform: herdr is now
+    registered and *matches win32*, so on a win32 host the auto-default is herdr,
+    not tmux — this test is specifically about the POSIX default."""
+    monkeypatch.setattr(sys, "platform", "linux")
     assert isinstance(fresh_registry.get_multiplexer(), TmuxMultiplexer)
 
 
@@ -259,9 +264,11 @@ def test_configure_multiplexer_clears_cache_only_on_change(fresh_registry):
     assert fresh_registry.get_multiplexer.cache_info().currsize == 1
 
 
-def test_empty_string_configuration_means_auto(fresh_registry):
+def test_empty_string_configuration_means_auto(fresh_registry, monkeypatch):
     """configure_multiplexer("") — an unset policy key — must behave exactly
-    like None, not force an empty backend name."""
+    like None, not force an empty backend name. Pinned to a POSIX platform so the
+    auto-default is tmux (on win32 herdr now matches and would auto-select)."""
+    monkeypatch.setattr(sys, "platform", "linux")
     fresh_registry.configure_multiplexer("")
     assert isinstance(fresh_registry.get_multiplexer(), TmuxMultiplexer)
 
@@ -326,3 +333,91 @@ def test_detect_multiplexers_version_crash_keeps_availability(fresh_registry):
     assert rows["verless"].available is True
     assert rows["verless"].version is None
     assert rows["verless"].selected is True and rows["verless"].reason == "first-match"
+
+
+# ---------------------------------------------------------------------------
+# herdr builtin registration (Phase 3). These exercise the REAL builtins
+# (tmux + herdr), so they leave `_BUILTINS_LOADED` False and control the outcome
+# by monkeypatching `sys.platform` (deterministic on both CI legs) and the shared
+# `shutil.which` (both backends' available() probes it). The registration adds
+# herdr AFTER tmux with `matches=lambda platform: True`, and does NOT touch
+# `_PLATFORM_DEFAULTS`.
+
+
+def _which_only(*available: str):
+    """`shutil.which` stub: only the named binaries resolve, everything else is
+    absent. Patches the shared stdlib module, so both tmux_base and herdr_backend
+    (which each `import shutil`) see it."""
+    names = set(available)
+    return lambda name, *a, **k: (f"/usr/bin/{name}" if name in names else None)
+
+
+def test_herdr_registered_after_tmux_and_tmux_wins_on_posix(fresh_registry, monkeypatch):
+    """Both backends available on POSIX: herdr is registered but tmux is the
+    platform default, so tmux still wins (herdr is opt-in on POSIX)."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", _which_only("tmux", "herdr"))
+    backend, name, reason = fresh_registry._select()
+    assert isinstance(backend, TmuxMultiplexer)
+    assert (name, reason) == ("tmux", "platform-default")
+
+
+def test_herdr_first_match_when_tmux_unavailable_on_posix(fresh_registry, monkeypatch):
+    """A POSIX host with herdr but no tmux binary selects herdr as the first
+    available platform match — the default (tmux) is unavailable and falls through."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", _which_only("herdr"))  # tmux absent
+    backend, name, reason = fresh_registry._select()
+    assert isinstance(backend, HerdrMultiplexer)
+    assert (name, reason) == ("herdr", "first-match")
+
+
+def test_env_override_selects_herdr(fresh_registry, monkeypatch):
+    """BMAD_LOOP_MUX_BACKEND=herdr forces herdr by name, bypassing the platform
+    predicate and availability (an explicit choice is trusted, as for any backend)."""
+    monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "herdr")
+    fresh_registry.get_multiplexer.cache_clear()
+    assert isinstance(fresh_registry.get_multiplexer(), HerdrMultiplexer)
+
+
+def test_herdr_selected_on_win32_as_first_platform_match(fresh_registry, monkeypatch):
+    """On native Windows tmux does not match (its `matches` is `p != 'win32'`) and
+    psmux is out-of-tree, so the cross-platform herdr is the first platform match:
+    win32 auto-selects herdr with `_PLATFORM_DEFAULTS` untouched."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(shutil, "which", _which_only("herdr"))  # herdr present, no tmux
+    backend, name, reason = fresh_registry._select()
+    assert isinstance(backend, HerdrMultiplexer)
+    assert (name, reason) == ("herdr", "first-match")
+    # sanity: _PLATFORM_DEFAULTS still names psmux for win32, not herdr
+    assert fresh_registry._PLATFORM_DEFAULTS.get("win32") == "psmux"
+
+
+def test_win32_falls_back_to_herdr_even_when_unavailable(fresh_registry, monkeypatch):
+    """With neither binary installed on win32 (the Windows CI leg), the historical
+    fallback returns the first platform match regardless of availability — that is
+    now herdr, not the bottom tmux fallback. This is the selection change the
+    tmux-argv test fixtures pin `BMAD_LOOP_MUX_BACKEND=tmux` around."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(shutil, "which", _which_only())  # nothing available
+    backend, name, reason = fresh_registry._select()
+    assert isinstance(backend, HerdrMultiplexer)
+    assert (name, reason) == ("herdr", "fallback")
+
+
+def test_detect_multiplexers_lists_herdr_row(fresh_registry, monkeypatch):
+    """detect_multiplexers() enumerates herdr (a real registered builtin) with its
+    availability reflecting the host probe. version() is stubbed so no row spawns a
+    real `herdr --version` / `tmux -V`."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", _which_only("tmux", "herdr"))
+    monkeypatch.setattr(HerdrMultiplexer, "version", lambda self: "herdr 0.7.3")
+    monkeypatch.setattr(TmuxMultiplexer, "version", lambda self: "tmux 3.5")
+    rows = {r.name: r for r in fresh_registry.detect_multiplexers()}
+    assert {"tmux", "herdr"} <= set(rows)
+    assert rows["herdr"].matches_platform is True
+    assert rows["herdr"].available is True
+    assert rows["herdr"].version == "herdr 0.7.3"
+    # tmux is the POSIX platform default, so it stays selected — herdr is listed but not chosen
+    assert rows["tmux"].selected is True
+    assert rows["herdr"].selected is False and rows["herdr"].reason == ""
