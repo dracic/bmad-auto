@@ -17,7 +17,8 @@ import pytest
 from bmad_loop.adapters import tmux_base
 from bmad_loop.adapters.base import SessionSpec
 from bmad_loop.adapters.generic import GenericAdapter
-from bmad_loop.adapters.multiplexer import MultiplexerError, TerminalMultiplexer
+from bmad_loop.adapters.herdr_backend import HerdrMultiplexer
+from bmad_loop.adapters.multiplexer import MultiplexerError, TerminalMultiplexer, parse_target
 from bmad_loop.adapters.profile import get_profile
 from bmad_loop.adapters.tmux_backend import TmuxMultiplexer
 from bmad_loop.policy import LimitsPolicy, Policy
@@ -506,3 +507,54 @@ def test_dialect_leaf_new_window_routes_launch_through_hook(monkeypatch, tmp_pat
         "wrapped:cmd",
     ]
     assert "-e" not in rec.argv  # env strategy fully delegated to the hook
+
+
+# ------------------------------------------------------------ target contract
+#
+# target() is the seam-canonical encoder core uses instead of hand-assembling
+# "=session[:window]" strings; parse_target is the matching decoder a native-id
+# backend reuses instead of re-deriving the grammar. Pure string work: no
+# subprocess, no env sensitivity, safe on every CI leg. Both backends are
+# constructed directly (their constructors are documented side-effect-free).
+
+
+def test_target_default_grammar():
+    mux = TmuxMultiplexer()
+    assert mux.target("s") == "=s"
+    assert mux.target("s", "w") == "=s:w"
+    # falsy window collapses to the session-only form, mirroring parse_target's
+    # "=s:" -> ("s", None) decode
+    assert mux.target("s", None) == "=s"
+    assert mux.target("s", "") == "=s"
+
+
+def test_herdr_inherits_the_default_encoder():
+    # herdr resolves targets lazily at use time (_parse_target), so it must NOT
+    # override target() to eagerly emit native ids — a token formatted ahead of
+    # use (e.g. attach_plan's return_window) would go stale.
+    assert "target" not in HerdrMultiplexer.__dict__
+    assert HerdrMultiplexer().target("s", "w") == "=s:w"
+
+
+@pytest.mark.parametrize(
+    ("session", "window"),
+    [("s", None), ("s", "w"), ("bmad-loop-ctl", "run-20260714-abc")],
+)
+def test_parse_target_round_trips_the_encoder(session, window):
+    mux = TmuxMultiplexer()
+    assert parse_target(mux.target(session, window)) == (session, window)
+
+
+def test_parse_target_edges():
+    # empty window part decodes like the session-only form
+    assert parse_target("=s:") == ("s", None)
+    # window is everything after the FIRST colon (minted names carry no colon,
+    # but the split rule is pinned regardless)
+    assert parse_target("=s:a:b") == ("s", "a:b")
+
+
+@pytest.mark.parametrize("native", ["@1", "%3", "w1:p1"])
+def test_parse_target_passes_native_ids_through(native):
+    # non-"=" targets are backend-native ids: the decoder answers None and the
+    # backend resolves them itself
+    assert parse_target(native) is None

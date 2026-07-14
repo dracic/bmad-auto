@@ -525,20 +525,20 @@ def test_stop_run_clean_stop_on_pre_stop_pid_reuse(tmp_path, monkeypatch):
 # ---------------------------------------------------------------- prune sessions
 
 
-def test_tmux_sessions_no_tmux(monkeypatch):
-    # tmux_sessions now delegates to the multiplexer backend; patch its seam.
+def test_mux_sessions_no_tmux(monkeypatch):
+    # mux_sessions now delegates to the multiplexer backend; patch its seam.
     monkeypatch.setattr(tmux_base.shutil, "which", lambda _name: None)
-    assert runs.tmux_sessions() == []
+    assert runs.mux_sessions() == []
 
 
-def test_tmux_sessions_no_server(monkeypatch):
+def test_mux_sessions_no_server(monkeypatch):
     monkeypatch.setattr(tmux_base.shutil, "which", lambda _name: "/usr/bin/tmux")
     monkeypatch.setattr(
         tmux_base.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="no server"),
     )
-    assert runs.tmux_sessions() == []
+    assert runs.mux_sessions() == []
 
 
 def test_prunable_sessions_partitions(tmp_path, monkeypatch):
@@ -564,7 +564,7 @@ def test_prunable_sessions_partitions(tmp_path, monkeypatch):
         "bmad-loop-ctl",  # control session: never a candidate
         "unrelated",  # not ours
     ]
-    monkeypatch.setattr(runs, "tmux_sessions", lambda: sessions)
+    monkeypatch.setattr(runs, "mux_sessions", lambda: sessions)
     monkeypatch.setattr(
         runs,
         "session_project_tags",
@@ -593,7 +593,7 @@ def test_prunable_sessions_skips_invalid_run_ids(tmp_path, monkeypatch):
     (good / "engine.pid").write_text(str(_dead_pid()))
 
     sessions = ["bmad-loop-fin-1", "bmad-loop-../../x", "bmad-loop-a.b", "bmad-loop-"]
-    monkeypatch.setattr(runs, "tmux_sessions", lambda: sessions)
+    monkeypatch.setattr(runs, "mux_sessions", lambda: sessions)
     monkeypatch.setattr(runs, "session_project_tags", lambda: dict.fromkeys(sessions, mine))
 
     prunable, live, unknown = runs.prunable_sessions(tmp_path)
@@ -607,7 +607,7 @@ def test_prunable_sessions_flags_unknown(tmp_path, monkeypatch):
     mine = runs.project_tag(tmp_path)
     odd = _make_state_run(tmp_path, "odd-1")
     (odd / "engine.pid").write_text("4242 123.0")
-    monkeypatch.setattr(runs, "tmux_sessions", lambda: ["bmad-loop-odd-1"])
+    monkeypatch.setattr(runs, "mux_sessions", lambda: ["bmad-loop-odd-1"])
     monkeypatch.setattr(runs, "session_project_tags", lambda: {"bmad-loop-odd-1": mine})
     monkeypatch.setattr(runs, "get_process_host", lambda: _FakeHost(alive=True, identity=None))
     prunable, live, unknown = runs.prunable_sessions(tmp_path)
@@ -621,7 +621,7 @@ def test_prune_sessions_dry_run_kills_nothing(tmp_path, monkeypatch):
     (finished / "engine.pid").write_text(str(_dead_pid()))
     killed: list[str] = []
     monkeypatch.setattr(runs, "kill_session", lambda rid: killed.append(rid))
-    monkeypatch.setattr(runs, "tmux_sessions", lambda: ["bmad-loop-fin-1"])
+    monkeypatch.setattr(runs, "mux_sessions", lambda: ["bmad-loop-fin-1"])
     monkeypatch.setattr(
         runs, "session_project_tags", lambda: {"bmad-loop-fin-1": runs.project_tag(tmp_path)}
     )
@@ -639,7 +639,7 @@ def test_prune_sessions_returns_unknown_from_same_sample(tmp_path, monkeypatch):
     (odd / "engine.pid").write_text("4242 123.0")
     killed: list[str] = []
     monkeypatch.setattr(runs, "kill_session", lambda rid: killed.append(rid))
-    monkeypatch.setattr(runs, "tmux_sessions", lambda: ["bmad-loop-odd-1"])
+    monkeypatch.setattr(runs, "mux_sessions", lambda: ["bmad-loop-odd-1"])
     monkeypatch.setattr(runs, "session_project_tags", lambda: {"bmad-loop-odd-1": mine})
     monkeypatch.setattr(runs, "get_process_host", lambda: _FakeHost(alive=True, identity=None))
     assert runs.prune_sessions(tmp_path) == (["odd-1"], [], {"odd-1"})

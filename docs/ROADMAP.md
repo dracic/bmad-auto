@@ -44,7 +44,8 @@ availability-aware with discriminating `available()` probes (psmux →
 `which("tmux") and not which("psmux")`) and an explicit `bmad-loop mux set <name>` tie-break.
 
 The third — **herdr** — has **shipped** end-to-end on POSIX (engine run path +
-TUI-launch surface) as a
+TUI-launch surface; operator guide:
+[Terminal multiplexer backends](multiplexer-backends.md)) as a
 different-binary-family backend: it implements `TerminalMultiplexer` fresh over herdr's
 workspace/tab/pane model rather than subclassing `BaseTmuxBackend`, and probes
 `which("herdr")`, so it is pairwise-discriminating against the tmux family by construction

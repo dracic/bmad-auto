@@ -39,6 +39,24 @@ class MultiplexerError(Exception):
     without importing a backend."""
 
 
+def parse_target(target: str) -> tuple[str, str | None] | None:
+    """Decode a seam-canonical window target (see :meth:`TerminalMultiplexer.target`).
+
+    Returns ``(session, window)`` for a canonical ``=session[:window]`` token —
+    ``window`` is None when absent *or* empty, so ``"=s"`` and ``"=s:"`` both
+    decode to ``("s", None)`` — or None when ``target`` does not start with
+    ``=``: a backend-native id (``"@1"``, ``"%3"``, ``"w1:p1"``, ...) the caller
+    resolves itself. The window part is everything after the *first* ``:``;
+    that split is safe because bmad-loop mints window names
+    (``<kind>-<run_id>``) that never contain ``:``. Provided so a backend whose
+    native addressing differs decodes the grammar with one tested helper
+    instead of re-deriving it (see the herdr backend's ``_parse_target``)."""
+    if not target.startswith("="):
+        return None
+    session, _, window = target[1:].partition(":")
+    return (session, window or None)
+
+
 class TerminalMultiplexer(ABC):
     """Transport backend for agent sessions: sessions, windows, and clients.
 
@@ -48,6 +66,21 @@ class TerminalMultiplexer(ABC):
     the generic adapter needs, and Phase 2 fills in the rest as ``runs.py``,
     ``tui/launch.py``, ``probe.py``, and ``tui/data.py`` migrate onto it.
     """
+
+    # ------------------------------------------------------------ targets
+
+    def target(self, session: str, window: str | None = None) -> str:
+        """Format the seam-canonical target token for ``session`` (optionally
+        one of its windows, *by name*). The default grammar is
+        ``=session[:window]`` — historically tmux's exact-match syntax, now
+        owned by the seam: every target-taking method below accepts both this
+        token and the backend's native ids, and :func:`parse_target` is the
+        matching decoder. Backends MAY override to emit native ids, but the
+        result must stay a stable *by-name* reference: callers format targets
+        ahead of use (e.g. a parked window's return target), so eager
+        resolution to a live native id can go stale — keeping the token
+        symbolic and resolving lazily at use time is the recommended default."""
+        return f"={session}:{window}" if window else f"={session}"
 
     # ----------------------------------------------------------- sessions
 
@@ -132,28 +165,33 @@ class TerminalMultiplexer(ABC):
     @abstractmethod
     def kill_window(self, target: str) -> None:
         """Kill the targeted window (tolerant of it already being gone, and a
-        no-op on a transport failure)."""
+        no-op on a transport failure). ``target`` is a :meth:`target` token or
+        a backend-native window id."""
 
     @abstractmethod
     def select_window(self, target: str) -> None:
         """Make ``target`` the current window of its session (best-effort: a no-op
-        on a transport failure)."""
+        on a transport failure). ``target`` is a :meth:`target` token or a
+        backend-native window id."""
 
     @abstractmethod
     def set_window_option(self, target: str, option: str, value: str) -> None:
         """Set a user option on the targeted window (best-effort: a no-op on a
-        transport failure)."""
+        transport failure). ``target`` is a :meth:`target` token or a
+        backend-native window id."""
 
     @abstractmethod
     def unset_window_option(self, target: str, option: str) -> None:
         """Remove a user option from the targeted window (so a later read sees it
         as unset, not as an empty value). Best-effort: a no-op on a transport
-        failure."""
+        failure. ``target`` is a :meth:`target` token or a backend-native
+        window id."""
 
     @abstractmethod
     def show_window_option(self, target: str, option: str) -> str:
         """Value of a user option on the targeted window ('' if unset, and '' on a
-        transport failure)."""
+        transport failure). ``target`` is a :meth:`target` token or a
+        backend-native window id."""
 
     @abstractmethod
     def pipe_pane(self, window_id: str, log_file: Path) -> None:
@@ -168,7 +206,9 @@ class TerminalMultiplexer(ABC):
 
     @abstractmethod
     def attach_target_argv(self, target: str) -> list[str]:
-        """argv that attaches the caller's terminal to ``target``."""
+        """argv that attaches the caller's terminal to ``target`` (a
+        :meth:`target` token — session-only or session+window — or a
+        backend-native id)."""
 
     @abstractmethod
     def current_pane_id(self) -> str | None:
@@ -194,7 +234,8 @@ class TerminalMultiplexer(ABC):
     def switch_client(self, target: str, last_fallback: bool = False) -> bool:
         """Switch the current client to ``target`` (optionally falling back to
         the last client on failure). Returns True iff a switch happened — so a
-        transport failure returns False."""
+        transport failure returns False. ``target`` is a :meth:`target` token
+        or a backend-native id."""
 
     @abstractmethod
     def available(self) -> bool:

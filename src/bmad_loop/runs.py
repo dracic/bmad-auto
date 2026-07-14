@@ -120,8 +120,14 @@ def attach_target_argv(target: str) -> list[str]:
     return get_multiplexer().attach_target_argv(target)
 
 
+def session_target(run_id: str) -> str:
+    """Seam-canonical target token for the run's agent session (see
+    :meth:`TerminalMultiplexer.target`)."""
+    return get_multiplexer().target(session_name(run_id))
+
+
 def attach_argv(run_id: str) -> list[str]:
-    return attach_target_argv(f"={session_name(run_id)}")
+    return attach_target_argv(session_target(run_id))
 
 
 # ---------------------------------------------------- run resolution / liveness
@@ -283,7 +289,7 @@ def project_tag(project: Path) -> str:
     return str(project.resolve())
 
 
-def tmux_sessions() -> list[str]:
+def mux_sessions() -> list[str]:
     """All live session names, or [] when the multiplexer is missing, no server
     is running, or the query fails."""
     return get_multiplexer().list_sessions()
@@ -291,7 +297,7 @@ def tmux_sessions() -> list[str]:
 
 def session_project_tags() -> dict[str, str]:
     """Map each live session name to its PROJECT_OPTION value ("" when unset).
-    Same missing-multiplexer/no-server guards as tmux_sessions()."""
+    Same missing-multiplexer/no-server guards as mux_sessions()."""
     return get_multiplexer().session_options(PROJECT_OPTION)
 
 
@@ -317,7 +323,7 @@ def prunable_sessions(project: Path) -> tuple[list[str], list[str], set[str]]:
     prunable: list[str] = []
     live: list[str] = []
     unknown: set[str] = set()
-    for name in tmux_sessions():
+    for name in mux_sessions():
         if name == CTL_SESSION or not name.startswith(_SESSION_PREFIX):
             continue
         run_id = name[len(_SESSION_PREFIX) :]

@@ -112,7 +112,7 @@ class RunHeader(Static):
         text.append("  ⧗ starting…", style="yellow")
         text.append(
             "\nwaiting for the engine to write state.json"
-            " — if nothing appears, attach to tmux session bmad-loop-ctl",
+            " — if nothing appears, attach to control session bmad-loop-ctl",
             style="dim",
         )
         self.update(text)

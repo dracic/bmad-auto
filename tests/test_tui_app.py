@@ -911,7 +911,7 @@ async def test_settings_binding_opens_editor(project):
 
 async def test_start_run_modal_escape_cancels(project, monkeypatch):
     calls = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "start_run_detached", lambda *a, **kw: calls.append(a))
     app = BmadLoopApp(project.project)
     async with app.run_test() as pilot:
@@ -925,7 +925,7 @@ async def test_start_run_modal_escape_cancels(project, monkeypatch):
 
 async def test_start_run_modal_launches(project, monkeypatch):
     calls = {}
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
 
     def fake_start(proj, run_id, *, spec=None, epic, story, max_stories):
         calls.update(
@@ -959,7 +959,7 @@ async def test_start_run_modal_launches(project, monkeypatch):
 
 async def test_dirty_worktree_blocks_launch(project, monkeypatch):
     calls = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "start_run_detached", lambda *a, **kw: calls.append(a))
     (project.project / "src.txt").write_text("dirty\n")
     app = BmadLoopApp(project.project)
@@ -974,7 +974,7 @@ async def test_dirty_worktree_blocks_launch(project, monkeypatch):
 
 async def test_live_run_asks_for_confirmation(project, monkeypatch):
     calls = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "start_run_detached", lambda *a, **kw: calls.append(a))
     make_run(project.project, "20260611-100000-aaaa", alive=True)  # our pid: running
     app = BmadLoopApp(project.project)
@@ -996,7 +996,7 @@ async def test_live_run_asks_for_confirmation(project, monkeypatch):
 
 async def test_unknown_pid_run_asks_for_confirmation(project, monkeypatch):
     calls = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "start_run_detached", lambda *a, **kw: calls.append(a))
     monkeypatch.setattr(data, "liveness", lambda run_dir: "unknown")
     run_dir = make_run(project.project, "20260611-100000-aaaa")
@@ -1023,7 +1023,7 @@ async def test_legacy_pidless_but_live_run_asks_for_confirmation(project, monkey
     # (liveness == "alive"). The launch guard must still catch it — the pid gate
     # alone would skip a running engine and allow a conflicting launch.
     calls = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "start_run_detached", lambda *a, **kw: calls.append(a))
     monkeypatch.setattr(data, "liveness", lambda run_dir: "alive")
     make_run(project.project, "20260611-100000-aaaa")  # no engine.pid: legacy run
@@ -1045,7 +1045,7 @@ async def test_legacy_pidless_but_live_run_asks_for_confirmation(project, monkey
 
 async def test_start_sweep_modal_launches(project, monkeypatch):
     calls = {}
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
 
     def fake_sweep(proj, run_id, *, no_prompt, decisions_only, max_bundles):
         calls.update(
@@ -1073,7 +1073,7 @@ async def test_start_sweep_modal_launches(project, monkeypatch):
 
 async def test_dry_run_shows_captured_output(project, monkeypatch):
     seen = {}
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
 
     def fake_captured(tail):
         seen["tail"] = tail
@@ -1109,7 +1109,7 @@ async def test_validate_shows_output_modal(project, monkeypatch):
 
 async def test_resume_confirm_launches(project, monkeypatch):
     calls = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "resume_detached", lambda proj, rid: calls.append(rid))
     monkeypatch.setattr(data, "liveness", lambda run_dir: "dead")
     make_run(
@@ -1129,7 +1129,7 @@ async def test_resume_confirm_launches(project, monkeypatch):
 
 
 async def test_resume_unknown_pid_warns(project, monkeypatch):
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(data, "liveness", lambda run_dir: "unknown")
     run_dir = make_run(
         project.project,
@@ -1169,7 +1169,7 @@ async def test_cleanup_unknown_sessions_notifies(project, monkeypatch):
     # must say so instead of silently killing a possibly-live engine's session.
     from bmad_loop import runs
 
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(runs, "prune_sessions", lambda _p: (["odd-1"], [], {"odd-1"}))
     monkeypatch.setattr(launch, "prune_ctl_windows", lambda _p: [])
     make_run(project.project, "20260611-100000-aaaa")
@@ -1184,7 +1184,7 @@ async def test_cleanup_unknown_sessions_notifies(project, monkeypatch):
 
 
 async def test_resume_finished_run_refused(project, monkeypatch):
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     make_run(project.project, "20260611-100000-aaaa", finished=True)
     app = BmadLoopApp(project.project)
     async with app.run_test() as pilot:
@@ -1195,18 +1195,21 @@ async def test_resume_finished_run_refused(project, monkeypatch):
         assert isinstance(app.screen, DashboardScreen)
 
 
-async def test_attach_without_tmux_notifies(project, monkeypatch):
-    monkeypatch.setattr(launch, "tmux_available", lambda: False)
+async def test_attach_without_mux_notifies(project, monkeypatch):
+    monkeypatch.setattr(launch, "mux_available", lambda: False)
     make_run(project.project, "20260611-100000-aaaa")
     app = BmadLoopApp(project.project)
     async with app.run_test() as pilot:
         await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
         await pilot.press("a")
-        await until(pilot, lambda: any("tmux not found" in m for m in notifications(app)))
+        await until(
+            pilot,
+            lambda: any("multiplexer backend unavailable" in m for m in notifications(app)),
+        )
 
 
 async def test_attach_without_agent_session_notifies(project, monkeypatch):
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "session_exists", lambda session: False)
     monkeypatch.setattr(launch, "ctl_window", lambda run_id: None)
     make_run(project.project, "20260611-100000-aaaa")
@@ -1223,7 +1226,7 @@ async def test_attach_multiplexer_error_notifies(project, monkeypatch):
     # raise after the availability/session pre-gates pass (server died or the
     # workspace was torn down in between); the TUI must surface the error as a
     # toast, not crash the app.
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "session_exists", lambda session: True)
     monkeypatch.setattr(launch, "ctl_window", lambda run_id: None)
 
@@ -1314,7 +1317,7 @@ async def test_attach_targets_ctl_window_when_decision_pending(project, monkeypa
     run_dir = make_run(project.project, "20260611-100000-aaaa", run_type="sweep", alive=True)
     Journal(run_dir).append("decision-pending", dw_id="DW-7", question="q?")
     selected: list[str] = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "session_exists", lambda session: True)  # agent up too
     monkeypatch.setattr(launch, "ctl_window", lambda run_id: f"sweep-{run_id}")
     monkeypatch.setattr(launch, "select_ctl_window", lambda w: selected.append(w))
@@ -1340,7 +1343,7 @@ async def test_attach_outside_tmux_stamps_detach(project, monkeypatch):
     Journal(run_dir).append("decision-pending", dw_id="DW-7", question="q?")
     monkeypatch.delenv("TMUX", raising=False)
     stamps: list[tuple[str, str]] = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "session_exists", lambda session: True)
     monkeypatch.setattr(launch, "ctl_window", lambda run_id: f"sweep-{run_id}")
     monkeypatch.setattr(launch, "select_ctl_window", lambda w: None)
@@ -1357,7 +1360,7 @@ async def test_attach_outside_tmux_stamps_detach(project, monkeypatch):
 @pytest.mark.usefixtures("force_tmux_backend")  # win32: pin tmux; default mux is herdr there
 async def test_attach_prefers_agent_session_without_decision(project, monkeypatch):
     make_run(project.project, "20260611-100000-aaaa", alive=True)
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "session_exists", lambda session: True)
     monkeypatch.setattr(launch, "ctl_window", lambda run_id: f"run-{run_id}")
     calls, stamps = _patch_attach_exec(monkeypatch)
@@ -1376,7 +1379,7 @@ async def test_attach_prefers_agent_session_without_decision(project, monkeypatc
 async def test_attach_falls_back_to_ctl_window(project, monkeypatch):
     make_run(project.project, "20260611-100000-aaaa", alive=True)
     selected: list[str] = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "session_exists", lambda session: False)
     monkeypatch.setattr(launch, "ctl_window", lambda run_id: f"run-{run_id}")
     monkeypatch.setattr(launch, "select_ctl_window", lambda w: selected.append(w))
@@ -1396,7 +1399,7 @@ async def test_attach_falls_back_to_ctl_window(project, monkeypatch):
 async def test_resolve_escalation_launches_and_attaches(project, monkeypatch):
     launched: list[str] = []
     selected: list[str] = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(data, "liveness", lambda run_dir: "dead")
 
     def fake_start_resolve(proj, rid):
@@ -1429,7 +1432,7 @@ async def test_resolve_escalation_launches_and_attaches(project, monkeypatch):
 
 async def test_resolve_unknown_pid_refused(project, monkeypatch):
     launched: list[str] = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(data, "liveness", lambda run_dir: "unknown")
     monkeypatch.setattr(launch, "start_resolve_detached", lambda proj, rid: launched.append(rid))
     run_dir = make_run(
@@ -1450,7 +1453,7 @@ async def test_resolve_unknown_pid_refused(project, monkeypatch):
 
 async def test_resolve_refused_when_not_escalation(project, monkeypatch):
     launched: list[str] = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(data, "liveness", lambda run_dir: "dead")
     monkeypatch.setattr(launch, "start_resolve_detached", lambda proj, rid: launched.append(rid))
     make_run(
@@ -1622,7 +1625,7 @@ async def _open_review(app, pilot, modal_type):
 
 async def test_plan_checkpoint_approve_resumes(project, monkeypatch):
     calls: list[str] = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "resume_detached", lambda proj, rid: calls.append(rid))
     monkeypatch.setattr(data, "liveness", lambda run_dir: "dead")
     _stories_paused_run(project.project, stage="plan-checkpoint")
@@ -1639,7 +1642,7 @@ async def test_plan_checkpoint_replan_resets_and_resumes(project, monkeypatch):
     calls: list[str] = []
     resets: list[tuple] = []
     strips: list[Path] = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "resume_detached", lambda proj, rid: calls.append(rid))
     monkeypatch.setattr(data, "liveness", lambda run_dir: "dead")
     monkeypatch.setattr(
@@ -1658,7 +1661,7 @@ async def test_plan_checkpoint_replan_resets_and_resumes(project, monkeypatch):
 
 async def test_story_checkpoint_continue_resumes(project, monkeypatch):
     calls: list[str] = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "resume_detached", lambda proj, rid: calls.append(rid))
     monkeypatch.setattr(data, "liveness", lambda run_dir: "dead")
     _stories_paused_run(
@@ -1680,7 +1683,7 @@ async def test_story_checkpoint_stop_marks_stopped(project, monkeypatch):
     from bmad_loop import runs
 
     stops: list[Path] = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(data, "liveness", lambda run_dir: "dead")
     monkeypatch.setattr(runs, "stop_run", lambda rd: stops.append(rd) or True)
     monkeypatch.setattr(launch, "kill_ctl_window", lambda rid: None)
@@ -1709,7 +1712,7 @@ def test_checkpoint_gate_line_pluralization():
 async def test_story_checkpoint_card_surfaces_real_review_cycles(project, monkeypatch):
     # audit item 13: the card's gate line must reflect the task's real
     # review_cycle, never the old blanket "verification passed" string.
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(data, "liveness", lambda run_dir: "dead")
     _stories_paused_run(
         project.project,
@@ -1734,7 +1737,7 @@ async def test_escalation_rearm_resumes_when_resolution_ready(project, monkeypat
 
     calls: list[str] = []
     rearms: list[str] = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "resume_detached", lambda proj, rid: calls.append(rid))
     monkeypatch.setattr(data, "liveness", lambda run_dir: "dead")
     monkeypatch.setattr(
@@ -1787,7 +1790,7 @@ async def test_escalation_rearm_warns_when_restore_recorded(project, monkeypatch
     calls: list[str] = []
     rearms: list[str] = []
     notes: list[str] = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "resume_detached", lambda proj, rid: calls.append(rid))
     monkeypatch.setattr(data, "liveness", lambda run_dir: "dead")
     monkeypatch.setattr(
@@ -1836,7 +1839,7 @@ async def test_escalation_rearm_disabled_without_resolution(project, monkeypatch
 
 async def test_gate_pause_resume(project, monkeypatch):
     calls: list[str] = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "resume_detached", lambda proj, rid: calls.append(rid))
     monkeypatch.setattr(data, "liveness", lambda run_dir: "dead")
     spec = project.project / "spec-1-1-a.md"
@@ -1860,7 +1863,7 @@ async def test_gate_pause_resume(project, monkeypatch):
 
 async def test_start_run_modal_stories_source_launches(project, monkeypatch):
     calls: dict = {}
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
 
     def fake_start(proj, run_id, *, spec=None, epic, story, max_stories):
         calls.update(spec=spec, epic=epic, story=story)
@@ -1881,10 +1884,10 @@ async def test_start_run_modal_stories_source_launches(project, monkeypatch):
 
 
 async def test_start_run_modal_stories_preview_validates(project, monkeypatch):
-    # action_start_run bails on _tmux_missing() before it can push the modal, and
+    # action_start_run bails on _mux_missing() before it can push the modal, and
     # the Windows CI matrix has no tmux on PATH — every StartRunModal test stubs
     # this out so the modal opens (its absence here was the all-Windows timeout).
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     _write_stories_fixture(project.project)  # epic-1 with two stories, 1 done
     app = BmadLoopApp(project.project)
     async with app.run_test() as pilot:
@@ -1922,7 +1925,7 @@ async def test_start_run_modal_stories_preview_validates(project, monkeypatch):
 
 async def test_start_run_modal_stories_source_blank_folder_errors(project, monkeypatch):
     calls: list = []
-    monkeypatch.setattr(launch, "tmux_available", lambda: True)
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
     monkeypatch.setattr(launch, "start_run_detached", lambda *a, **kw: calls.append(a))
     app = BmadLoopApp(project.project)
     async with app.run_test() as pilot:

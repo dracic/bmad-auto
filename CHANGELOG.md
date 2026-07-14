@@ -53,6 +53,15 @@ breaking changes may land in a minor release.
   forced selection. A tmux-less POSIX host still selects `TmuxMultiplexer` and reports it
   unavailable, exactly as before.
 
+- **Seam-canonical window targets.** The `=session[:window]` target grammar is now owned by the
+  `TerminalMultiplexer` seam instead of living as hand-assembled tmux syntax in core: a new
+  concrete `target(session, window=None)` encoder (overridable per backend, tmux inherits the
+  default and passes it straight through) and a module-level `parse_target()` decoder that
+  native-id backends reuse instead of re-deriving the grammar (the herdr backend's
+  `_parse_target` now delegates to it). `runs.py`/`tui/launch.py`/`tui/app.py` format every
+  target via `target()` (new `runs.session_target` / `launch.ctl_target` helpers) — output is
+  byte-identical, so no backend or operator behavior changes; the contract is documented in the
+  adapter authoring guide's new "Window targets" section.
 - **Herdr TUI-launch surface.** The herdr backend now covers everything `tui/launch.py` drives:
   parked orchestrator windows (a typed `exec sh -c '<argv>; banner; read; trailer'` recipe,
   tmux-identical from the operator's seat, with the return-to-origin target mirrored into a
@@ -79,7 +88,8 @@ breaking changes may land in a minor release.
   `platform_util.file_lock`), lazy server autostart, and a protocol-version guard
   (fail-below / warn-above). Landed as one registration line plus one sanctioned `probe.py` gate
   fix — zero portability-guard allowlist changes. The TUI-launch surface landed as a second PR
-  (previous entry); the remaining degradations are in the backend module docstring's ledger.
+  (previous entry); the remaining degradations are in the backend module docstring's ledger and,
+  operator-facing, in `docs/multiplexer-backends.md`.
 - **Stories mode — a second planning pipeline that drives the loop off a typed `stories.yaml` (folder+id dispatch) instead of `sprint-status.yaml`.** Opt in with `[stories] source = "stories"` + `spec_folder`, or per run with `bmad-loop run --spec <folder>` (overrides policy); `--story` then filters by story id. Each entry dispatches by folder + id — the dev skill creates-or-resumes the story spec at `<folder>/stories/<id>-<slug>.md` and the orchestrator reads that id-keyed path back deterministically (no shared board to line-edit, no result-artifact mtime-scan). Strictly linear schedule (list order, no `depends_on`); `bmad-loop run --dry-run --spec <folder>` and `bmad-loop status` print the board (id · live disk state · checkpoint markers · title). Sprint mode is unchanged and remains the default. Requires a `bmad-dev-auto` new enough for folder+id dispatch — the run preflight checks and remediates.
 - **Per-story human checkpoints (stories mode).** Independent `spec_checkpoint` (pause before code to review the plan — dev halts at `ready-for-dev`; approve to implement, or request a replan that resets the spec to `draft`) and `done_checkpoint` (pause after the story commits, skipped when it is the last story); both additive to `gates.mode`. A blocked story escalates + resolves as in sprint mode, with a pre-planning-halt sentinel auto-deleted (a copy preserved under the run dir) on re-arm.
 - **TUI human-in-the-loop surface for stories mode.** The sprint tree is replaced by a stories board (id · live disk state · spec/done checkpoint markers · title) when a stories-mode run is selected; paused runs carry a per-run pause-kind badge and the run list shows a global _⚑ N need attention_ count; `p` opens the stage-appropriate viewer — plan-checkpoint spec review (Approve & resume / Request replan), story-checkpoint summary card (Continue / Stop), escalation with story context (Resolve / Re-arm & resume), and a gate spec viewer that the existing spec-approval/epic pauses reuse. The start-run modal gains a source select + spec-folder field with a live schedule preview. Every TUI action calls the same code paths as the CLI.
@@ -102,6 +112,23 @@ breaking changes may land in a minor release.
 
 ### Changed
 
+- **Backend-neutral naming for the seam-backed helpers and operator messages.** The multiplexer
+  seam has non-tmux backends now, so the helpers that wrap it drop their legacy tmux names —
+  `launch.tmux_available` → `mux_available`, `app._tmux_missing` → `_mux_missing`,
+  `runs.tmux_sessions` → `mux_sessions` (internal, no deprecation aliases) — and the operator-facing
+  strings stop naming tmux when they mean the selected backend: launch errors say
+  `multiplexer new-session/new-window failed` and `multiplexer backend unavailable (binary not on
+PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disabled` and
+  `launched (control session bmad-loop-ctl)`, and the "attach to … bmad-loop-ctl" hints say
+  _control session_. The TUI-guide troubleshooting table matches. Behavior is unchanged.
+- **Docs: operator guide for the herdr backend (`docs/multiplexer-backends.md`).** The user-facing
+  docs no longer claim tmux is the only multiplexer backend. The new page covers backend selection
+  (`bmad-loop mux` / `mux set`) and what changes from the operator's seat on herdr — chiefly that
+  herdr has no CLI detach, so the automatic hand-back after answering an attached sweep decision
+  becomes a manual `ctrl+b q`; the rest (polled session logs, the `~/.bmad-loop/herdr-state.json`
+  sidecar, advisory geometry, lazy server autostart, no last-client fallback) is emulated to parity
+  or cosmetic. README, setup guide, TUI guide, and FEATURES now name both backends and link the
+  page.
 - **Docs: `followup_review_recommended` is now scored upstream.** BMAD-METHOD#2580 replaced the
   skill's convergence-prone significance judgment with a severity-weighted score over patched
   findings and added a fourth default review layer (Intent Alignment Auditor, #2560). README,

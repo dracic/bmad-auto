@@ -185,10 +185,10 @@ def test_existing_ctl_session_reused(monkeypatch, tmp_path: Path):
     assert [c[1] for c in fake.calls] == ["has-session", "new-window", "set-option"]
 
 
-def test_launch_without_tmux_raises(monkeypatch, tmp_path: Path):
+def test_launch_without_mux_raises(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(tmux_base.shutil, "which", lambda name: None)
-    assert not launch.tmux_available()
-    with pytest.raises(launch.LaunchError, match="tmux not found"):
+    assert not launch.mux_available()
+    with pytest.raises(launch.LaunchError, match="multiplexer backend unavailable"):
         launch.start_run_detached(tmp_path, "RID")
 
 

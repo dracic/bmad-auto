@@ -84,6 +84,22 @@ seams of a full OS port are in
   `detach_client`, `switch_client` (with an optional last-client fallback),
   `available` (is this backend usable on the current host).
 
+**Window targets.** The target-taking methods (`kill_window`, `select_window`,
+the window-option trio, `attach_target_argv`, `switch_client`) receive one of two
+families: the **seam-canonical target token** `=session[:window]` — formatted by
+the concrete `TerminalMultiplexer.target(session, window=None)`, decoded by the
+module-level `parse_target()` — or the backend's own **native id** (whatever your
+`new_window` returned). Core never hand-assembles the grammar; it calls
+`target()`. tmux consumes the token natively (it coincides with tmux exact-match
+syntax), so `BaseTmuxBackend` passes it straight through. A native-id backend
+calls `parse_target()` first — `None` means "already a native id, use as-is",
+otherwise resolve `(session, window)` yourself; `herdr_backend._parse_target` is
+the worked example (workspace-by-label → tab-by-name → root pane, resolved lazily
+at use time). You MAY override `target()` to emit native ids, but the token must
+stay a stable _by-name_ reference: core formats targets ahead of use (a parked
+window's return target, for one), so eager resolution to a live id goes stale —
+inheriting the default and resolving lazily is almost always right.
+
 Operations that can race a window dying (`pipe_pane`) or a session already being
 gone (`kill_session`) must tolerate it rather than raise; everything else raises a
 `MultiplexerError` subclass on failure, which call sites catch at the seam (e.g.
@@ -113,7 +129,9 @@ a tmux tee would (`generic._log_activity_key`'s stall re-arm and `probe`'s marke
 discovery). Its module docstring is a **degradation ledger** of every such
 divergence (sidecar options, poller `pipe_pane`, no-op `detach_client`, the attach
 argv, the advisory geometry, the protocol-version policy) — the reference for what
-"implement fresh" costs when the host has no tmux-shaped CLI.
+"implement fresh" costs when the host has no tmux-shaped CLI. The operator-facing
+view — what a herdr _user_ notices and does — is
+[Terminal multiplexer backends](multiplexer-backends.md).
 
 The hard part of a new profile isn't the TOML — it's the **facts that live in no
 doc**: the CLI's exact hook payload shape (field names and casing, whether
