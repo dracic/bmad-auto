@@ -695,6 +695,54 @@ def test_new_parked_window_missing_session_raises(fake, tmp_path):
         HerdrMultiplexer().new_parked_window("s", "n", tmp_path, ["echo", "hi"], RETURN_OPTION)
 
 
+def test_new_parked_window_rolls_back_tab_when_recipe_typing_fails(fake, monkeypatch):
+    # tmux gets create+launch atomically (one new-window call); here the tab
+    # already exists when the recipe-typing `pane run` fails, so the backend
+    # must close it again — not leave an untracked idle shell in the ctl
+    # workspace with a stale sidecar entry.
+    fake.add_workspace("bmad-loop-ctl")
+    before = {p["pane_id"] for p in fake.panes}
+    real_dispatch = fake._dispatch
+    seen: dict[str, str] = {}
+
+    def failing_pane_run(cmd, argv):
+        if argv[:2] == ["pane", "run"]:
+            seen["pane_id"] = argv[2]
+            return fake._server_err(cmd, "internal", "pane run exploded")
+        return real_dispatch(cmd, argv)
+
+    monkeypatch.setattr(fake, "_dispatch", failing_pane_run)
+    with pytest.raises(HerdrError):
+        HerdrMultiplexer().new_parked_window(
+            "bmad-loop-ctl", "run-RID", Path("/w"), ["x"], RETURN_OPTION
+        )
+    assert seen["pane_id"] not in before  # the launch really created a fresh pane
+    assert {p["pane_id"] for p in fake.panes} == before  # ...and rolled it back
+    assert _creates(fake, "pane", "close")  # via an explicit close, not luck
+    state = json.loads(Path(os.environ["BMAD_LOOP_HERDR_STATE"]).read_text())
+    assert seen["pane_id"] not in state["windows"]  # sidecar entry pruned too
+
+
+def test_new_parked_window_rolls_back_tab_when_sidecar_write_fails(fake, monkeypatch):
+    # The sidecar write sits between tab create and recipe typing; when it
+    # fails there is no sidecar entry to catch the tab later, so the rollback
+    # is the only thing standing between us and an orphan.
+    fake.add_workspace("bmad-loop-ctl")
+    before = {p["pane_id"] for p in fake.panes}
+
+    def no_lock(_path, **_kw):
+        raise OSError("lock unavailable")
+
+    monkeypatch.setattr(herdr_backend.platform_util, "file_lock", no_lock)
+    with pytest.raises(HerdrError):
+        HerdrMultiplexer().new_parked_window(
+            "bmad-loop-ctl", "run-RID", Path("/w"), ["x"], RETURN_OPTION
+        )
+    assert {p["pane_id"] for p in fake.panes} == before  # created tab rolled back
+    assert _creates(fake, "pane", "close")
+    assert not _creates(fake, "pane", "run")  # recipe never typed into a doomed tab
+
+
 def test_parked_return_option_round_trip(fake):
     # cmd_attach / the TUI write the return option by tmux-style name target;
     # return_attached_client (inside the window) reads it back by native id —

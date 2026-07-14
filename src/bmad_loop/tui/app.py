@@ -21,6 +21,7 @@ from textual.binding import Binding
 from tomlkit.exceptions import ParseError
 
 from .. import bmadconfig, decisions, devcontract, policy, resolve, runs, stories, verify
+from ..adapters.multiplexer import MultiplexerError
 from ..journal import load_state
 from ..model import (
     PAUSE_EPIC_BOUNDARY,
@@ -377,7 +378,11 @@ class BmadLoopApp(App[None]):
         self._attach_to_target(target)
 
     def _attach_to_target(self, target: str, return_window: str | None = None) -> None:
-        argv = runs.attach_target_argv(target)
+        try:
+            argv = runs.attach_target_argv(target)
+        except MultiplexerError as e:
+            self.notify(str(e), severity="error")
+            return
         # Backend-honest inside-the-multiplexer probe (current_pane_id() is None
         # outside): inside, attach_target_argv returned the fire-and-forget
         # switch/focus form, so no suspend is needed.

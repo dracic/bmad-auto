@@ -848,17 +848,27 @@ class HerdrMultiplexer(TerminalMultiplexer):
             raise HerdrError(f"herdr tab create did not return a root pane id: {result!r}")
         # Record which option this window's trailer consumes BEFORE typing the
         # recipe, so a set_window_option racing the launch already mirrors into
-        # the return file.
+        # the return file. tmux gets create+launch atomically (one new-window
+        # call); here the tab already exists, so any failure before the recipe
+        # is typed must roll it back or it lingers as an untracked idle shell
+        # until the whole workspace is closed.
         try:
-            with _state_lock():
-                state = _load_state()
-                state["windows"].setdefault(pane_id, {})[_PARKED_RETURN_KEY] = return_opt
-                _save_state(state)
-        except OSError as exc:
-            raise HerdrError(f"herdr sidecar write failed: {exc}") from exc
-        self._client._herdr(
-            "pane", "run", pane_id, "exec sh -c " + shlex.quote(_parked_source(argv, pane_id))
-        )
+            try:
+                with _state_lock():
+                    state = _load_state()
+                    state["windows"].setdefault(pane_id, {})[_PARKED_RETURN_KEY] = return_opt
+                    _save_state(state)
+            except OSError as exc:
+                raise HerdrError(f"herdr sidecar write failed: {exc}") from exc
+            self._client._herdr(
+                "pane", "run", pane_id, "exec sh -c " + shlex.quote(_parked_source(argv, pane_id))
+            )
+        except MultiplexerError:
+            try:
+                self.kill_window(pane_id)
+            except MultiplexerError:
+                pass
+            raise
         return pane_id
 
     def list_window_ids(self, session: str) -> list[str]:
