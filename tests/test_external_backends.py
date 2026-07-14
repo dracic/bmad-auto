@@ -170,7 +170,7 @@ def test_mux_command_surfaces_load_failures(scan_registry, monkeypatch, capsys, 
 
     from bmad_loop import cli
 
-    registry, arm = scan_registry
+    _registry, arm = scan_registry
 
     def boom():
         raise ImportError("No module named 'ghost_dependency'")
