@@ -25,8 +25,9 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Callable
+from typing import Callable, Iterator
 
 from .process_host import get_process_host
 
@@ -150,6 +151,47 @@ def retrying_unlink(path: Path) -> None:
     an AV/indexer scanning the just-written source file fails the unlink. Pair the
     two whenever a move must not half-apply."""
     _retry_on_sharing_violation(path.unlink)
+
+
+@contextmanager
+def file_lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
+    """Exclusive OS advisory lock on ``path`` (created if missing), released on
+    exit — and by the kernel when the holder dies, so a crashed process never
+    wedges the lock (no stale-lockfile scheme to clean up). ``blocking=False``
+    raises ``OSError`` at once when the lock is already held, giving tests a
+    deterministic exclusion probe instead of a sleep-based negative assertion.
+
+    Lock a dedicated sibling file, never data that is swapped via
+    :func:`atomic_replace` — the lock rides the open fd's inode, and a replace
+    would swap that inode out from under later acquirers. ``fcntl.flock`` on
+    POSIX (blocks indefinitely; holders only do brief file I/O); ``msvcrt.locking``
+    on Windows, where the blocking mode's built-in ~10 s retry bounds the wait
+    and surfaces contention as ``OSError``.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT)
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            # Locks 1 byte at the current position — 0 on a fresh fd.
+            msvcrt.locking(fd, msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                import msvcrt
+
+                # Unlock the same 1-byte region before close; POSIX flock is
+                # released by the close itself.
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(fd)
 
 
 def _is_reserved_basename(seg: str) -> bool:

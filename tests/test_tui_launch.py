@@ -19,6 +19,12 @@ import pytest
 from bmad_loop.adapters import tmux_base
 from bmad_loop.tui import launch
 
+# Every test here asserts tmux-specific argv/behaviour through the multiplexer
+# seam. Now that the win32-matching herdr backend is registered, get_multiplexer()
+# no longer bottom-falls-back to tmux on the Windows CI leg, so pin tmux by name
+# (a no-op on POSIX, where tmux is already the default).
+pytestmark = pytest.mark.usefixtures("force_tmux_backend")
+
 
 class FakeRun:
     """Records argv; scripts the returncode of `tmux has-session`."""
@@ -242,14 +248,29 @@ def test_current_pane_id_reads_pane(monkeypatch):
     def fake(argv, **kwargs):
         return subprocess.CompletedProcess(argv, 0, stdout="%9\n", stderr="")
 
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")  # inside tmux
     monkeypatch.setattr(tmux_base.subprocess, "run", fake)
     assert launch.current_pane_id() == "%9"
 
 
 def test_current_pane_id_none_outside_tmux(monkeypatch):
+    # Outside tmux the TMUX guard answers None WITHOUT shelling out: against a
+    # live server, display-message would answer for some OTHER client's session
+    # and misreport a plain shell as being inside tmux.
+    def boom(*_a, **_k):
+        raise AssertionError("outside tmux, current_* must not shell out")
+
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr(tmux_base.subprocess, "run", boom)
+    assert launch.current_pane_id() is None
+    assert launch.current_session() is None
+
+
+def test_current_pane_id_none_on_transport_failure(monkeypatch):
     def fake(argv, **kwargs):
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="no server")
 
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")
     monkeypatch.setattr(tmux_base.subprocess, "run", fake)
     assert launch.current_pane_id() is None
 
@@ -290,6 +311,7 @@ def test_prune_ctl_windows(monkeypatch, tmp_path: Path):
             killed.append(list(argv))
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")  # we sit in a pane of @4
     monkeypatch.setattr(tmux_base.subprocess, "run", fake)
     monkeypatch.setattr(tmux_base.shutil, "which", lambda name: f"/usr/bin/{name}")
 
@@ -336,6 +358,7 @@ def test_prune_ctl_windows_skips_invalid_run_ids(monkeypatch, tmp_path: Path):
             killed.append(list(argv))
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")
     monkeypatch.setattr(tmux_base.subprocess, "run", fake)
     monkeypatch.setattr(tmux_base.shutil, "which", lambda name: f"/usr/bin/{name}")
 
@@ -359,14 +382,28 @@ def test_select_ctl_window_id_argv(fake_run):
 
 
 def test_in_ctl_session(monkeypatch):
+    # in_ctl_session is backend-honest: it trusts current_session(), which is
+    # None whenever this process is not inside the selected multiplexer (the
+    # old direct TMUX sniff lives in the tmux backend's _display_message now —
+    # see test_in_ctl_session_outside_tmux).
     monkeypatch.setattr(launch, "current_session", lambda: "bmad-loop-ctl")
-    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")
     assert launch.in_ctl_session() is True
     monkeypatch.setattr(launch, "current_session", lambda: "some-other-session")
     assert launch.in_ctl_session() is False
+    monkeypatch.setattr(launch, "current_session", lambda: None)
+    assert launch.in_ctl_session() is False  # not inside the multiplexer
+
+
+def test_in_ctl_session_outside_tmux(monkeypatch):
+    # End-to-end through the real tmux backend: outside tmux (no TMUX env) the
+    # backend's current_session() is None without shelling out, even when a
+    # live server would answer display-message for some other client.
+    def boom(*_a, **_k):
+        raise AssertionError("outside tmux, in_ctl_session must not shell out")
+
     monkeypatch.delenv("TMUX", raising=False)
-    monkeypatch.setattr(launch, "current_session", lambda: "bmad-loop-ctl")
-    assert launch.in_ctl_session() is False  # not inside tmux
+    monkeypatch.setattr(tmux_base.subprocess, "run", boom)
+    assert launch.in_ctl_session() is False
 
 
 def test_detach_client_argv(fake_run):
@@ -376,7 +413,10 @@ def test_detach_client_argv(fake_run):
 
 def _return_fake(monkeypatch, *, win="@5", option="%9", switch_rc=0):
     """Script tmux for return_attached_client: display-message -> window id,
-    show-options -> the recorded RETURN_OPTION, switch-client -> switch_rc."""
+    show-options -> the recorded RETURN_OPTION, switch-client -> switch_rc.
+    return_attached_client runs inside a ctl window, so TMUX is set (the
+    backend's current_window_id answers None otherwise)."""
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")
     calls: list[list[str]] = []
 
     def fake(argv, **kwargs):

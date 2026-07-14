@@ -246,11 +246,19 @@ def _load_builtin_backends() -> None:
     global _BUILTINS_LOADED
     if _BUILTINS_LOADED:
         return
+    from .herdr_backend import HerdrMultiplexer
     from .tmux_backend import TmuxMultiplexer
 
     # tmux is the default everywhere except native Windows (no tmux binary there);
     # get_multiplexer still falls back to tmux when no backend matches.
     register_multiplexer("tmux", lambda platform: platform != "win32", TmuxMultiplexer)
+    # herdr is a cross-platform, agent-aware backend (a different binary family, so
+    # it never conflicts with tmux). Registered AFTER tmux so on POSIX the tmux
+    # platform-default still wins; on native Windows (no tmux match, psmux
+    # out-of-tree) herdr is the first platform match. Opt-in only — _PLATFORM_DEFAULTS
+    # stays untouched, so POSIX hosts keep tmux unless BMAD_LOOP_MUX_BACKEND / the
+    # [mux] backend policy names herdr.
+    register_multiplexer("herdr", lambda platform: True, HerdrMultiplexer)
     _BUILTINS_LOADED = True  # set only after a successful import so a transient failure retries
 
 

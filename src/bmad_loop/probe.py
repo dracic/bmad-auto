@@ -491,8 +491,18 @@ def probe(
     )
     finding.flags = run_version_help(binary)
 
-    if not shutil.which("tmux") or not shutil.which(binary):
-        missing = "tmux" if not shutil.which("tmux") else binary
+    # The live probe launches through the selected multiplexer backend (see
+    # _ProbeLauncher), so gate on THAT backend's availability rather than a
+    # hardcoded `which("tmux")` — a Windows host running herdr (or a future psmux)
+    # must still probe. `available()` is guarded so a backend whose host probe
+    # raises reads as unavailable, exactly like selection's _usable().
+    mux = get_multiplexer()
+    try:
+        mux_ready = bool(mux.available())
+    except Exception:  # noqa: BLE001 — a raising host probe means "cannot probe", not a crash
+        mux_ready = False
+    if not mux_ready or not shutil.which(binary):
+        missing = f"multiplexer backend {type(mux).__name__}" if not mux_ready else binary
         finding.warnings.append(f"{missing} not on PATH — cannot probe; falling back to scan")
         scanned = scan(cli=cli, profile=profile, project=project, hints=hints)
         scanned.mode = "probe"

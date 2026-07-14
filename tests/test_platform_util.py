@@ -183,6 +183,39 @@ def test_retrying_unlink_propagates_missing_file(tmp_path):
         platform_util.retrying_unlink(tmp_path / "gone.md")
 
 
+# --------------------------------------------------------------------- file_lock
+
+
+def test_file_lock_excludes_second_acquirer(tmp_path):
+    """While held, a second (non-blocking) acquisition on the same path fails —
+    the deterministic exclusion probe, no sleep-based negative assertion. Runs
+    the fcntl branch on POSIX and the msvcrt branch on the Windows CI leg."""
+    lock = tmp_path / "state.json.lock"
+    with platform_util.file_lock(lock):
+        with pytest.raises(OSError):
+            with platform_util.file_lock(lock, blocking=False):
+                pass  # pragma: no cover — must not be reached
+    # Released on exit: the probe now succeeds.
+    with platform_util.file_lock(lock, blocking=False):
+        pass
+
+
+def test_file_lock_creates_parent_and_lock_file(tmp_path):
+    lock = tmp_path / "deep" / "nested" / "s.lock"
+    with platform_util.file_lock(lock):
+        assert lock.exists()
+
+
+def test_file_lock_reentry_after_exception(tmp_path):
+    """An exception inside the critical section still releases the lock."""
+    lock = tmp_path / "s.lock"
+    with pytest.raises(RuntimeError):
+        with platform_util.file_lock(lock):
+            raise RuntimeError("boom")
+    with platform_util.file_lock(lock, blocking=False):
+        pass
+
+
 # ------------------------------------------------------------------ safe_segment
 
 
