@@ -58,7 +58,12 @@ gitignored) → the platform default when registered and `available()` → the
 first available platform match → the historical tmux fallback. `bmad-loop mux`
 lists every registered backend and the selection; same-platform backends need
 discriminating `available()` probes (see the
-[porting guide](porting-to-a-new-os.md#availability-discriminators-same-platform-backends)). There are two build paths: extend `BaseTmuxBackend` (`adapters/tmux_base.py`)
+[porting guide](porting-to-a-new-os.md#availability-discriminators-same-platform-backends)).
+An out-of-tree backend package makes its registration run by advertising the
+module under the `bmad_loop.mux_backends` entry-point group — core imports it
+before every selection, so co-installing the package is the whole setup (see
+[the porting guide](porting-to-a-new-os.md#shipping-out-of-tree-the-bmad_loopmux_backends-entry-point);
+a broken package degrades to a `bmad-loop mux` warning, never a selection failure). There are two build paths: extend `BaseTmuxBackend` (`adapters/tmux_base.py`)
 for a tmux-family backend — overriding only its single spawn primitive `_run()`
 plus the shell-dialect hooks (`_shell_wrap`, `_join_argv`, `_parked_trailer`,
 `_source_prefix`, `_window_launch` and the `_EXIT_CAPTURE`/`_ECHO`/`_PARK`

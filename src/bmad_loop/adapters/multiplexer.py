@@ -10,8 +10,10 @@ can slot in without the rest of the codebase shelling out to ``tmux`` directly.
 ``TerminalMultiplexer`` is the contract a backend author implements. Operation
 names mirror today's call sites verbatim so the migration is mechanical. Backends
 register themselves through :func:`register_multiplexer` (bundled ones from
-:func:`_load_builtin_backends`, out-of-tree ones at import time); the process-wide
-backend is selected by registry and returned by :func:`get_multiplexer`.
+:func:`_load_builtin_backends`; out-of-tree ones at import time, triggered by the
+``bmad_loop.mux_backends`` entry-point scan in :func:`_load_external_backends` —
+so a pip/uv co-installed adapter package is selectable with no config step); the
+process-wide backend is selected by registry and returned by :func:`get_multiplexer`.
 
 Selection precedence (issue #87): the ``BMAD_LOOP_MUX_BACKEND`` env var, then the
 policy ``[mux] backend`` choice (installed once per CLI invocation via
@@ -25,6 +27,7 @@ registry for ``bmad-loop mux`` and the ``validate`` preflight.
 from __future__ import annotations
 
 import functools
+import importlib.metadata
 import os
 import sys
 from abc import ABC, abstractmethod
@@ -303,6 +306,48 @@ def _load_builtin_backends() -> None:
     _BUILTINS_LOADED = True  # set only after a successful import so a transient failure retries
 
 
+# The entry-point group an out-of-tree backend package advertises its module
+# under; importing the module runs its register_multiplexer call. Loader state:
+# scanned-once flag + per-entry-point failure reasons for mux/validate to show.
+MUX_BACKENDS_GROUP = "bmad_loop.mux_backends"
+_EXTERNALS_LOADED = False
+_EXTERNAL_ERRORS: dict[str, str] = {}
+
+
+def _load_external_backends() -> None:
+    """Import every ``bmad_loop.mux_backends`` entry point; each module
+    self-registers via :func:`register_multiplexer` at import time. Called after
+    :func:`_load_builtin_backends`, so builtins keep first registration (tmux
+    stays first-wins on a name collision) and selection precedence is unchanged.
+
+    A broken third-party distribution must never break backend selection:
+    failures are recorded in ``_EXTERNAL_ERRORS`` (surfaced by ``bmad-loop mux``
+    and the ``validate`` preflight via :func:`external_backend_errors`), not
+    raised. Unlike ``_BUILTINS_LOADED``, the loaded-flag is set up front: a
+    third-party import failure is not transient, and retrying on every
+    selection would re-import (and re-fail) each time."""
+    global _EXTERNALS_LOADED
+    if _EXTERNALS_LOADED:
+        return
+    _EXTERNALS_LOADED = True
+    try:
+        eps = importlib.metadata.entry_points(group=MUX_BACKENDS_GROUP)
+    except Exception as exc:  # noqa: BLE001 — diagnostics path, never crash selection
+        _EXTERNAL_ERRORS["<entry-point scan>"] = f"{type(exc).__name__}: {exc}"
+        return
+    for ep in eps:
+        try:
+            ep.load()  # module import runs register_multiplexer(...)
+        except Exception as exc:  # noqa: BLE001 — one bad package must not hide the rest
+            _EXTERNAL_ERRORS[ep.name] = f"{type(exc).__name__}: {exc}"
+
+
+def external_backend_errors() -> dict[str, str]:
+    """Entry-point name -> failure reason for every external backend that failed
+    to load this process (empty when all loaded). For diagnostics surfaces."""
+    return dict(_EXTERNAL_ERRORS)
+
+
 def configure_multiplexer(name: str | None, *, origin: Path | None = None) -> None:
     """Install the policy ``[mux] backend`` choice (``None``/``""`` = auto).
 
@@ -359,6 +404,7 @@ def _select() -> tuple[TerminalMultiplexer, str, str]:
     can't run. A forced name matching nothing is a misconfiguration; never
     silently fall back to tmux (wrong/unsafe on a non-POSIX host)."""
     _load_builtin_backends()
+    _load_external_backends()
     forced = os.environ.get("BMAD_LOOP_MUX_BACKEND")
     if forced:
         factory = _factory_by_name(forced)
@@ -442,6 +488,7 @@ def detect_multiplexers() -> list[MuxBackendInfo]:
     every registered backend, so factories must stay cheap, side-effect-free
     constructors (true of the tmux family)."""
     _load_builtin_backends()
+    _load_external_backends()
     try:
         _, selected_name, reason = _select()
     except MultiplexerError:
