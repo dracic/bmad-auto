@@ -9,7 +9,7 @@ Status legend: **planned** (agreed, not started) · **exploring** (shape still o
 
 ## Native Windows multiplexer backend
 
-**Status:** planned · **Foundation:** the full platform-seam series landed (multiplexer registry + `BaseTmuxBackend` + `ProcessHost` + hook interpreter + validate preflight, v0.7.6; availability-aware backend selection + `bmad-loop mux`, #87; original seam v0.7.0) · a first non-tmux-family, native-Windows-capable backend — **herdr** — now ships for the engine run path (TUI-launch surface follows in a second PR)
+**Status:** planned · **Foundation:** the full platform-seam series landed (multiplexer registry + `BaseTmuxBackend` + `ProcessHost` + hook interpreter + validate preflight, v0.7.6; availability-aware backend selection + `bmad-loop mux`, #87; original seam v0.7.0) · a first non-tmux-family, native-Windows-capable backend — **herdr** — now ships end-to-end on POSIX (engine run path + TUI-launch surface; the win32 `agent.start` launch path is the remaining follow-up)
 
 The orchestrator no longer fuses tmux into the engine. All session/window/pane operations
 go through a single `TerminalMultiplexer` ABC (`src/bmad_loop/adapters/multiplexer.py`),
@@ -43,7 +43,8 @@ availability-aware with discriminating `available()` probes (psmux →
 `which("psmux") and which("tmux") and which("pwsh")`; tmux-windows →
 `which("tmux") and not which("psmux")`) and an explicit `bmad-loop mux set <name>` tie-break.
 
-The third — **herdr** — has **shipped** (for the engine run path) as a
+The third — **herdr** — has **shipped** end-to-end on POSIX (engine run path +
+TUI-launch surface) as a
 different-binary-family backend: it implements `TerminalMultiplexer` fresh over herdr's
 workspace/tab/pane model rather than subclassing `BaseTmuxBackend`, and probes
 `which("herdr")`, so it is pairwise-discriminating against the tmux family by construction

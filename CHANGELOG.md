@@ -53,6 +53,19 @@ breaking changes may land in a minor release.
   forced selection. A tmux-less POSIX host still selects `TmuxMultiplexer` and reports it
   unavailable, exactly as before.
 
+- **Herdr TUI-launch surface.** The herdr backend now covers everything `tui/launch.py` drives:
+  parked orchestrator windows (a typed `exec sh -c '<argv>; banner; read; trailer'` recipe,
+  tmux-identical from the operator's seat, with the return-to-origin target mirrored into a
+  per-window return file the trailer consumes), tmux-style `=session[:window]` target parsing
+  across select/kill/option/attach methods, `list_windows` tmux-field mapping
+  (`window_id`/`window_name`/`@option`), finalized `attach_target_argv` (blocking
+  `terminal attach` outside herdr, fire-and-forget `tab focus` inside), and `switch_client`
+  via `tab focus`. The TUI/CLI attach flows and `in_ctl_session` now ask the seam
+  (`current_pane_id()`/`current_session()`) instead of sniffing `TMUX`, so they work under any
+  backend; the tmux backend's `current_*` gained the TMUX guard that keeps "not inside" honest.
+  Remaining herdr degradations: `detach_client` stays a no-op (the post-exit detach return rides
+  pane-close ending `terminal attach`; only the mid-process hand-back degrades to staying
+  attached), and `switch_client` has no last-client fallback.
 - **Herdr multiplexer backend (opt-in, non-tmux-family).** A new `herdr` transport implements
   the `TerminalMultiplexer` seam _fresh_ (subclassing nothing) over
   [herdr](https://herdr.dev)'s cross-platform workspace/tab/pane model — Unix socket on POSIX,
@@ -65,9 +78,8 @@ breaking changes may land in a minor release.
   session/window options (herdr has none; writes lock-guarded via a new cross-platform
   `platform_util.file_lock`), lazy server autostart, and a protocol-version guard
   (fail-below / warn-above). Landed as one registration line plus one sanctioned `probe.py` gate
-  fix — zero portability-guard allowlist changes. The TUI-launch surface (parked windows,
-  attach/detach, full window options) is a follow-up PR; until then those degrade to raises / no-ops
-  (see the backend module docstring's degradation ledger).
+  fix — zero portability-guard allowlist changes. The TUI-launch surface landed as a second PR
+  (previous entry); the remaining degradations are in the backend module docstring's ledger.
 - **Stories mode — a second planning pipeline that drives the loop off a typed `stories.yaml` (folder+id dispatch) instead of `sprint-status.yaml`.** Opt in with `[stories] source = "stories"` + `spec_folder`, or per run with `bmad-loop run --spec <folder>` (overrides policy); `--story` then filters by story id. Each entry dispatches by folder + id — the dev skill creates-or-resumes the story spec at `<folder>/stories/<id>-<slug>.md` and the orchestrator reads that id-keyed path back deterministically (no shared board to line-edit, no result-artifact mtime-scan). Strictly linear schedule (list order, no `depends_on`); `bmad-loop run --dry-run --spec <folder>` and `bmad-loop status` print the board (id · live disk state · checkpoint markers · title). Sprint mode is unchanged and remains the default. Requires a `bmad-dev-auto` new enough for folder+id dispatch — the run preflight checks and remediates.
 - **Per-story human checkpoints (stories mode).** Independent `spec_checkpoint` (pause before code to review the plan — dev halts at `ready-for-dev`; approve to implement, or request a replan that resets the spec to `draft`) and `done_checkpoint` (pause after the story commits, skipped when it is the last story); both additive to `gates.mode`. A blocked story escalates + resolves as in sprint mode, with a pre-planning-halt sentinel auto-deleted (a copy preserved under the run dir) on re-arm.
 - **TUI human-in-the-loop surface for stories mode.** The sprint tree is replaced by a stories board (id · live disk state · spec/done checkpoint markers · title) when a stories-mode run is selected; paused runs carry a per-run pause-kind badge and the run list shows a global _⚑ N need attention_ count; `p` opens the stage-appropriate viewer — plan-checkpoint spec review (Approve & resume / Request replan), story-checkpoint summary card (Continue / Stop), escalation with story context (Resolve / Re-arm & resume), and a gate spec viewer that the existing spec-approval/epic pauses reuse. The start-run modal gains a source select + spec-folder field with a live schedule preview. Every TUI action calls the same code paths as the CLI.

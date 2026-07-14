@@ -95,10 +95,11 @@ version, and the current selection. (The result is cached — see
   session is a herdr **workspace** (label == session name), a window is a **tab**
   (its `root_pane.pane_id` is the native window id), and the launched command runs
   via a typed `exec <argv>` so process-exit stays tmux-identical window death.
-  Where herdr has no analogue for a contract method — options, `pipe_pane`, parked
-  windows, detach — it degrades honestly (a JSON sidecar for options, a polling
-  tee for `pipe_pane`, a raise / no-op for the rest); that **degradation ledger**
-  is the module docstring, and it is the template for what "implement fresh" costs
+  Where herdr has no analogue for a contract method — options, `pipe_pane`,
+  the parked-window return hop, detach — it emulates or degrades honestly (a
+  JSON sidecar for options, a polling tee for `pipe_pane`, a per-window return
+  file for the parked trailer, a no-op detach); that **degradation ledger** is
+  the module docstring, and it is the template for what "implement fresh" costs
   in practice.
 
 `available()` gates whether the backend is usable on the current host (e.g. its

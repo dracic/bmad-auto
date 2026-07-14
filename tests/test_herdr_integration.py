@@ -219,3 +219,64 @@ def test_herdr_pipe_pane_log_grows_under_real_pane(tmp_path, herdr_session, monk
         # and spin subprocess reads for the rest of the pytest worker's life.
         mux.kill_session(session)
     assert mux._pollers == {}
+
+
+def test_herdr_parked_window_via_start_detached(herdr_session, tmp_path):
+    """PR-2 surface, live: launch.start_detached parks `bmad-loop validate` in a
+    bmad-loop-ctl workspace tab. Pins the whole chain: tab-label discovery
+    (ctl_window through the list_windows join), the exit banner rendering while
+    the window PARKS (stays alive) after the command exits, set_return_pane by
+    tmux-style name target mirroring into the per-window return file, and Enter
+    unparking — the trailer consumes the file, the pane closes (which is what
+    ends a watching `terminal attach` client), and the ctl workspace survives
+    on its root shell tab."""
+    import re
+
+    from bmad_loop.tui import launch
+
+    run_id = "20260713-000000-p6live"
+    win_id = launch.start_detached(
+        tmp_path, ["validate", "--project", str(tmp_path)], run_id, "run"
+    )
+    assert win_id  # the native window id (the tab's root pane)
+    mux = multiplexer.get_multiplexer()
+    assert isinstance(mux, herdr_backend.HerdrMultiplexer)  # no silent tmux fall-back
+
+    # discovery: the ctl window comes back by its tab label
+    assert launch.ctl_window(run_id) == f"run-{run_id}"
+
+    # validate exits quickly; the window must PARK with the EXPANDED banner
+    # (the typed recipe itself contains the literal `$ec` text, so match the
+    # substituted exit status, not the echo's source)
+    banner_re = re.compile(r"\[bmad-loop exited \d+")
+    deadline = time.monotonic() + 30
+    screen = ""
+    while time.monotonic() < deadline:
+        screen = subprocess.run(
+            ["herdr", "pane", "read", win_id, "--source", "recent-unwrapped"],
+            capture_output=True,
+            text=True,
+        ).stdout
+        if banner_re.search(screen):
+            break
+        time.sleep(0.5)
+    assert banner_re.search(screen), f"no parked banner in pane after validate: {screen[-500:]!r}"
+    assert mux.window_alive(launch.CTL_SESSION, win_id) is True  # parked, not closed
+
+    # attach-time return recording by tmux-style name target lands in the
+    # per-window return file (the sidecar key is normalized to the native id)
+    launch.set_return_pane(f"={launch.CTL_SESSION}:run-{run_id}", launch.RETURN_DETACH)
+    retfile = herdr_backend._return_file(win_id)
+    assert retfile.read_text(encoding="utf-8").strip() == launch.RETURN_DETACH
+    assert mux.show_window_option(win_id, launch.RETURN_OPTION) == launch.RETURN_DETACH
+
+    # Enter unparks: the trailer consumes the file, sh exits, the pane closes
+    subprocess.run(["herdr", "pane", "send-keys", win_id, "enter"], capture_output=True)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if not mux.window_alive(launch.CTL_SESSION, win_id) and not retfile.exists():
+            break
+        time.sleep(0.5)
+    assert mux.window_alive(launch.CTL_SESSION, win_id) is False
+    assert not retfile.exists()  # the trailer rm -f'd it
+    assert mux.has_session(launch.CTL_SESSION) is True  # root shell tab keeps it alive
