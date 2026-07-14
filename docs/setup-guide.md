@@ -21,10 +21,11 @@ of the README.
 
 - **Python 3.11+** and a supported coding CLI (`claude` by default).
 - **A terminal multiplexer** — the orchestrator drives agent sessions through a terminal
-  multiplexer: **tmux** is the default backend, and **herdr** ships as an opt-in
-  alternative (`bmad-loop mux set herdr` — see
-  [Terminal multiplexer backends](multiplexer-backends.md) for what changes from the
-  operator's seat, chiefly a manual `ctrl+b q` detach). A backend is required for
+  multiplexer: **tmux** is the bundled default, and additional backends install as
+  separate packages that register themselves (e.g. the
+  [herdr adapter](https://github.com/pbean/bmad-loop-adapter-herdr), then
+  `bmad-loop mux set herdr` — see
+  [Terminal multiplexer backends](multiplexer-backends.md)). A backend is required for
   launching, attaching, and driving runs (pure TUI observation works without one). The
   multiplexer sits behind a pluggable seam (`TerminalMultiplexer`), so a native-Windows
   backend can be added later without changing the engine — contributors should start with

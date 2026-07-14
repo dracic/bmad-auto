@@ -3,9 +3,11 @@
 The coding-CLI adapter (:class:`~.base.CodingCLIAdapter`) abstracts *which CLI*
 to drive and how its prompts/hooks work. This module abstracts the orthogonal
 **transport** axis: how sessions, windows, and panes are created, observed, and
-torn down. Today the only backend is tmux (:class:`~.tmux_backend.TmuxMultiplexer`);
-the seam exists so a future non-POSIX backend (an eventual native-Windows "psmux")
-can slot in without the rest of the codebase shelling out to ``tmux`` directly.
+torn down. The one bundled backend is tmux
+(:class:`~.tmux_backend.TmuxMultiplexer`); every other backend lives out-of-tree
+(the reference is the herdr adapter, https://github.com/pbean/bmad-loop-adapter-herdr;
+an eventual native-Windows "psmux" is the same shape) and slots in without the
+rest of the codebase shelling out to ``tmux`` directly.
 
 ``TerminalMultiplexer`` is the contract a backend author implements. Operation
 names mirror today's call sites verbatim so the migration is mechanical. Backends
@@ -282,27 +284,22 @@ def register_multiplexer(
 
 
 def _load_builtin_backends() -> None:
-    """Register the bundled backends. Idempotent and lazy (called from
-    :func:`get_multiplexer`, not at module import) to stay cycle-safe. Registers
-    inline rather than via tmux_backend's import side effect so the registry can be
-    cleared and re-loaded deterministically (a re-import is a no-op once cached) —
+    """Register the bundled backends — today, tmux alone (every other backend is
+    out-of-tree and arrives via :func:`_load_external_backends` or a manual
+    import). Idempotent and lazy (called from :func:`get_multiplexer`, not at
+    module import) to stay cycle-safe. Registers inline rather than via
+    tmux_backend's import side effect so the registry can be cleared and
+    re-loaded deterministically (a re-import is a no-op once cached) —
     mirroring ``process_host._load_builtin_hosts``."""
     global _BUILTINS_LOADED
     if _BUILTINS_LOADED:
         return
-    from .herdr_backend import HerdrMultiplexer
     from .tmux_backend import TmuxMultiplexer
 
     # tmux is the default everywhere except native Windows (no tmux binary there);
-    # get_multiplexer still falls back to tmux when no backend matches.
+    # get_multiplexer still falls back to tmux when no backend matches. Builtins
+    # register before externals, so tmux keeps first-wins on any name collision.
     register_multiplexer("tmux", lambda platform: platform != "win32", TmuxMultiplexer)
-    # herdr is a cross-platform, agent-aware backend (a different binary family, so
-    # it never conflicts with tmux). Registered AFTER tmux so on POSIX the tmux
-    # platform-default still wins; on native Windows (no tmux match, psmux
-    # out-of-tree) herdr is the first platform match. Opt-in only — _PLATFORM_DEFAULTS
-    # stays untouched, so POSIX hosts keep tmux unless BMAD_LOOP_MUX_BACKEND / the
-    # [mux] backend policy names herdr.
-    register_multiplexer("herdr", lambda platform: True, HerdrMultiplexer)
     _BUILTINS_LOADED = True  # set only after a successful import so a transient failure retries
 
 

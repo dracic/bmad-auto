@@ -112,21 +112,23 @@ out-of-tree adapter is
 - **Implement `TerminalMultiplexer` fresh** when the host has no tmux-shaped CLI
   at all (e.g. a ConPTY-based window manager). You implement the full contract
   directly; `tmux_backend.py` is the reference for what each method must produce.
-  The shipped worked example is **herdr** (`adapters/herdr_backend.py`) — a
-  cross-platform, agent-aware workspace manager whose object model
-  (workspace/tab/pane) and CLI are a different binary family entirely, so it
-  subclasses nothing and maps the whole contract onto herdr verbs: a bmad-loop
-  session is a herdr **workspace** (label == session name), a window is a **tab**
-  (its `root_pane.pane_id` is the native window id), and the launched command runs
-  via a typed `exec <argv>` so process-exit stays tmux-identical window death.
-  Where herdr has no analogue for a contract method — options, `pipe_pane`,
-  the parked-window return hop, detach — it emulates or degrades honestly (a
-  JSON sidecar for options, a polling tee for `pipe_pane`, a per-window return
-  file for the parked trailer, a no-op detach); that **degradation ledger** is
-  the module docstring, and it is the template for what "implement fresh" costs
-  in practice. (The operator-facing view of those degradations — what a herdr
-  _user_ notices and does — is
-  [Terminal multiplexer backends](multiplexer-backends.md).)
+  The reference worked example is the external **herdr adapter**
+  ([pbean/bmad-loop-adapter-herdr](https://github.com/pbean/bmad-loop-adapter-herdr),
+  `src/bmad_loop_adapter_herdr/backend.py`) — a cross-platform, agent-aware
+  workspace manager whose object model (workspace/tab/pane) and CLI are a
+  different binary family entirely, so it subclasses nothing and maps the whole
+  contract onto herdr verbs: a bmad-loop session is a herdr **workspace** (label
+  == session name), a window is a **tab** (its `root_pane.pane_id` is the native
+  window id), and the launched command runs via a typed `exec <argv>` so
+  process-exit stays tmux-identical window death. Where herdr has no analogue
+  for a contract method — options, `pipe_pane`, the parked-window return hop,
+  detach — it emulates or degrades honestly (a JSON sidecar for options, a
+  polling tee for `pipe_pane`, a per-window return file for the parked trailer,
+  a no-op detach); that **degradation ledger** is the module docstring, and it
+  is the template for what "implement fresh" costs in practice. (The
+  operator-facing view of those degradations — what a herdr _user_ notices and
+  does — is
+  [the adapter's operator guide](https://github.com/pbean/bmad-loop-adapter-herdr/blob/main/docs/adapter-multiplexer-herdr.md).)
 
 `available()` gates whether the backend is usable on the current host (e.g. its
 binary is on PATH); the optional `version()` feeds the diagnostic dump and the
@@ -163,14 +165,14 @@ available when only one actually drives the installed binary. A host with an
 ambiguous install resolves it explicitly: `bmad-loop mux set <name>`.
 
 A backend from a **different binary family** sidesteps this problem entirely.
-The shipped `herdr` backend probes `shutil.which("herdr")` — a distinct binary
+The external herdr adapter probes `shutil.which("herdr")` — a distinct binary
 that no tmux-family backend claims — so it is **pairwise-discriminating by
 construction**: it can never report available on a host where only tmux is
 installed, and vice versa, without any explicit tie-break. That `available()`
 must stay a pure PATH lookup (it is called by `detect_multiplexers()` on every
-listing) — herdr in particular **never** probes or starts its background server
-from `available()`, `version()`, or the constructor; server autostart is lazy,
-confined to the mutating operations that actually need it.
+listing) — the herdr adapter in particular **never** probes or starts its
+background server from `available()`, `version()`, or the constructor; server
+autostart is lazy, confined to the mutating operations that actually need it.
 
 **Deep contract →** [adapter authoring guide: the transport contract for a backend
 author](adapter-authoring-guide.md#the-transport-contract-for-a-backend-author).

@@ -98,9 +98,10 @@ module-level `parse_target()` — or the backend's own **native id** (whatever y
 `target()`. tmux consumes the token natively (it coincides with tmux exact-match
 syntax), so `BaseTmuxBackend` passes it straight through. A native-id backend
 calls `parse_target()` first — `None` means "already a native id, use as-is",
-otherwise resolve `(session, window)` yourself; `herdr_backend._parse_target` is
-the worked example (workspace-by-label → tab-by-name → root pane, resolved lazily
-at use time). You MAY override `target()` to emit native ids, but the token must
+otherwise resolve `(session, window)` yourself; the herdr adapter's
+`_parse_target` ([backend.py](https://github.com/pbean/bmad-loop-adapter-herdr))
+is the worked example (workspace-by-label → tab-by-name → root pane, resolved
+lazily at use time). You MAY override `target()` to emit native ids, but the token must
 stay a stable _by-name_ reference: core formats targets ahead of use (a parked
 window's return target, for one), so eager resolution to a live id goes stale —
 inheriting the default and resolving lazily is almost always right.
@@ -116,9 +117,11 @@ backend. `window_alive` uses `list-windows` membership, not `display-message`, b
 the fastest way to see exactly what a `new_parked_window` or `session_options` must
 produce.
 
-For the **implement-fresh** path, `adapters/herdr_backend.py` is the shipped worked
-example — a backend over [herdr](https://herdr.dev), a cross-platform,
-agent-aware workspace manager whose CLI is a different binary family from tmux. Its
+For the **implement-fresh** path, the external herdr adapter
+([pbean/bmad-loop-adapter-herdr](https://github.com/pbean/bmad-loop-adapter-herdr),
+`src/bmad_loop_adapter_herdr/backend.py`) is the reference worked example — a
+backend over [herdr](https://herdr.dev), a cross-platform, agent-aware workspace
+manager whose CLI is a different binary family from tmux. Its
 mapping: a bmad-loop **session** is a herdr **workspace** (label == session name), a
 **window** is a **tab** (one shell pane, whose `root_pane.pane_id` is the native
 window id handed back), and the launched command runs via a typed `exec <argv>`
@@ -136,7 +139,7 @@ divergence (sidecar options, poller `pipe_pane`, no-op `detach_client`, the atta
 argv, the advisory geometry, the protocol-version policy) — the reference for what
 "implement fresh" costs when the host has no tmux-shaped CLI. The operator-facing
 view — what a herdr _user_ notices and does — is
-[Terminal multiplexer backends](multiplexer-backends.md).
+[the adapter's operator guide](https://github.com/pbean/bmad-loop-adapter-herdr/blob/main/docs/adapter-multiplexer-herdr.md).
 
 The hard part of a new profile isn't the TOML — it's the **facts that live in no
 doc**: the CLI's exact hook payload shape (field names and casing, whether

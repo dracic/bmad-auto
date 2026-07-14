@@ -499,19 +499,20 @@ def test_attach_nothing_to_attach(project, monkeypatch, capsys):
 
 
 def test_attach_multiplexer_error_surfaces_clean_error(project, monkeypatch, capsys):
-    # attach_plan reaches the multiplexer (a herdr server round-trip); when that
-    # raises, main()'s backstop must surface `error: <msg>` + rc 1, never a
-    # traceback to the parked control pane.
+    # attach_plan reaches the multiplexer (a server round-trip on server-backed
+    # backends like the external herdr adapter); when that raises, main()'s
+    # backstop must surface `error: <msg>` + rc 1, never a traceback to the
+    # parked control pane.
     from bmad_loop.adapters.multiplexer import MultiplexerError
     from bmad_loop.tui import launch
 
     def boom(_proj, _rid):
-        raise MultiplexerError("herdr server not reachable")
+        raise MultiplexerError("backend server not reachable")
 
     _make_run_with_decision(project, run_id="20260101-000000-aaaa")
     monkeypatch.setattr(launch, "attach_plan", boom)
     assert cli.main(["attach", "--project", str(project.project), "20260101-000000-aaaa"]) == 1
-    assert "error: herdr server not reachable" in capsys.readouterr().err
+    assert "error: backend server not reachable" in capsys.readouterr().err
 
 
 def test_sweep_dry_run_lists_open_entries(project, capsys):

@@ -36,15 +36,16 @@ if sys.platform == "win32" and not sys.flags.utf8_mode:
 def force_tmux_backend(monkeypatch):
     """Pin the tmux transport backend by name, regardless of host platform.
 
-    Phase 3 registered the cross-platform ``herdr`` backend, which — unlike tmux —
-    *matches* win32. So on the Windows CI leg ``get_multiplexer()`` no longer
-    bottom-falls-back to tmux (herdr is now the first win32 match); tests that
-    assert tmux-specific argv/behaviour *through the seam* would otherwise drive
-    herdr there. Forcing ``BMAD_LOOP_MUX_BACKEND=tmux`` selects tmux by name (the
-    env override bypasses the platform predicate and ``available()``), so these
-    tests stay platform-independent. On POSIX this is a no-op — tmux is already
-    the default — so the Linux suite is unaffected. The cache is cleared on both
-    ends so the forced choice takes effect and does not leak to later tests."""
+    External backends discovered via the ``bmad_loop.mux_backends`` entry-point
+    scan may match any platform — the herdr adapter matches win32, where tmux
+    does not — so on a host with such a package installed ``get_multiplexer()``
+    would select it and tests that assert tmux-specific argv/behaviour *through
+    the seam* would drive the wrong backend. Forcing
+    ``BMAD_LOOP_MUX_BACKEND=tmux`` selects tmux by name (the env override
+    bypasses the platform predicate and ``available()``), so these tests stay
+    environment-independent. On a stock POSIX box this is a no-op — tmux is
+    already the default. The cache is cleared on both ends so the forced choice
+    takes effect and does not leak to later tests."""
     from bmad_loop.adapters import multiplexer
 
     monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "tmux")

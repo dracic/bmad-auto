@@ -20,9 +20,9 @@ from bmad_loop.adapters import tmux_base
 from bmad_loop.tui import launch
 
 # Every test here asserts tmux-specific argv/behaviour through the multiplexer
-# seam. Now that the win32-matching herdr backend is registered, get_multiplexer()
-# no longer bottom-falls-back to tmux on the Windows CI leg, so pin tmux by name
-# (a no-op on POSIX, where tmux is already the default).
+# seam. An installed external backend can match win32 (the herdr adapter does),
+# where tmux does not — get_multiplexer() would then not bottom-fall-back to
+# tmux — so pin tmux by name (a no-op on a stock POSIX box).
 pytestmark = pytest.mark.usefixtures("force_tmux_backend")
 
 
