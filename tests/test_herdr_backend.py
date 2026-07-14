@@ -42,6 +42,10 @@ class FakeHerdr:
         self.workspaces: list[dict] = []  # {"label","workspace_id"}
         self.panes: list[dict] = []  # {"pane_id","workspace_id","tab_id","terminal_id"}
         self.calls: list[list[str]] = []
+        # Scripted `pane read` output per pane: a list of successive raw-text
+        # screens; each read advances the cursor and sticks on the last entry.
+        self.pane_reads: dict[str, list[str]] = {}
+        self._pane_read_idx: dict[str, int] = {}
         self._ws_seq = 0
         self._tab_seq: dict[str, int] = {}
         self._pane_seq: dict[str, int] = {}
@@ -73,6 +77,19 @@ class FakeHerdr:
         self._new_pane(wid, self._new_tab_id(wid))
         return wid
 
+    def set_pane_reads(self, pane_id: str, screens: list[str]) -> None:
+        """Script the raw-text screens successive ``pane read`` calls return."""
+        self.pane_reads[pane_id] = list(screens)
+        self._pane_read_idx[pane_id] = 0
+
+    def _pane_read_out(self, pane_id: str) -> str:
+        screens = self.pane_reads.get(pane_id)
+        if not screens:
+            return ""  # a live-but-unscripted pane reads as a blank screen
+        idx = self._pane_read_idx.get(pane_id, 0)
+        self._pane_read_idx[pane_id] = idx + 1
+        return screens[min(idx, len(screens) - 1)]
+
     # ---- CompletedProcess builders
 
     @staticmethod
@@ -87,6 +104,10 @@ class FakeHerdr:
         return self._cp(
             cmd, 1, err=json.dumps({"error": {"code": code, "message": msg}, "id": "x"})
         )
+
+    def _bare_err(self, cmd, code: str, msg: str) -> subprocess.CompletedProcess:
+        # `pane read` uses herdr's BARE error body (no {"error": ...} envelope).
+        return self._cp(cmd, 1, err=json.dumps({"code": code, "message": msg}))
 
     def _down(self, cmd) -> subprocess.CompletedProcess:
         # server down / bogus socket: a non-JSON transport error.
@@ -138,6 +159,12 @@ class FakeHerdr:
         if group == "pane" and verb == "close":
             self.panes = [p for p in self.panes if p["pane_id"] != argv[2]]
             return self._ok(cmd, {"type": "ok"})
+        if group == "pane" and verb == "read":
+            pane_id = argv[2]
+            if not any(p["pane_id"] == pane_id for p in self.panes):
+                return self._bare_err(cmd, "pane_not_found", f"pane {pane_id} not found")
+            # pane read prints RAW TEXT, not a JSON envelope.
+            return self._cp(cmd, 0, out=self._pane_read_out(pane_id))
         if group == "pane" and verb in {"run", "send-text", "send-keys"}:
             return self._ok(cmd, {"type": "ok"})
         return self._ok(cmd, {"type": "ok"})  # permissive fallback
@@ -506,9 +533,12 @@ def test_new_parked_window_raises(fake, tmp_path):
         HerdrMultiplexer().new_parked_window("s", "n", tmp_path, ["echo", "hi"], "")
 
 
-def test_pipe_pane_and_detach_are_noops(fake, tmp_path):
+def test_pipe_pane_tolerates_dead_pane_and_detach_switch_noop(fake, tmp_path):
+    # pipe_pane races a pane that already died on launch: the priming read gets
+    # pane_not_found, so no tee thread is spun up (tmux swallows the same race).
     mux = HerdrMultiplexer()
-    assert mux.pipe_pane("w1:p1", tmp_path / "log") is None
+    assert mux.pipe_pane("w9:p9", tmp_path / "log") is None
+    assert mux._pollers == {}  # nothing left running
     assert mux.detach_client() is None
     assert mux.switch_client("w1:p1") is False
 

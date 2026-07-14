@@ -26,9 +26,12 @@ socket transport can replace it without touching :class:`HerdrMultiplexer`.
 
 **Degradation ledger (PR 1 scope — the run path; the TUI-launch surface is PR 2):**
 
-- ``pipe_pane`` is a **stub no-op** here; Phase 2 replaces it with a polling
-  thread (``pane read`` snapshots — herdr has no ``pipe-pane``/tee, and its CLI
-  ``revision`` is unusable so the poller content-hash-gates, not revision-gates).
+- ``pipe_pane`` has no herdr ``pipe-pane``/tee to hand off to, so it runs a
+  per-window :class:`_PanePoller` daemon that snapshots ``pane read`` into the
+  log whenever the pane content changes (content-hash-gated — the CLI
+  ``revision`` is unusable, it stays 0). This drives the two log consumers a
+  tmux tee would: ``generic._log_activity_key`` re-arms the dev-stall grace on
+  log growth, and ``probe`` finds completion markers in the log.
 - ``new_parked_window`` **raises** ``HerdrError`` — only ``tui/launch.py`` calls
   it (PR 2).
 - ``detach_client`` is a no-op — herdr detach is a keybinding, with no CLI verb.
@@ -45,11 +48,13 @@ See :mod:`.multiplexer` for the contract and the raisers-vs-sentinels split.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 import warnings
 from pathlib import Path
@@ -65,6 +70,12 @@ SUPPORTED_PROTOCOL = 16
 # itself running before giving up. Module-level so tests can shrink it.
 SERVER_START_TIMEOUT_S = 5.0
 _SERVER_POLL_S = 0.1
+
+# pipe_pane poller cadence: how often a _PanePoller re-reads its pane, and how
+# many CONSECUTIVE server-answered pane-not-founds retire it (the pane vanished
+# on process exit — see Phase-0 O1). Module-level so tests can shrink them.
+POLL_INTERVAL_S = 1.0
+POLL_NOT_FOUND_LIMIT = 3
 
 # Env var herdr injects into every pane it spawns; its presence is how the
 # current_* accessors know this process is running inside a herdr pane.
@@ -297,6 +308,128 @@ def _error_code(proc: subprocess.CompletedProcess[str]) -> str | None:
     return None
 
 
+# ------------------------------------------------------------- pipe_pane poller
+#
+# herdr has no `pipe-pane`/tee (nor any push stream on the CLI transport), so the
+# tmux "append the pane's output to a log file" contract is emulated by polling
+# `pane read` and appending a fresh snapshot whenever the pane's content changes.
+# Two consumers read that log and MUST see it grow while a session is producing
+# output: generic._log_activity_key (mtime,size) re-arms the dev-stall grace, and
+# probe scans the log for completion markers. A #85-style no-op would leave the
+# log flat and mis-stall a long silent-but-working turn.
+
+_PANE_GONE = object()  # sentinel: `pane read` was answered with pane_not_found
+
+
+class _PanePoller(threading.Thread):
+    """A daemon thread that tees one herdr pane into a log file by polling.
+
+    Every :data:`POLL_INTERVAL_S` it reads the pane's ``recent-unwrapped`` text
+    (unwrapped so herdr's narrow default width can't split a marker across lines)
+    and appends it to the log **only when the content changed** — content-hash
+    gated, because the CLI ``revision`` is unusable (it stays 0 across both
+    normal-buffer growth and alt-screen repaints; see the Phase-0 Findings). A
+    static screen therefore stops growing the log, so a genuinely idle session
+    can still stall; an actively-repainting one keeps re-arming the grace window.
+
+    Retired by :meth:`stop` (kill_window / kill_session) or, on its own, after
+    :data:`POLL_NOT_FOUND_LIMIT` consecutive server-answered ``pane_not_found``
+    reads — the pane vanished when its process exited (Phase-0 O1). A transport
+    hiccup (couldn't ask) is neither growth nor death: the tick is skipped and
+    the not-found streak is left intact, exactly as the wait loop treats a probe
+    error as "not proof of death"."""
+
+    def __init__(
+        self,
+        client: _HerdrClient,
+        pane_id: str,
+        log_file: Path,
+        *,
+        interval_s: float | None = None,
+        not_found_limit: int | None = None,
+    ) -> None:
+        super().__init__(daemon=True, name=f"herdr-poll-{pane_id}")
+        self._client = client
+        self._pane_id = pane_id
+        self._log_file = Path(log_file)
+        # Resolve the cadence from the module globals at construction (not as
+        # signature defaults) so a test can shrink POLL_* before starting one.
+        self._interval_s = POLL_INTERVAL_S if interval_s is None else interval_s
+        self._not_found_limit = POLL_NOT_FOUND_LIMIT if not_found_limit is None else not_found_limit
+        self._stop_event = threading.Event()
+        self._last_hash: str | None = None
+
+    def stop(self) -> None:
+        """Signal the thread to exit. Returns immediately: the event wakes the
+        interval sleep at once, but an in-flight ``pane read`` still finishes
+        first (the thread is a daemon, so a hung read never blocks shutdown)."""
+        self._stop_event.set()
+
+    def prime(self) -> bool:
+        """Do one synchronous read before the thread starts. Returns True (and
+        logs the first snapshot) if the pane answered with text; False if it is
+        already gone or unreachable — the caller then declines to spin up a
+        thread, which is how :meth:`HerdrMultiplexer.pipe_pane` stays tolerant of
+        a pane that died on launch (probe.py depends on that tolerance)."""
+        snapshot = self._read_snapshot()
+        if isinstance(snapshot, str):
+            self._record(snapshot)
+            return True
+        return False
+
+    def run(self) -> None:
+        not_found = 0
+        # wait() returns True the instant stop() fires (-> exit) or False on
+        # timeout (-> poll). prime() already captured t0, so the first poll is
+        # one interval in — no immediate re-read.
+        while not self._stop_event.wait(self._interval_s):
+            snapshot = self._read_snapshot()
+            if snapshot is _PANE_GONE:
+                not_found += 1
+                if not_found >= self._not_found_limit:
+                    return
+            elif isinstance(snapshot, str):
+                not_found = 0
+                self._record(snapshot)
+            # else: transport hiccup — skip this tick, keep the not-found streak.
+
+    def _read_snapshot(self) -> str | object | None:
+        """One ``pane read``: the raw pane text (str), :data:`_PANE_GONE` when the
+        server answered ``pane_not_found``, or None on a transport failure."""
+        try:
+            proc = self._client._run(
+                ["pane", "read", self._pane_id, "--source", "recent-unwrapped"],
+                check=False,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return None
+        if proc.returncode == 0:
+            return proc.stdout
+        if _error_code(proc) == "pane_not_found":
+            return _PANE_GONE
+        return None  # non-JSON `Error: Os` etc. — unreachable, retry next tick
+
+    def _record(self, text: str) -> None:
+        digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+        if digest == self._last_hash:
+            return  # unchanged screen: not activity, don't grow the log
+        self._last_hash = digest
+        if text.strip():  # a blank repaint isn't worth a log line
+            self._append(text)
+
+    def _append(self, text: str) -> None:
+        # Append-only so the log's inode/size grow monotonically (the activity
+        # signal). A write failure must never crash the tee thread.
+        if not text.endswith("\n"):
+            text += "\n"
+        try:
+            self._log_file.parent.mkdir(parents=True, exist_ok=True)
+            with self._log_file.open("a", encoding="utf-8") as handle:
+                handle.write(text)
+        except OSError:
+            pass
+
+
 class HerdrMultiplexer(TerminalMultiplexer):
     """herdr backend implementing the full :class:`TerminalMultiplexer` contract.
 
@@ -307,6 +440,11 @@ class HerdrMultiplexer(TerminalMultiplexer):
 
     def __init__(self) -> None:
         self._client = _HerdrClient()
+        # Live pipe_pane tees, keyed by native window id (== pane id). Mutated
+        # only from the caller's thread (pipe_pane / kill_*); the poller threads
+        # never touch it. The lock is defensive hygiene, not a hot path.
+        self._pollers: dict[str, _PanePoller] = {}
+        self._pollers_lock = threading.Lock()
 
     # -------------------------------------------------- enumeration helpers
 
@@ -390,14 +528,18 @@ class HerdrMultiplexer(TerminalMultiplexer):
 
     def kill_session(self, name: str) -> None:
         # Best-effort teardown: never start a server just to tear one down, and
-        # tolerate the workspace already being gone.
+        # tolerate the workspace already being gone. Also retire the session's
+        # pipe_pane tees so no poller outlives the workspace it was watching.
+        wid: str | None = None
         if shutil.which("herdr"):
             try:
                 wid = self._workspace_id(name, strict=False)
                 if wid is not None:
                     self._client._run(["workspace", "close", wid], check=False)
             except (subprocess.SubprocessError, OSError):
-                pass
+                wid = None
+        if wid is not None:
+            self._stop_pollers_for_workspace(wid)
         _drop_state("sessions", name)
 
     def list_sessions(self) -> list[str]:
@@ -542,6 +684,7 @@ class HerdrMultiplexer(TerminalMultiplexer):
         # Best-effort: `pane close` cascades the now-empty tab closed; tolerate the
         # pane already being gone (a CLI that crashes on launch races its window
         # down before teardown — probe.py depends on this tolerance).
+        self._stop_poller(target)
         if shutil.which("herdr"):
             try:
                 self._client._run(["pane", "close", target], check=False)
@@ -593,11 +736,39 @@ class HerdrMultiplexer(TerminalMultiplexer):
         return value if isinstance(value, str) else ""
 
     def pipe_pane(self, window_id: str, log_file: Path) -> None:
-        # STUB (Phase 1): herdr has no pipe-pane/tee, so Phase 2 replaces this
-        # with a per-window polling thread that snapshots `pane read` into the
-        # log. A no-op here keeps start_session working; the pane-log liveness
-        # signal (generic._log_activity_key) simply stays flat until then.
+        # Emulate tmux `pipe-pane` with a per-window polling tee (see _PanePoller).
+        # Sentinel contract: never raise. A prime() read that fails means the pane
+        # already died on launch (or the server is unreachable) — mirror tmux
+        # swallowing that race by simply not starting a tee; the dead window is
+        # then reported as a crash by wait_for_completion.
+        if not shutil.which("herdr"):
+            return None
+        poller = _PanePoller(self._client, window_id, Path(log_file))
+        if not poller.prime():
+            return None
+        with self._pollers_lock:
+            previous = self._pollers.pop(window_id, None)
+            self._pollers[window_id] = poller
+        if previous is not None:  # a re-armed window replaces its old tee
+            previous.stop()
+        poller.start()
         return None
+
+    def _stop_poller(self, window_id: str) -> None:
+        with self._pollers_lock:
+            poller = self._pollers.pop(window_id, None)
+        if poller is not None:
+            poller.stop()
+
+    def _stop_pollers_for_workspace(self, workspace_id: str) -> None:
+        # A pane id is `<workspace_id>:p<n>`, so the prefix identifies the session's
+        # tees without re-querying herdr. (A poller whose pane merely vanished
+        # would also self-retire on not-founds; this just frees it promptly.)
+        with self._pollers_lock:
+            doomed = [pid for pid in self._pollers if pid.split(":", 1)[0] == workspace_id]
+            pollers = [self._pollers.pop(pid) for pid in doomed]
+        for poller in pollers:
+            poller.stop()
 
     def send_text(self, window_id: str, text: str) -> None:
         # Literal paste, let the TUI ingest it, then submit — the tmux
