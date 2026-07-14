@@ -104,7 +104,9 @@ window id handed back), and the launched command runs via a typed `exec <argv>`
 (`pane run` = type + Enter) so process-exit == pane-close == tab-close ==
 tmux-identical window death. Where herdr has no analogue, the backend degrades
 honestly rather than faking it: session/window **options** (which herdr lacks
-entirely) live in a cross-process JSON **sidecar**, and `pipe_pane` — herdr has no
+entirely) live in a cross-process JSON **sidecar** (atomic swaps for readers, an OS
+advisory lock around each read-modify-write so concurrent writers never lose
+updates), and `pipe_pane` — herdr has no
 tee — runs a per-window **poller** thread that snapshots `pane read` into the log
 whenever the content changes, which is exactly enough to drive the two log consumers
 a tmux tee would (`generic._log_activity_key`'s stall re-arm and `probe`'s marker

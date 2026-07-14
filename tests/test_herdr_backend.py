@@ -170,14 +170,22 @@ class FakeHerdr:
         return self._ok(cmd, {"type": "ok"})  # permissive fallback
 
 
-@pytest.fixture
-def fake(monkeypatch, tmp_path):
+def install_fake_herdr(monkeypatch, tmp_path) -> FakeHerdr:
+    """Wire a FakeHerdr in as the transport: patch the spawn seam + binary probe,
+    redirect the sidecar into ``tmp_path``, and clear the inside-a-pane marker.
+    Shared with ``test_herdr_poller``'s ``fake`` fixture (which adds its
+    poll-cadence patches on top) so the two setups can't drift."""
     f = FakeHerdr()
     monkeypatch.setattr(herdr_backend.subprocess, "run", f)
     monkeypatch.setattr(herdr_backend.shutil, "which", lambda _name: "/usr/bin/herdr")
     monkeypatch.setenv("BMAD_LOOP_HERDR_STATE", str(tmp_path / "herdr-state.json"))
     monkeypatch.delenv("HERDR_ENV", raising=False)
     return f
+
+
+@pytest.fixture
+def fake(monkeypatch, tmp_path):
+    return install_fake_herdr(monkeypatch, tmp_path)
 
 
 def _creates(fake: FakeHerdr, group: str, verb: str) -> list[list[str]]:
@@ -433,6 +441,54 @@ def test_set_session_option_raises_on_write_failure(fake, monkeypatch):
     monkeypatch.setattr(herdr_backend.platform_util, "atomic_replace", boom_replace)
     with pytest.raises(HerdrError):
         HerdrMultiplexer().set_session_option("bmad-loop-x", PROJECT_OPTION, "/proj")
+
+
+def test_sidecar_cycles_hold_the_advisory_lock(fake, monkeypatch):
+    """Every read-modify-write cycle runs UNDER the sidecar lock — while
+    _save_state executes, a non-blocking acquire of the lock file must fail.
+    Guards the lost-update hole: an unlocked cycle would let a concurrent
+    writer's update (engine tag vs TUI prune) be silently clobbered."""
+    real_save = herdr_backend._save_state
+    lock_path = Path(os.environ["BMAD_LOOP_HERDR_STATE"] + ".lock")
+    held: list[bool] = []
+
+    def probing_save(state):
+        try:
+            with herdr_backend.platform_util.file_lock(lock_path, blocking=False):
+                held.append(False)
+        except OSError:
+            held.append(True)
+        real_save(state)
+
+    monkeypatch.setattr(herdr_backend, "_save_state", probing_save)
+    fake.add_workspace("bmad-loop-x")
+    mux = HerdrMultiplexer()
+    mux.set_session_option("bmad-loop-x", PROJECT_OPTION, "/proj")  # raiser cycle
+    mux.set_window_option("w1:p1", RETURN_OPTION, "w1:p2")  # sentinel cycle
+    mux.unset_window_option("w1:p1", RETURN_OPTION)  # sentinel cycle
+    fake.workspaces.clear()  # workspace gone -> next enumeration prunes
+    fake.panes.clear()
+    mux.session_options(PROJECT_OPTION)  # locked prune cycle
+    assert held == [True, True, True, True]
+
+
+def test_sidecar_lock_failure_rides_the_raiser_sentinel_split(fake, monkeypatch):
+    """A lock-acquisition failure is a sidecar-write failure: the raiser wraps
+    it as HerdrError, the sentinels no-op — and nobody ever writes unguarded."""
+
+    def no_lock(_path, **_kw):
+        raise OSError("lock unavailable")
+
+    monkeypatch.setattr(herdr_backend.platform_util, "file_lock", no_lock)
+    saves: list[dict] = []
+    monkeypatch.setattr(herdr_backend, "_save_state", saves.append)
+    mux = HerdrMultiplexer()
+    with pytest.raises(HerdrError):
+        mux.set_session_option("bmad-loop-x", PROJECT_OPTION, "/proj")
+    mux.set_window_option("w1:p1", RETURN_OPTION, "w1:p2")  # sentinel: swallowed
+    mux.unset_window_option("w1:p1", RETURN_OPTION)  # sentinel: swallowed
+    herdr_backend._drop_state("windows", "w1:p1")  # sentinel: swallowed
+    assert saves == []  # a failed lock skips the write entirely
 
 
 def test_window_option_roundtrip(fake):

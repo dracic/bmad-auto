@@ -62,7 +62,8 @@ breaking changes may land in a minor release.
   herdr activates on win32 only by first-match until psmux ships. This PR is the **engine run
   path**: session→workspace / window→tab mapping, an `exec`-based launch with tmux-identical
   window-death, a content-hash-gated polling `pipe_pane` tee (herdr has no tee), JSON-sidecar
-  session/window options (herdr has none), lazy server autostart, and a protocol-version guard
+  session/window options (herdr has none; writes lock-guarded via a new cross-platform
+  `platform_util.file_lock`), lazy server autostart, and a protocol-version guard
   (fail-below / warn-above). Landed as one registration line plus one sanctioned `probe.py` gate
   fix — zero portability-guard allowlist changes. The TUI-launch surface (parked windows,
   attach/detach, full window options) is a follow-up PR; until then those degrade to raises / no-ops

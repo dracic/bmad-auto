@@ -42,8 +42,11 @@ socket transport can replace it without touching :class:`HerdrMultiplexer`.
 - ``detach_client`` is a no-op — herdr detach is a keybinding, with no CLI verb.
 - Session/window **options** have no native herdr equivalent, so they live in a
   cross-process **sidecar** JSON (``~/.bmad-loop/herdr-state.json``, override
-  ``BMAD_LOOP_HERDR_STATE``), written via :func:`platform_util.atomic_replace`;
-  entries for a workspace that is gone are pruned on the next enumeration.
+  ``BMAD_LOOP_HERDR_STATE``), written via :func:`platform_util.atomic_replace`
+  with every read-modify-write cycle serialized by an OS advisory lock on a
+  sibling ``.lock`` file (:func:`platform_util.file_lock`) — the write
+  serialization the tmux server gave ``set-option`` for free; entries for a
+  workspace that is gone are pruned on the next enumeration.
 - ``new_session`` geometry (cols/lines) is **advisory** — herdr exposes no
   absolute headless resize; a detached pane takes an attaching client's size.
 - Protocol policy: fail below :data:`SUPPORTED_PROTOCOL`, warn once above.
@@ -99,7 +102,17 @@ class HerdrError(MultiplexerError):
 # a small JSON file shared across processes. Keyed by the durable identities
 # bmad-loop already uses: session name (== workspace label) and native window id
 # (== pane id). Reads tolerate a missing/corrupt file; writes go through
-# atomic_replace so a concurrent reader never sees a torn file.
+# atomic_replace so a concurrent reader never sees a torn file, and every
+# read-modify-write cycle holds an exclusive OS advisory lock on a sibling
+# `.lock` file so concurrent writers (engine tagging a new session vs the
+# TUI/CLI's prune rewrite) never lose each other's updates — the serialization
+# the tmux server gave `set-option` for free. Plain reads stay lock-free.
+#
+# Residual (deliberate): session_options takes its workspace-liveness snapshot
+# OUTSIDE the lock — never hold it across a subprocess call with a 30 s timeout
+# — so a session created+tagged between that enumeration and the prune can still
+# lose its fresh tag. Consequence is bounded: runs.prunable_sessions falls back
+# to run-dir ownership + engine liveness for untagged sessions.
 
 
 def _state_path() -> Path:
@@ -107,6 +120,15 @@ def _state_path() -> Path:
     if override:
         return Path(override)
     return Path.home() / ".bmad-loop" / "herdr-state.json"
+
+
+def _state_lock():
+    """The advisory lock guarding sidecar read-modify-write cycles. Blocking:
+    holders only do file I/O, so waits are micro-scale (bounded ~10 s on win32
+    by msvcrt's built-in retry). Acquisition failure is an ``OSError``, riding
+    each caller's existing raiser/sentinel split."""
+    path = _state_path()
+    return platform_util.file_lock(path.with_name(path.name + ".lock"))
 
 
 def _load_state() -> dict:
@@ -563,8 +585,9 @@ class HerdrMultiplexer(TerminalMultiplexer):
         if workspaces is None:
             return {}
         labels = {ws["label"] for ws in workspaces if isinstance(ws.get("label"), str)}
-        state = _load_state()
-        sessions = state["sessions"]
+        # Lock-free read for the answer (atomic_replace guarantees a consistent
+        # snapshot; readers never block on writers)...
+        sessions = _load_state()["sessions"]
         result = {
             label: sessions[label][option]
             for label in labels
@@ -572,20 +595,29 @@ class HerdrMultiplexer(TerminalMultiplexer):
         }
         dead = [key for key in sessions if key not in labels]
         if dead:
-            for key in dead:
-                sessions.pop(key, None)
+            # ...then the prune is a proper locked read-modify-write (re-loaded
+            # under the lock so it never clobbers a concurrent writer's update).
             try:
-                _save_state(state)
+                with _state_lock():
+                    state = _load_state()
+                    pruned = False
+                    for key in dead:
+                        if state["sessions"].pop(key, None) is not None:
+                            pruned = True
+                    if pruned:
+                        _save_state(state)
             except OSError:
                 pass  # best-effort prune
         return result
 
     def set_session_option(self, name: str, option: str, value: str) -> None:
-        # Raiser: a sidecar write failure is this backend's "transport failure".
+        # Raiser: a sidecar write failure is this backend's "transport failure"
+        # (a lock-acquisition failure counts — never write unguarded).
         try:
-            state = _load_state()
-            state["sessions"].setdefault(name, {})[option] = value
-            _save_state(state)
+            with _state_lock():
+                state = _load_state()
+                state["sessions"].setdefault(name, {})[option] = value
+                _save_state(state)
         except OSError as exc:
             raise HerdrError(f"herdr sidecar write failed: {exc}") from exc
 
@@ -714,23 +746,26 @@ class HerdrMultiplexer(TerminalMultiplexer):
             pass
 
     def set_window_option(self, target: str, option: str, value: str) -> None:
-        # Best-effort sidecar write (sentinel: swallow OSError to a no-op).
+        # Best-effort sidecar write (sentinel: swallow OSError to a no-op — a
+        # lock failure skips the write entirely, never writes unguarded).
         try:
-            state = _load_state()
-            state["windows"].setdefault(target, {})[option] = value
-            _save_state(state)
+            with _state_lock():
+                state = _load_state()
+                state["windows"].setdefault(target, {})[option] = value
+                _save_state(state)
         except OSError:
             pass
 
     def unset_window_option(self, target: str, option: str) -> None:
         try:
-            state = _load_state()
-            opts = state["windows"].get(target)
-            if isinstance(opts, dict) and option in opts:
-                del opts[option]
-                if not opts:
-                    del state["windows"][target]
-                _save_state(state)
+            with _state_lock():
+                state = _load_state()
+                opts = state["windows"].get(target)
+                if isinstance(opts, dict) and option in opts:
+                    del opts[option]
+                    if not opts:
+                        del state["windows"][target]
+                    _save_state(state)
         except OSError:
             pass
 
@@ -881,9 +916,10 @@ def _drop_state(section: str, key: str) -> None:
     """Best-effort removal of one sidecar entry (a workspace/window gone). Never
     raises — a teardown/kill must not fail on a sidecar hiccup."""
     try:
-        state = _load_state()
-        if key in state.get(section, {}):
-            del state[section][key]
-            _save_state(state)
+        with _state_lock():
+            state = _load_state()
+            if key in state.get(section, {}):
+                del state[section][key]
+                _save_state(state)
     except OSError:
         pass
