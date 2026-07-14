@@ -359,6 +359,8 @@ def cmd_mux(args: argparse.Namespace) -> int:
         return 1
     chosen = next((r for r in rows if r.selected), None)
     reason = _mux_reason_label(chosen.reason) if chosen else "fallback"
+    # no selected row means _select bottomed out at its documented historical
+    # fallback, which is tmux by contract — not a stale hardcoding
     name = chosen.name if chosen else "tmux"
     print(f"selection: {name} ({type(backend).__name__}) — {reason}")
     return 0

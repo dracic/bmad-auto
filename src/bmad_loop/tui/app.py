@@ -148,10 +148,10 @@ class BmadLoopApp(App[None]):
 
     # ------------------------------------------------------------ run control
 
-    def _tmux_missing(self) -> bool:
-        if launch.tmux_available():
+    def _mux_missing(self) -> bool:
+        if launch.mux_available():
             return False
-        self.notify("tmux not found on PATH — launch/attach disabled", severity="error")
+        self.notify("multiplexer backend unavailable — launch/attach disabled", severity="error")
         return True
 
     def _guarded(self, go: Callable[[], None]) -> None:
@@ -184,7 +184,7 @@ class BmadLoopApp(App[None]):
             go()
 
     def action_start_run(self) -> None:
-        if self._tmux_missing():
+        if self._mux_missing():
             return
         source, spec_folder = self._stories_defaults()
         self.push_screen(
@@ -236,13 +236,13 @@ class BmadLoopApp(App[None]):
             except launch.LaunchError as e:
                 self.notify(str(e), severity="error")
                 return
-            self.notify(f"run {run_id} launched (tmux session {launch.CTL_SESSION})")
+            self.notify(f"run {run_id} launched (control session {launch.CTL_SESSION})")
             self._dashboard.expect_run(run_id)
 
         self._guarded(go)
 
     def action_start_sweep(self) -> None:
-        if self._tmux_missing():
+        if self._mux_missing():
             return
         self.push_screen(StartSweepModal(), self._start_sweep_result)
 
@@ -269,7 +269,7 @@ class BmadLoopApp(App[None]):
             except launch.LaunchError as e:
                 self.notify(str(e), severity="error")
                 return
-            self.notify(f"sweep {run_id} launched (tmux session {launch.CTL_SESSION})")
+            self.notify(f"sweep {run_id} launched (control session {launch.CTL_SESSION})")
             self._dashboard.expect_run(run_id)
 
         self._guarded(go)
@@ -315,7 +315,7 @@ class BmadLoopApp(App[None]):
         return True
 
     def action_resume_run(self) -> None:
-        if self._tmux_missing():
+        if self._mux_missing():
             return
         run_id = self._dashboard.selected_run_id
         if run_id is None:
@@ -340,12 +340,12 @@ class BmadLoopApp(App[None]):
             except launch.LaunchError as e:
                 self.notify(str(e), severity="error")
                 return
-            self.notify(f"resume of {run_id} launched (tmux session {launch.CTL_SESSION})")
+            self.notify(f"resume of {run_id} launched (control session {launch.CTL_SESSION})")
 
         self.push_screen(ConfirmResumeModal(run_id, state, engine_alive), done)
 
     def action_attach(self) -> None:
-        if self._tmux_missing():
+        if self._mux_missing():
             return
         run_id = self._dashboard.selected_run_id
         if run_id is None:
@@ -413,7 +413,7 @@ class BmadLoopApp(App[None]):
             )
 
     def action_resolve_run(self) -> None:
-        if self._tmux_missing():
+        if self._mux_missing():
             return
         run_id = self._dashboard.selected_run_id
         if run_id is None:
@@ -608,7 +608,7 @@ class BmadLoopApp(App[None]):
 
         def done(verb: str | None) -> None:
             if verb == "resolve":
-                if self._tmux_missing() or self._resolve_blocked_by_liveness(run_id, run_dir):
+                if self._mux_missing() or self._resolve_blocked_by_liveness(run_id, run_dir):
                     return
                 self._launch_resolve(run_id)
             elif verb == "rearm":
@@ -637,7 +637,7 @@ class BmadLoopApp(App[None]):
         """Resume a paused run — the `bmad-loop resume` / `e` path, minus the
         confirm modal (the viewer was the confirmation). Guards tmux + a
         possibly-live engine so an approve/continue can't double-drive."""
-        if self._tmux_missing():
+        if self._mux_missing():
             return
         run_dir = self.project / RUNS_DIR / run_id
         if _engine_possibly_live(run_dir):
@@ -648,7 +648,7 @@ class BmadLoopApp(App[None]):
         except launch.LaunchError as e:
             self.notify(str(e), severity="error")
             return
-        self.notify(f"resume of {run_id} launched (tmux session {launch.CTL_SESSION})")
+        self.notify(f"resume of {run_id} launched (control session {launch.CTL_SESSION})")
 
     def _do_replan(self, run_id: str, spec_path: Path) -> None:
         """Request-replan: reset the planned spec to draft + strip its Auto Run
@@ -781,7 +781,7 @@ class BmadLoopApp(App[None]):
         return run_id, self.project / RUNS_DIR / run_id
 
     def action_stop_run(self) -> None:
-        if self._tmux_missing():
+        if self._mux_missing():
             return
         selected = self._selected_run_dir()
         if selected is None:
@@ -886,7 +886,7 @@ class BmadLoopApp(App[None]):
         self.call_from_thread(self.notify, f"run {run_id} archived to {dest}")
 
     def action_cleanup_sessions(self) -> None:
-        if self._tmux_missing():
+        if self._mux_missing():
             return
 
         def done(ok: bool | None) -> None:

@@ -560,10 +560,10 @@ buttons and block the save. The write itself is atomic (temp file +
 
 | Message                                                                             | Cause / fix                                                                                                                          |
 | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `tmux not found on PATH — launch/attach disabled`                                   | install tmux; the dashboard still works read-only                                                                                    |
+| `multiplexer backend unavailable — launch/attach disabled`                          | install the selected backend's binary (tmux by default — see `bmad-loop mux`); the dashboard still works read-only                   |
 | `git worktree is not clean — commit or stash first`                                 | the launch guard; commit/stash and retry. `.bmad-loop/policy.toml` is exempt, so saving in the settings editor never blocks a launch |
 | `another run is live: <ids>`                                                        | a second engine on the same project may conflict — confirm only if you know they won't touch the same stories                        |
-| `launch may have failed — attach to tmux session bmad-loop-ctl`                     | no `state.json` within 10 s of launch; attach to the ctl window to read the error (the window stays open with the exit code)         |
+| `launch may have failed — attach to control session bmad-loop-ctl`                  | no `state.json` within 10 s of launch; attach to the ctl window to read the error (the window stays open with the exit code)         |
 | `no run selected`                                                                   | `e` / `a` need a selected run — the project has no runs yet                                                                          |
 | `state for run <id> is unreadable`                                                  | corrupt/missing `state.json`; inspect the run dir                                                                                    |
 | `run <id> already finished`                                                         | finished runs can't be resumed                                                                                                       |

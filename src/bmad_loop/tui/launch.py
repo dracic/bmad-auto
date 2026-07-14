@@ -31,7 +31,7 @@ class LaunchError(Exception):
     pass
 
 
-def tmux_available() -> bool:
+def mux_available() -> bool:
     return get_multiplexer().available()
 
 
@@ -43,7 +43,7 @@ def ctl_window(run_id: str) -> str | None:
     """Name of the control-session window hosting this run's orchestrator
     process (start_detached names windows <kind>-<run_id>), or None when the
     run was not launched from the TUI or the session is gone."""
-    if not tmux_available():
+    if not mux_available():
         return None
     for (name,) in get_multiplexer().list_windows(CTL_SESSION, ["window_name"]):
         if name.endswith(f"-{run_id}"):
@@ -250,7 +250,7 @@ def _ensure_ctl_session(project: Path) -> None:
     try:
         mux.new_session(CTL_SESSION, project)
     except MultiplexerError as e:
-        raise LaunchError(f"tmux new-session failed: {e}") from e
+        raise LaunchError(f"multiplexer new-session failed: {e}") from e
 
 
 def cli_argv(*tail: str) -> list[str]:
@@ -272,7 +272,7 @@ def start_detached(project: Path, argv_tail: list[str], run_id: str, kind: str) 
     """
     mux = get_multiplexer()
     if not mux.available():
-        raise LaunchError("tmux not found on PATH")
+        raise LaunchError("multiplexer backend unavailable (binary not on PATH)")
     _ensure_ctl_session(project)
     try:
         win_id = (
@@ -286,7 +286,7 @@ def start_detached(project: Path, argv_tail: list[str], run_id: str, kind: str) 
             or None
         )
     except MultiplexerError as e:
-        raise LaunchError(f"tmux new-window failed: {e}") from e
+        raise LaunchError(f"multiplexer new-window failed: {e}") from e
     if win_id:
         # Tag the window with its project so a cleanup in another project never
         # closes it (the ctl session is shared across projects).

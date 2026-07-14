@@ -111,6 +111,15 @@ breaking changes may land in a minor release.
 
 ### Changed
 
+- **Backend-neutral naming for the seam-backed helpers and operator messages.** The multiplexer
+  seam has non-tmux backends now, so the helpers that wrap it drop their legacy tmux names —
+  `launch.tmux_available` → `mux_available`, `app._tmux_missing` → `_mux_missing`,
+  `runs.tmux_sessions` → `mux_sessions` (internal, no deprecation aliases) — and the operator-facing
+  strings stop naming tmux when they mean the selected backend: launch errors say
+  `multiplexer new-session/new-window failed` and `multiplexer backend unavailable (binary not on
+PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disabled` and
+  `launched (control session bmad-loop-ctl)`, and the "attach to … bmad-loop-ctl" hints say
+  _control session_. The TUI-guide troubleshooting table matches. Behavior is unchanged.
 - **Docs: `followup_review_recommended` is now scored upstream.** BMAD-METHOD#2580 replaced the
   skill's convergence-prone significance judgment with a severity-weighted score over patched
   findings and added a fourth default review layer (Intent Alignment Auditor, #2560). README,

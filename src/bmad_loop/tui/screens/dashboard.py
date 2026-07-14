@@ -682,7 +682,7 @@ class DashboardScreen(Screen[None]):
         if self._pending_run is not None and time.monotonic() > self._pending_deadline:
             self._pending_run = None
             self.notify(
-                "launch may have failed — attach to tmux session bmad-loop-ctl",
+                "launch may have failed — attach to control session bmad-loop-ctl",
                 severity="error",
                 timeout=15,
             )
