@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -39,7 +40,8 @@ class FakeHerdr:
     def __init__(self, *, running: bool = True, protocol: int = 16) -> None:
         self.running = running
         self.protocol = protocol
-        self.workspaces: list[dict] = []  # {"label","workspace_id"}
+        self.workspaces: list[dict] = []  # {"label","workspace_id","active_tab_id"}
+        self.tabs: list[dict] = []  # {"tab_id","label","number","workspace_id","focused"}
         self.panes: list[dict] = []  # {"pane_id","workspace_id","tab_id","terminal_id"}
         self.calls: list[list[str]] = []
         # Scripted `pane read` output per pane: a list of successive raw-text
@@ -53,9 +55,30 @@ class FakeHerdr:
 
     # ---- helpers a test can call to seed state
 
-    def _new_tab_id(self, wid: str) -> str:
+    def _new_tab(self, wid: str, label: str | None, *, focus: bool) -> dict:
         self._tab_seq[wid] = self._tab_seq.get(wid, 0) + 1
-        return f"{wid}:t{self._tab_seq[wid]}"
+        number = self._tab_seq[wid]
+        tab = {
+            # real herdr gives an unlabelled tab its NUMBER as the label (a
+            # workspace's root shell tab is "1" — verified 0.7.3)
+            "tab_id": f"{wid}:t{number}",
+            "label": label if label is not None else str(number),
+            "number": number,
+            "workspace_id": wid,
+            "focused": False,
+        }
+        self.tabs.append(tab)
+        if focus:
+            self._focus_tab(tab)
+        return tab
+
+    def _focus_tab(self, tab: dict) -> None:
+        for other in self.tabs:
+            if other["workspace_id"] == tab["workspace_id"]:
+                other["focused"] = other is tab
+        for ws in self.workspaces:
+            if ws["workspace_id"] == tab["workspace_id"]:
+                ws["active_tab_id"] = tab["tab_id"]
 
     def _new_pane(self, wid: str, tab_id: str) -> dict:
         self._pane_seq[wid] = self._pane_seq.get(wid, 0) + 1
@@ -73,8 +96,9 @@ class FakeHerdr:
         """Create a workspace (with its root shell tab+pane) and return its id."""
         self._ws_seq += 1
         wid = f"w{self._ws_seq}"
-        self.workspaces.append({"label": label, "workspace_id": wid})
-        self._new_pane(wid, self._new_tab_id(wid))
+        self.workspaces.append({"label": label, "workspace_id": wid, "active_tab_id": None})
+        tab = self._new_tab(wid, None, focus=True)  # the root shell tab, label "1"
+        self._new_pane(wid, tab["tab_id"])
         return wid
 
     def set_pane_reads(self, pane_id: str, screens: list[str]) -> None:
@@ -141,14 +165,32 @@ class FakeHerdr:
         if group == "workspace" and verb == "close":
             wid = argv[2]
             self.workspaces = [w for w in self.workspaces if w["workspace_id"] != wid]
+            self.tabs = [t for t in self.tabs if t["workspace_id"] != wid]
             self.panes = [p for p in self.panes if p["workspace_id"] != wid]
             return self._ok(cmd, {"type": "ok"})
         if group == "tab" and verb == "create":
             wid = _flag(argv, "--workspace")
-            root = self._new_pane(wid, self._new_tab_id(wid))
-            return self._ok(cmd, {"tab": {"tab_id": root["tab_id"]}, "root_pane": root})
+            label = _flag(argv, "--label") if "--label" in argv else None
+            tab = self._new_tab(wid, label, focus="--focus" in argv)
+            root = self._new_pane(wid, tab["tab_id"])
+            return self._ok(cmd, {"tab": tab, "root_pane": root})
+        if group == "tab" and verb == "list":
+            # real herdr RAISES workspace_not_found for an absent --workspace
+            # (never []); the backend must therefore always enumerate bare.
+            if "--workspace" in argv:
+                wid = _flag(argv, "--workspace")
+                if all(w["workspace_id"] != wid for w in self.workspaces):
+                    return self._server_err(
+                        cmd, "workspace_not_found", f"workspace {wid} not found"
+                    )
+                return self._ok(cmd, {"tabs": [t for t in self.tabs if t["workspace_id"] == wid]})
+            return self._ok(cmd, {"tabs": self.tabs})
         if group == "tab" and verb == "focus":
-            return self._ok(cmd, {"type": "ok"})
+            tab = next((t for t in self.tabs if t["tab_id"] == argv[2]), None)
+            if tab is None:
+                return self._server_err(cmd, "tab_not_found", f"tab {argv[2]} not found")
+            self._focus_tab(tab)
+            return self._ok(cmd, {"tab": tab, "type": "tab_info"})
         if group == "pane" and verb == "list":
             return self._ok(cmd, {"panes": self.panes})
         if group == "pane" and verb == "get":
@@ -157,7 +199,22 @@ class FakeHerdr:
                 return self._server_err(cmd, "pane_not_found", f"pane {argv[2]} not found")
             return self._ok(cmd, {"pane": pane})
         if group == "pane" and verb == "close":
+            pane = next((p for p in self.panes if p["pane_id"] == argv[2]), None)
             self.panes = [p for p in self.panes if p["pane_id"] != argv[2]]
+            if pane is not None:  # a pane close cascades its now-empty tab closed
+                tab_id = pane["tab_id"]
+                if all(p["tab_id"] != tab_id for p in self.panes):
+                    self.tabs = [t for t in self.tabs if t["tab_id"] != tab_id]
+                    for ws in self.workspaces:
+                        if ws.get("active_tab_id") == tab_id:
+                            ws["active_tab_id"] = next(
+                                (
+                                    t["tab_id"]
+                                    for t in self.tabs
+                                    if t["workspace_id"] == ws["workspace_id"]
+                                ),
+                                None,
+                            )
             return self._ok(cmd, {"type": "ok"})
         if group == "pane" and verb == "read":
             pane_id = argv[2]
@@ -360,7 +417,7 @@ def test_seam_methods_never_leak_raw_subprocess_error(boom, tmp_path):
         lambda: mux.new_session("s", tmp_path),
         lambda: mux.new_window("s", "n", tmp_path, {}, "cmd"),
         lambda: mux.send_text("w1:p1", "hi"),
-        lambda: mux.new_parked_window("s", "n", tmp_path, ["echo", "hi"], ""),  # always raises
+        lambda: mux.new_parked_window("s", "n", tmp_path, ["echo", "hi"], ""),
     ]
     for call in raisers:
         with pytest.raises(MultiplexerError) as excinfo:
@@ -586,35 +643,239 @@ def test_protocol_above_supported_warns_but_proceeds(fake):
 # --------------------------------------------------------------- degradations
 
 
-def test_new_parked_window_raises(fake, tmp_path):
-    with pytest.raises(HerdrError):
-        HerdrMultiplexer().new_parked_window("s", "n", tmp_path, ["echo", "hi"], "")
-
-
-def test_pipe_pane_tolerates_dead_pane_and_detach_switch_noop(fake, tmp_path):
+def test_pipe_pane_tolerates_dead_pane_and_detach_noop(fake, tmp_path):
     # pipe_pane races a pane that already died on launch: the priming read gets
     # pane_not_found, so no tee thread is spun up (tmux swallows the same race).
     mux = HerdrMultiplexer()
     assert mux.pipe_pane("w9:p9", tmp_path / "log") is None
     assert mux._pollers == {}  # nothing left running
     assert mux.detach_client() is None
-    assert mux.switch_client("w1:p1") is False
 
 
-def test_attach_target_argv_resolves_terminal(fake):
-    fake.add_workspace("bmad-loop-x")
-    pane = fake.panes[-1]
+# ------------------------------------------------- TUI-launch surface (PR 2)
+
+
+def test_new_parked_window_recipe(fake):
+    fake.add_workspace("bmad-loop-ctl")
     mux = HerdrMultiplexer()
-    assert mux.attach_target_argv(pane["pane_id"]) == [
-        "herdr", "terminal", "attach", pane["terminal_id"],
+    pane_id = mux.new_parked_window(
+        "bmad-loop-ctl", "run-RID", Path("/work"), ["python", "-m", "x"], RETURN_OPTION
+    )
+    (tab_create,) = _creates(fake, "tab", "create")
+    assert tab_create == [
+        "tab", "create",
+        "--workspace", "w1",
+        "--label", "run-RID",
+        "--cwd", str(Path("/work")),
+        "--no-focus",
     ]  # fmt: skip
-    # a tmux-style '=' prefix a caller might pass is stripped
-    assert mux.attach_target_argv("=" + pane["pane_id"])[-1] == pane["terminal_id"]
+    (pane_run,) = _creates(fake, "pane", "run")
+    assert pane_run[:3] == ["pane", "run", pane_id]
+    typed = pane_run[3]
+    # the typed line execs `sh -c '<recipe>'` (one line, POSIX+fish-safe quoting)
+    assert typed.startswith("exec sh -c ")
+    sh_argv = shlex.split(typed[len("exec ") :])
+    assert sh_argv[:2] == ["sh", "-c"]
+    src = sh_argv[2]
+    assert "\n" not in typed
+    # recipe shape: argv; exit capture; banner; park; return trailer
+    assert src.startswith("python -m x; ec=$?; ")
+    assert "[bmad-loop exited $ec — press enter]" in src
+    assert "read -r" in src
+    retfile = herdr_backend._return_file(pane_id)
+    assert str(retfile) in src  # the trailer cats/rms the per-window return file
+    assert 'herdr tab focus "$ret"' in src
+    # the sidecar remembers which option this window's trailer consumes
+    state = json.loads(Path(os.environ["BMAD_LOOP_HERDR_STATE"]).read_text())
+    assert state["windows"][pane_id][herdr_backend._PARKED_RETURN_KEY] == RETURN_OPTION
+
+
+def test_new_parked_window_missing_session_raises(fake, tmp_path):
+    with pytest.raises(HerdrError):
+        HerdrMultiplexer().new_parked_window("s", "n", tmp_path, ["echo", "hi"], RETURN_OPTION)
+
+
+def test_parked_return_option_round_trip(fake):
+    # cmd_attach / the TUI write the return option by tmux-style name target;
+    # return_attached_client (inside the window) reads it back by native id —
+    # the sidecar key is normalized so both agree. The return FILE holds the
+    # trailer-actionable TAB id of the origin pane, resolved at write time.
+    fake.add_workspace("bmad-loop-ctl")
+    fake.add_workspace("userws")
+    origin = fake.panes[-1]  # the TUI's own pane, in the user's workspace
+    mux = HerdrMultiplexer()
+    pane_id = mux.new_parked_window("bmad-loop-ctl", "sweep-RID", Path("/w"), ["x"], RETURN_OPTION)
+    retfile = herdr_backend._return_file(pane_id)
+
+    mux.set_window_option("=bmad-loop-ctl:sweep-RID", RETURN_OPTION, origin["pane_id"])
+    assert mux.show_window_option(pane_id, RETURN_OPTION) == origin["pane_id"]
+    assert retfile.read_text(encoding="utf-8").strip() == origin["tab_id"]
+
+    # RETURN_DETACH is mirrored verbatim (the trailer treats it as "do nothing":
+    # ending the source closes the pane, which ends a `terminal attach` client)
+    mux.set_window_option(pane_id, RETURN_OPTION, "detach")
+    assert retfile.read_text(encoding="utf-8").strip() == "detach"
+
+    # unsetting clears the option AND the file (so the post-exit trailer cannot
+    # fire a second time after a mid-process return)
+    mux.unset_window_option(pane_id, RETURN_OPTION)
+    assert mux.show_window_option(pane_id, RETURN_OPTION) == ""
+    assert not retfile.exists()
+
+
+def test_parked_return_unresolvable_origin_clears_file(fake):
+    fake.add_workspace("bmad-loop-ctl")
+    mux = HerdrMultiplexer()
+    pane_id = mux.new_parked_window("bmad-loop-ctl", "run-RID", Path("/w"), ["x"], RETURN_OPTION)
+    mux.set_window_option(pane_id, RETURN_OPTION, "detach")
+    retfile = herdr_backend._return_file(pane_id)
+    assert retfile.exists()
+    # a gone origin pane must not leave a stale focus target behind
+    mux.set_window_option(pane_id, RETURN_OPTION, "w9:p9")
+    assert not retfile.exists()
+    assert mux.show_window_option(pane_id, RETURN_OPTION) == "w9:p9"  # option itself kept
+
+
+def test_kill_window_by_name_target_cleans_return_file(fake):
+    fake.add_workspace("bmad-loop-ctl")
+    mux = HerdrMultiplexer()
+    pane_id = mux.new_parked_window("bmad-loop-ctl", "run-RID", Path("/w"), ["x"], RETURN_OPTION)
+    mux.set_window_option(pane_id, RETURN_OPTION, "detach")
+    retfile = herdr_backend._return_file(pane_id)
+    assert retfile.exists()
+    mux.kill_window("=bmad-loop-ctl:run-RID")  # kill_ctl_window passes this form
+    assert all(p["pane_id"] != pane_id for p in fake.panes)
+    assert not retfile.exists()
+    assert mux.show_window_option(pane_id, RETURN_OPTION) == ""
+
+
+def test_kill_session_cleans_window_sidecar_and_return_files(fake):
+    fake.add_workspace("bmad-loop-ctl")
+    mux = HerdrMultiplexer()
+    pane_id = mux.new_parked_window("bmad-loop-ctl", "run-RID", Path("/w"), ["x"], RETURN_OPTION)
+    mux.set_window_option(pane_id, RETURN_OPTION, "detach")
+    retfile = herdr_backend._return_file(pane_id)
+    mux.kill_session("bmad-loop-ctl")
+    assert not retfile.exists()
+    state = json.loads(Path(os.environ["BMAD_LOOP_HERDR_STATE"]).read_text())
+    assert pane_id not in state["windows"]
+
+
+def test_select_window_by_name_focuses_tab(fake):
+    fake.add_workspace("bmad-loop-ctl")
+    mux = HerdrMultiplexer()
+    pane_id = mux.new_window("bmad-loop-ctl", "run-RID", Path("/w"), {}, "echo hi")
+    tab_id = next(p["tab_id"] for p in fake.panes if p["pane_id"] == pane_id)
+    mux.select_window("=bmad-loop-ctl:run-RID")
+    assert ["tab", "focus", tab_id] in fake.calls
+    ws = next(w for w in fake.workspaces if w["label"] == "bmad-loop-ctl")
+    assert ws["active_tab_id"] == tab_id
+    # unresolvable targets stay quiet no-ops (sentinel)
+    assert mux.select_window("=bmad-loop-ctl:nope") is None
+    assert mux.select_window("=absent:x") is None
+
+
+def test_attach_target_argv_native_and_name_targets(fake):
+    fake.add_workspace("bmad-loop-ctl")
+    mux = HerdrMultiplexer()
+    pane_id = mux.new_window("bmad-loop-ctl", "run-RID", Path("/w"), {}, "echo hi")
+    pane = next(p for p in fake.panes if p["pane_id"] == pane_id)
+    expected = ["herdr", "terminal", "attach", pane["terminal_id"]]
+    assert mux.attach_target_argv(pane_id) == expected  # native pane id
+    assert mux.attach_target_argv("=bmad-loop-ctl:run-RID") == expected  # by window name
+
+
+def test_attach_target_argv_session_level(fake):
+    fake.add_workspace("bmad-loop-ctl")
+    mux = HerdrMultiplexer()
+    a = mux.new_window("bmad-loop-ctl", "run-a", Path("/w"), {}, "sleep 1")
+    b = mux.new_window("bmad-loop-ctl", "run-b", Path("/w"), {}, "sleep 1")
+    term = {p["pane_id"]: p["terminal_id"] for p in fake.panes}
+    # task tabs are created --no-focus, so the root shell tab is still active:
+    # a session-level attach prefers the NEWEST task tab over the root shell
+    assert mux.attach_target_argv("=bmad-loop-ctl")[-1] == term[b]
+    # after an explicit select (attach_plan runs select_ctl_window first) the
+    # active tab wins
+    mux.select_window("=bmad-loop-ctl:run-a")
+    assert mux.attach_target_argv("=bmad-loop-ctl")[-1] == term[a]
+    assert a != b
+
+
+def test_attach_target_argv_session_level_single_tab_is_root(fake):
+    fake.add_workspace("bmad-loop-x")
+    root = fake.panes[-1]
+    assert HerdrMultiplexer().attach_target_argv("=bmad-loop-x")[-1] == root["terminal_id"]
+
+
+def test_attach_target_argv_inside_herdr_focuses(fake, monkeypatch):
+    # inside a herdr pane, nesting a full attach is the wrong move (as with
+    # attach-inside-tmux): return the fire-and-forget focus argv instead
+    fake.add_workspace("bmad-loop-ctl")
+    mux = HerdrMultiplexer()
+    pane_id = mux.new_window("bmad-loop-ctl", "run-RID", Path("/w"), {}, "echo hi")
+    tab_id = next(p["tab_id"] for p in fake.panes if p["pane_id"] == pane_id)
+    monkeypatch.setenv("HERDR_ENV", "1")
+    assert mux.attach_target_argv("=bmad-loop-ctl:run-RID") == ["herdr", "tab", "focus", tab_id]
 
 
 def test_attach_target_argv_missing_pane_raises(fake):
     with pytest.raises(HerdrError):
         HerdrMultiplexer().attach_target_argv("w9:p9")
+
+
+def test_attach_target_argv_missing_session_raises_with_guidance(fake):
+    with pytest.raises(HerdrError) as excinfo:
+        HerdrMultiplexer().attach_target_argv("=absent")
+    assert "attach" in str(excinfo.value)
+
+
+def test_switch_client_focuses_origin_tab(fake):
+    fake.add_workspace("bmad-loop-ctl")
+    fake.add_workspace("userws")
+    origin = fake.panes[-1]
+    mux = HerdrMultiplexer()
+    assert mux.switch_client(origin["pane_id"]) is True
+    assert ["tab", "focus", origin["tab_id"]] in fake.calls
+    # a gone target is honestly False; herdr has no "last client" to fall back to
+    assert mux.switch_client("w9:p9") is False
+    assert mux.switch_client("w9:p9", last_fallback=True) is False
+
+
+def test_list_windows_tmux_field_mapping(fake):
+    fake.add_workspace("bmad-loop-ctl")
+    mux = HerdrMultiplexer()
+    pane_id = mux.new_window("bmad-loop-ctl", "run-RID", Path("/w"), {}, "echo hi")
+    mux.set_window_option(pane_id, PROJECT_OPTION, "/proj")
+    rows = mux.list_windows("bmad-loop-ctl", ["window_id", "window_name", PROJECT_OPTION])
+    by_id = {row[0]: row for row in rows}
+    assert by_id[pane_id] == (pane_id, "run-RID", "/proj")
+    root = fake.panes[0]["pane_id"]
+    assert by_id[root] == (root, "1", "")  # the root shell tab: numeric label, untagged
+    # ctl_window()'s discovery contract: every window comes back with its name
+    assert {row[1] for row in rows} == {"1", "run-RID"}
+
+
+def test_in_ctl_session_seam_honest_under_herdr(fake, monkeypatch):
+    # launch.in_ctl_session no longer sniffs TMUX: with herdr selected and the
+    # herdr pane env present it resolves through the seam.
+    from bmad_loop.adapters.multiplexer import get_multiplexer
+    from bmad_loop.tui import launch
+
+    wid = fake.add_workspace(launch.CTL_SESSION)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "herdr")
+    get_multiplexer.cache_clear()
+    try:
+        monkeypatch.setenv("HERDR_ENV", "1")
+        monkeypatch.setenv("HERDR_WORKSPACE_ID", wid)
+        monkeypatch.setenv("HERDR_PANE_ID", "w1:p1")
+        assert launch.in_ctl_session() is True
+        monkeypatch.setenv("HERDR_WORKSPACE_ID", "w9")  # some other workspace
+        assert launch.in_ctl_session() is False
+        monkeypatch.delenv("HERDR_ENV", raising=False)  # not inside herdr at all
+        assert launch.in_ctl_session() is False
+    finally:
+        get_multiplexer.cache_clear()
 
 
 def test_current_accessors_resolve_from_env(fake, monkeypatch):

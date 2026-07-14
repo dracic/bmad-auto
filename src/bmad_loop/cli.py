@@ -1346,11 +1346,13 @@ def cmd_attach(args: argparse.Namespace) -> int:
     # Record where to send the client once the sweep finishes this cycle's
     # decisions (see launch.return_attached_client), so answering them hands the
     # terminal back instead of stranding the user in the orchestrator window.
+    # Backend-honest inside-the-multiplexer probe: current_pane_id() is None
+    # outside, so a resolvable own pane means "switch the client back here",
+    # anything else means a throwaway client was attached and must detach.
     if return_window is not None:
-        if os.environ.get("TMUX"):
-            pane = launch.current_pane_id()
-            if pane is not None:
-                launch.set_return_pane(return_window, pane)
+        pane = launch.current_pane_id()
+        if pane is not None:
+            launch.set_return_pane(return_window, pane)
         else:
             launch.set_return_pane(return_window, launch.RETURN_DETACH)
     return subprocess.call(argv)

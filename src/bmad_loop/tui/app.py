@@ -8,7 +8,6 @@ The g binding opens the policy.toml settings editor.
 
 from __future__ import annotations
 
-import os
 import shlex
 import subprocess
 import time
@@ -379,14 +378,16 @@ class BmadLoopApp(App[None]):
 
     def _attach_to_target(self, target: str, return_window: str | None = None) -> None:
         argv = runs.attach_target_argv(target)
-        if os.environ.get("TMUX"):
-            # switch-client is fire-and-forget; record our own pane on the ctl
-            # window so its trailing shell switches the client back here when it
-            # exits, instead of stranding the user in the control session.
+        # Backend-honest inside-the-multiplexer probe (current_pane_id() is None
+        # outside): inside, attach_target_argv returned the fire-and-forget
+        # switch/focus form, so no suspend is needed.
+        pane = launch.current_pane_id()
+        if pane is not None:
+            # Record our own pane on the ctl window so its trailing shell
+            # switches the client back here when it exits, instead of stranding
+            # the user in the control session.
             if return_window is not None:
-                pane = launch.current_pane_id()
-                if pane is not None:
-                    launch.set_return_pane(return_window, pane)
+                launch.set_return_pane(return_window, pane)
             subprocess.call(argv)
             return
         # Outside tmux we attach a throwaway client (under suspend). The ctl

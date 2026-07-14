@@ -379,7 +379,13 @@ class BaseTmuxBackend(TerminalMultiplexer):
 
     def _display_message(self, fmt: str) -> str | None:
         """Resolve a tmux format string against this process's client, or None
-        when not inside tmux / tmux is unavailable."""
+        when not inside tmux / tmux is unavailable. The TMUX guard is what makes
+        "not inside" honest: against a live server, display-message would answer
+        for some OTHER client's session and misreport a plain shell as being
+        inside tmux — callers (in_ctl_session, the attach return-pane recording)
+        branch on exactly that distinction."""
+        if not os.environ.get("TMUX"):
+            return None
         try:
             proc = self._run(["display-message", "-p", fmt], check=False)
         except (subprocess.SubprocessError, OSError):

@@ -24,7 +24,7 @@ All herdr subprocess I/O is funnelled through :class:`_HerdrClient` (the ``_run`
 / ``_herdr`` / ``_herdr_json`` primitives plus the server lifecycle), so a future
 socket transport can replace it without touching :class:`HerdrMultiplexer`.
 
-**Degradation ledger (PR 1 scope — the run path; the TUI-launch surface is PR 2):**
+**Degradation ledger (PR 1 = run path; PR 2 added the TUI-launch surface):**
 
 - ``pipe_pane`` has no herdr ``pipe-pane``/tee to hand off to, so it runs a
   per-window :class:`_PanePoller` daemon that snapshots ``pane read`` into the
@@ -32,21 +32,41 @@ socket transport can replace it without touching :class:`HerdrMultiplexer`.
   ``revision`` is unusable, it stays 0). This drives the two log consumers a
   tmux tee would: ``generic._log_activity_key`` re-arms the dev-stall grace on
   log growth, and ``probe`` finds completion markers in the log.
-- ``new_parked_window`` **raises** ``HerdrError`` — only ``tui/launch.py`` calls
-  it (PR 2).
-- ``attach_target_argv`` returns ``["herdr", "terminal", "attach", <terminal_id>]``
-  — it strips a tmux-style ``=`` target prefix and resolves the window's pane id to
-  its ``terminal_id`` via ``pane get``, raising ``HerdrError`` with operator
-  guidance when no terminal can be resolved. Full ``=session:window`` target
-  parsing and ``switch_client`` are PR 2 (the TUI-launch surface).
-- ``detach_client`` is a no-op — herdr detach is a keybinding, with no CLI verb.
+- ``new_parked_window`` types a POSIX ``exec sh -c '<argv>; ec=$?; echo
+  <banner>; read -r; <trailer>'`` recipe into a fresh tab, tmux-identical from
+  the operator's seat. The tmux trailer reads the return option live via
+  ``show-options``; herdr window options live in OUR sidecar, which a one-line
+  ``sh`` trailer can't query — so the option methods mirror the parked window's
+  return option into a per-window **return file** the trailer ``cat``\\ s
+  (resolved to a *tab id* at write time, keeping the trailer a dumb
+  ``herdr tab focus``). POSIX-only, like the ``exec`` launch (pwsh dialect is
+  the Windows follow-up).
+- ``attach_target_argv`` accepts both target families (native pane id and the
+  tmux-style ``=session[:window]`` specs ``tui/launch.py`` builds — see
+  ``_parse_target``): outside herdr it returns ``["herdr", "terminal",
+  "attach", <terminal_id>]`` (which blocks, and exits when the pane closes);
+  inside a herdr pane it returns the fire-and-forget ``["herdr", "tab",
+  "focus", <tab_id>]`` — the switch-client move, mirroring tmux's in-``TMUX``
+  branch. Raises ``HerdrError`` with operator guidance when unresolvable.
+- ``switch_client`` is a ``tab focus`` on the target's tab (focusing a tab in
+  another workspace flips workspace focus too — verified 0.7.3). herdr has no
+  "last client" concept, so ``last_fallback`` has nothing to fall back to and
+  a failed switch is honestly ``False``.
+- ``detach_client`` is a no-op — herdr detach is a keybinding, with no CLI
+  verb. Consequence: the *post-exit* detach return is full-fidelity anyway
+  (ending the parked source closes the pane, which ends a blocking ``terminal
+  attach`` client), but the *mid-process* ``RETURN_DETACH`` hand-back
+  (``launch.return_attached_client`` while a plain-terminal client watches)
+  degrades to "stay attached until the parked window closes".
 - Session/window **options** have no native herdr equivalent, so they live in a
   cross-process **sidecar** JSON (``~/.bmad-loop/herdr-state.json``, override
   ``BMAD_LOOP_HERDR_STATE``), written via :func:`platform_util.atomic_replace`
   with every read-modify-write cycle serialized by an OS advisory lock on a
   sibling ``.lock`` file (:func:`platform_util.file_lock`) — the write
   serialization the tmux server gave ``set-option`` for free; entries for a
-  workspace that is gone are pruned on the next enumeration.
+  workspace that is gone are pruned on the next enumeration. Window-option keys
+  are **normalized to the native pane id** (``_parse_target``) so a write by
+  ``=session:name`` target and a read by native id agree.
 - ``new_session`` geometry (cols/lines) is **advisory** — herdr exposes no
   absolute headless resize; a detached pane takes an attaching client's size.
 - Protocol policy: fail below :data:`SUPPORTED_PROTOCOL`, warn once above.
@@ -88,6 +108,18 @@ POLL_NOT_FOUND_LIMIT = 3
 # Env var herdr injects into every pane it spawns; its presence is how the
 # current_* accessors know this process is running inside a herdr pane.
 _HERDR_ENV_MARKER = "HERDR_ENV"
+
+# Per-window option value (vs a pane id) telling the parked trailer to detach
+# the client rather than switch it — the same protocol constant the tmux family
+# uses (tmux_base.PARKED_RETURN_DETACH); duplicated so this backend stays free
+# of tmux imports.
+PARKED_RETURN_DETACH = "detach"
+
+# Private sidecar window-entry key recording which user option is a parked
+# window's return option (new_parked_window writes it; set/unset_window_option
+# consult it to mirror that option into the window's return file). "~"-prefixed
+# so it can never collide with a tmux-style "@" user option.
+_PARKED_RETURN_KEY = "~parked_return_opt"
 
 
 class HerdrError(MultiplexerError):
@@ -166,6 +198,66 @@ def _save_state(state: dict) -> None:
         except OSError:
             pass
         raise
+
+
+# ------------------------------------------------------------- return files
+#
+# A parked window's trailing shell must read the CURRENT value of its return
+# option at park-exit time. tmux trailers run `show-options` against the live
+# server; herdr window options live in the sidecar JSON above, which a one-line
+# sh trailer cannot sensibly parse — so the option methods mirror the parked
+# return option into a tiny per-window file the trailer `cat`s. The path is
+# deterministic from the sidecar location, so the window creator (one process),
+# the attach-time writer (another), and the in-window trailer (a third) all
+# agree with no coordination.
+
+
+def _return_file(pane_id: str) -> Path:
+    # ':' is not a legal filename character on Windows, hence the '-' mapping.
+    state = _state_path()
+    return state.with_name(f"herdr-return-{pane_id.replace(':', '-')}")
+
+
+def _write_return_file(pane_id: str, content: str) -> None:
+    """Best-effort: the option write already succeeded, and the mirror only
+    serves the trailer — a failure here must not fail the (sentinel) caller."""
+    path = _return_file(pane_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _remove_return_file(pane_id: str) -> None:
+    try:
+        _return_file(pane_id).unlink()
+    except OSError:
+        pass
+
+
+def _parked_source(argv: list[str], pane_id: str) -> str:
+    """The POSIX sh source a parked window runs. Typed via ``pane run``, so it
+    must be a single line; it passes through the pane's default shell before
+    ``exec sh -c`` takes over, so it sticks to quoting every POSIX family
+    member AND fish accept (single-quoted payloads with the shlex ``'"'"'``
+    concatenation dance).
+
+    After the park, the trailer hands an attached client back to its origin:
+    the return file holds a tab id to focus (one ``tab focus`` also flips
+    workspace focus — verified 0.7.3) or :data:`PARKED_RETURN_DETACH`, where
+    doing NOTHING is correct — ending the source closes the pane, and a
+    ``herdr terminal attach`` client exits when its pane closes (verified
+    0.7.3)."""
+    ret = shlex.quote(str(_return_file(pane_id)))
+    return (
+        f"{shlex.join(argv)}; ec=$?; "
+        f'echo "[bmad-loop exited $ec — press enter]"; '
+        "read -r; "
+        f"ret=$(cat {ret} 2>/dev/null); rm -f {ret}; "
+        f'if [ -n "$ret" ] && [ "$ret" != {PARKED_RETURN_DETACH} ]; then '
+        f'herdr tab focus "$ret" >/dev/null 2>&1 || true; fi'
+    )
 
 
 # ----------------------------------------------------------------- transport
@@ -516,8 +608,32 @@ class HerdrMultiplexer(TerminalMultiplexer):
             raise HerdrError(f"herdr pane list failed: {proc.stderr.strip()}")
         return _envelope_items(proc.stdout, "panes", strict=True)
 
-    def _workspace_id(self, label: str, *, strict: bool) -> str | None:
-        """First-match resolution of a session name to a workspace id. herdr
+    def _list_tabs_strict(self) -> list[dict]:
+        """Every tab across all workspaces; raises on failure. Never
+        ``tab list --workspace <maybe-absent>`` — that RAISES ``workspace_not_found``
+        (the pane-list trap again); enumerate all tabs and filter in-process."""
+        try:
+            proc = self._client._run(["tab", "list"], check=False)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise HerdrError(f"herdr tab list failed: {exc}") from exc
+        if proc.returncode != 0:
+            raise HerdrError(f"herdr tab list failed: {proc.stderr.strip()}")
+        return _envelope_items(proc.stdout, "tabs", strict=True)
+
+    def _list_tabs_tolerant(self) -> list[dict] | None:
+        """Every tab, or None when the query could not be answered."""
+        if not shutil.which("herdr"):
+            return None
+        try:
+            proc = self._client._run(["tab", "list"], check=False)
+        except (subprocess.SubprocessError, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+        return _envelope_items(proc.stdout, "tabs", strict=False)
+
+    def _workspace_row(self, label: str, *, strict: bool) -> dict | None:
+        """First-match resolution of a session name to its workspace row. herdr
         allows DUPLICATE labels (tmux session names are unique; herdr's are not),
         so callers must tolerate more than one and take the first."""
         workspaces = self._list_workspaces_strict() if strict else self._list_workspaces_tolerant()
@@ -525,9 +641,67 @@ class HerdrMultiplexer(TerminalMultiplexer):
             return None
         for ws in workspaces:
             if ws.get("label") == label:
-                wid = ws.get("workspace_id")
-                return wid if isinstance(wid, str) else None
+                return ws if isinstance(ws.get("workspace_id"), str) else None
         return None
+
+    def _workspace_id(self, label: str, *, strict: bool) -> str | None:
+        row = self._workspace_row(label, strict=strict)
+        return row["workspace_id"] if row is not None else None
+
+    def _tab_root_pane(self, tab_id: str, *, strict: bool) -> str | None:
+        """The tab's first pane — bmad-loop windows are single-pane tabs, so this
+        is the pane that IS the window."""
+        try:
+            panes = self._list_panes_strict()
+        except MultiplexerError:
+            if strict:
+                raise
+            return None
+        for pane in panes:
+            if pane.get("tab_id") == tab_id and isinstance(pane.get("pane_id"), str):
+                return pane["pane_id"]
+        return None
+
+    def _parse_target(self, target: str, *, strict: bool) -> str | None:
+        """Resolve any window target to a native pane id.
+
+        Callers hand this two families: a tmux-style ``=session[:window]`` spec
+        (``tui/launch.py`` builds these) and our own native pane id. The ``=``
+        prefix is the discriminator — native ids contain ``:`` (``w1:p1``) but
+        never lead with ``=``. A native id passes through untouched, with no
+        server round-trip. For ``=…`` targets: session → workspace (first-match
+        label), a window name → the tab with that label, no window → the
+        session-level tab (see :func:`_session_level_tab`), then that tab's
+        pane. ``strict=True`` raises :class:`HerdrError` when the target cannot
+        be resolved; ``strict=False`` returns None (the sentinel callers' quiet
+        failure)."""
+        if not target.startswith("="):
+            return target
+        session, _, window = target[1:].partition(":")
+        row = self._workspace_row(session, strict=strict)
+        if row is None:
+            if strict:
+                raise HerdrError(f"herdr workspace for session {session!r} not found")
+            return None
+        wid = row["workspace_id"]
+        tabs = self._list_tabs_strict() if strict else self._list_tabs_tolerant()
+        tabs = [
+            t
+            for t in tabs or []
+            if t.get("workspace_id") == wid and isinstance(t.get("tab_id"), str)
+        ]
+        if window:
+            tab = next((t for t in tabs if t.get("label") == window), None)
+        else:
+            tab = _session_level_tab(tabs, row.get("active_tab_id"))
+        if tab is None:
+            if strict:
+                raise HerdrError(f"herdr target {target!r} matches no tab")
+            return None
+        pane_id = self._tab_root_pane(tab["tab_id"], strict=strict)
+        if pane_id is None and strict:
+            raise HerdrError(f"herdr tab {tab['tab_id']!r} for target {target!r} has no pane")
+        return pane_id
 
     # ------------------------------------------------------------ sessions
 
@@ -567,6 +741,7 @@ class HerdrMultiplexer(TerminalMultiplexer):
                 wid = None
         if wid is not None:
             self._stop_pollers_for_workspace(wid)
+            _drop_windows_for_workspace(wid)
         _drop_state("sessions", name)
 
     def list_sessions(self) -> list[str]:
@@ -654,11 +829,37 @@ class HerdrMultiplexer(TerminalMultiplexer):
     def new_parked_window(
         self, session: str, name: str, cwd: Path, argv: list[str], return_opt: str
     ) -> str:
-        # The parked/return-to-origin recipe is the TUI-launch surface (PR 2);
-        # only tui/launch.py calls this. Fail loudly rather than half-implement.
-        raise HerdrError(
-            "herdr new_parked_window (TUI launch surface) is not implemented yet — see PR 2"
+        # A fresh tab whose typed `exec sh -c '<recipe>'` runs argv, echoes the
+        # exit banner, parks on a blocking read (the exit status stays
+        # inspectable), and finally hands an attached client back to its origin
+        # via the per-window return file (see _parked_source / the module
+        # docstring's ledger). exec replaces the shell, so finishing the source
+        # closes the pane — which is also what ends a watching `terminal
+        # attach` client.
+        self._client.ensure_server()
+        wid = self._workspace_id(session, strict=True)
+        if wid is None:
+            raise HerdrError(f"herdr workspace for session {session!r} not found")
+        result = self._client._herdr_json(
+            "tab", "create", "--workspace", wid, "--label", name, "--cwd", str(cwd), "--no-focus"
         )
+        pane_id = _root_pane_id(result)
+        if pane_id is None:
+            raise HerdrError(f"herdr tab create did not return a root pane id: {result!r}")
+        # Record which option this window's trailer consumes BEFORE typing the
+        # recipe, so a set_window_option racing the launch already mirrors into
+        # the return file.
+        try:
+            with _state_lock():
+                state = _load_state()
+                state["windows"].setdefault(pane_id, {})[_PARKED_RETURN_KEY] = return_opt
+                _save_state(state)
+        except OSError as exc:
+            raise HerdrError(f"herdr sidecar write failed: {exc}") from exc
+        self._client._herdr(
+            "pane", "run", pane_id, "exec sh -c " + shlex.quote(_parked_source(argv, pane_id))
+        )
+        return pane_id
 
     def list_window_ids(self, session: str) -> list[str]:
         # The engine's liveness probe: [] means "no windows", and a transport
@@ -676,9 +877,12 @@ class HerdrMultiplexer(TerminalMultiplexer):
         ]
 
     def list_windows(self, session: str, fields: list[str]) -> list[tuple[str, ...]]:
-        # Best-effort metadata (sentinel [] on any failure). Fields are looked up
-        # directly on each pane dict by herdr-native key; full tmux-field mapping
-        # for tui/launch.py is PR 2.
+        # Best-effort metadata (sentinel [] on any failure). The tmux format
+        # fields tui/launch.py asks for are mapped onto the herdr object model
+        # (window == tab, native window id == the tab's root pane id):
+        # window_id/pane_id -> pane_id, window_name -> the owning tab's label,
+        # session_name -> the session, "@..." user options -> the sidecar.
+        # Anything unmapped falls back to the pane dict's own herdr-native key.
         wid = self._workspace_id(session, strict=False)
         if wid is None:
             return []
@@ -686,11 +890,40 @@ class HerdrMultiplexer(TerminalMultiplexer):
             panes = self._list_panes_strict()
         except MultiplexerError:
             return []
+        tab_labels: dict[str, str] = {}
+        if "window_name" in fields:
+            tabs = self._list_tabs_tolerant()
+            if tabs is None:
+                return []  # can't answer a requested field -> the [] sentinel
+            for tab in tabs:
+                if isinstance(tab.get("tab_id"), str):
+                    label = tab.get("label")
+                    tab_labels[tab["tab_id"]] = label if isinstance(label, str) else ""
+        options: dict = {}
+        if any(field.startswith("@") for field in fields):
+            options = _load_state()["windows"]
         rows: list[tuple[str, ...]] = []
         for pane in panes:
             if pane.get("workspace_id") != wid:
                 continue
-            rows.append(tuple(str(pane.get(field, "")) for field in fields))
+            pane_id = pane.get("pane_id")
+            pane_id = pane_id if isinstance(pane_id, str) else ""
+            row: list[str] = []
+            for field in fields:
+                if field in ("window_id", "pane_id"):
+                    row.append(pane_id)
+                elif field == "window_name":
+                    tab_id = pane.get("tab_id")
+                    row.append(tab_labels.get(tab_id, "") if isinstance(tab_id, str) else "")
+                elif field == "session_name":
+                    row.append(session)
+                elif field.startswith("@"):
+                    opts = options.get(pane_id, {})
+                    value = opts.get(field, "") if isinstance(opts, dict) else ""
+                    row.append(value if isinstance(value, str) else "")
+                else:
+                    row.append(str(pane.get(field, "")))
+            rows.append(tuple(row))
         return rows
 
     def window_alive(self, session: str, window_id: str) -> bool:
@@ -721,21 +954,28 @@ class HerdrMultiplexer(TerminalMultiplexer):
         # Best-effort: `pane close` cascades the now-empty tab closed; tolerate the
         # pane already being gone (a CLI that crashes on launch races its window
         # down before teardown — probe.py depends on this tolerance).
-        self._stop_poller(target)
+        pane_id = self._parse_target(target, strict=False)
+        if pane_id is None:
+            return
+        self._stop_poller(pane_id)
         if shutil.which("herdr"):
             try:
-                self._client._run(["pane", "close", target], check=False)
+                self._client._run(["pane", "close", pane_id], check=False)
             except (subprocess.SubprocessError, OSError):
                 pass
-        _drop_state("windows", target)
+        _drop_state("windows", pane_id)
+        _remove_return_file(pane_id)
 
     def select_window(self, target: str) -> None:
         # Best-effort focus: resolve the pane's tab and focus it (herdr has
         # `tab focus`, not `pane focus`). Swallow any failure to the no-op sentinel.
         if not shutil.which("herdr"):
             return
+        pane_id = self._parse_target(target, strict=False)
+        if pane_id is None:
+            return
         try:
-            proc = self._client._run(["pane", "get", target], check=False)
+            proc = self._client._run(["pane", "get", pane_id], check=False)
             if proc.returncode != 0:
                 return
             pane = json.loads(proc.stdout).get("result", {}).get("pane", {})
@@ -747,31 +987,75 @@ class HerdrMultiplexer(TerminalMultiplexer):
 
     def set_window_option(self, target: str, option: str, value: str) -> None:
         # Best-effort sidecar write (sentinel: swallow OSError to a no-op — a
-        # lock failure skips the write entirely, never writes unguarded).
+        # lock failure skips the write entirely, never writes unguarded). Keys
+        # are normalized to the native pane id, so a write by tmux-style
+        # "=session:name" target (set_return_pane) and a read by native id
+        # (return_attached_client) agree.
+        pane_id = self._parse_target(target, strict=False)
+        if pane_id is None:
+            return
+        parked_opt = None
         try:
             with _state_lock():
                 state = _load_state()
-                state["windows"].setdefault(target, {})[option] = value
+                opts = state["windows"].setdefault(pane_id, {})
+                opts[option] = value
+                parked_opt = opts.get(_PARKED_RETURN_KEY)
                 _save_state(state)
         except OSError:
-            pass
+            return
+        if parked_opt == option:
+            self._mirror_return_value(pane_id, value)
+
+    def _mirror_return_value(self, pane_id: str, value: str) -> None:
+        """Mirror a parked window's return-option value into its return file, in
+        trailer-actionable form: :data:`PARKED_RETURN_DETACH` verbatim; a pane id
+        is resolved to its TAB id here, where JSON parsing is cheap, so the sh
+        trailer stays a dumb ``tab focus``. Best-effort — an unresolvable origin
+        clears the file instead, so a stale target can't yank focus somewhere
+        wrong later."""
+        if value == PARKED_RETURN_DETACH:
+            _write_return_file(pane_id, value)
+            return
+        tab_id: str | None = None
+        try:
+            candidate = self._client._herdr_json("pane", "get", value).get("pane", {})
+            if isinstance(candidate, dict) and isinstance(candidate.get("tab_id"), str):
+                tab_id = candidate["tab_id"] or None
+        except MultiplexerError:
+            tab_id = None
+        if tab_id is None:
+            _remove_return_file(pane_id)
+        else:
+            _write_return_file(pane_id, tab_id)
 
     def unset_window_option(self, target: str, option: str) -> None:
+        pane_id = self._parse_target(target, strict=False)
+        if pane_id is None:
+            return
+        parked_opt = None
         try:
             with _state_lock():
                 state = _load_state()
-                opts = state["windows"].get(target)
+                opts = state["windows"].get(pane_id)
                 if isinstance(opts, dict) and option in opts:
                     del opts[option]
+                    parked_opt = opts.get(_PARKED_RETURN_KEY)
                     if not opts:
-                        del state["windows"][target]
+                        del state["windows"][pane_id]
                     _save_state(state)
         except OSError:
-            pass
+            return
+        if parked_opt == option:
+            _remove_return_file(pane_id)
 
     def show_window_option(self, target: str, option: str) -> str:
-        # "" reads as "unset" — also the failure sentinel.
-        opts = _load_state()["windows"].get(target, {})
+        # "" reads as "unset" — also the failure sentinel (including a "=..."
+        # target that no longer resolves). Keys normalized like set_window_option.
+        pane_id = self._parse_target(target, strict=False)
+        if pane_id is None:
+            return ""
+        opts = _load_state()["windows"].get(pane_id, {})
         value = opts.get(option, "") if isinstance(opts, dict) else ""
         return value if isinstance(value, str) else ""
 
@@ -820,17 +1104,30 @@ class HerdrMultiplexer(TerminalMultiplexer):
     # ----------------------------------------------------- client / attach
 
     def attach_target_argv(self, target: str) -> list[str]:
-        # Attach a plain terminal to the window's pane via its terminal_id. Strip a
-        # tmux-style '=' target prefix a caller might pass; full '=session:window'
-        # parsing is PR 2 (here `target` is our native pane id).
-        pane_id = target[1:] if target.startswith("=") else target
+        # Resolve either target family (native pane id or a tmux-style
+        # "=session[:window]" spec — see _parse_target) to its pane, then:
+        #   - inside a herdr pane (HERDR_ENV): nesting a full attach is the
+        #     wrong move, exactly like attach-inside-tmux — return the
+        #     fire-and-forget `tab focus`, the switch-client equivalent;
+        #   - outside: attach the caller's terminal to the pane's terminal_id
+        #     (`herdr terminal attach` blocks, and exits when the pane closes).
         try:
+            pane_id = self._parse_target(target, strict=True)
+            if pane_id is None:  # strict never returns None; belt and braces
+                raise HerdrError("target resolves to no pane")
             result = self._client._herdr_json("pane", "get", pane_id)
         except HerdrError as exc:
             raise HerdrError(
                 f"cannot resolve a herdr terminal for {target!r} to attach: {exc}"
             ) from exc
-        terminal_id = result.get("pane", {}).get("terminal_id")
+        pane = result.get("pane")
+        pane = pane if isinstance(pane, dict) else {}
+        if os.environ.get(_HERDR_ENV_MARKER) == "1":
+            tab_id = pane.get("tab_id")
+            if isinstance(tab_id, str) and tab_id:
+                return ["herdr", "tab", "focus", tab_id]
+            raise HerdrError(f"herdr pane {pane_id!r} has no tab to focus")
+        terminal_id = pane.get("terminal_id")
         if not isinstance(terminal_id, str) or not terminal_id:
             raise HerdrError(f"herdr pane {pane_id!r} has no terminal to attach")
         return ["herdr", "terminal", "attach", terminal_id]
@@ -868,9 +1165,26 @@ class HerdrMultiplexer(TerminalMultiplexer):
         return None
 
     def switch_client(self, target: str, last_fallback: bool = False) -> bool:
-        # Client switching is the TUI-launch surface (PR 2). Until then no switch
-        # happens, so the honest sentinel is False.
-        return False
+        # The herdr "switch client" move is a tab focus: focusing a tab also
+        # flips workspace focus when it lives elsewhere (verified 0.7.3), so one
+        # verb covers the whole return-to-origin hop. True iff the focus landed.
+        # herdr has no "last client" concept, so last_fallback has nothing to
+        # fall back to and a failed switch is honestly False.
+        pane_id = self._parse_target(target, strict=False)
+        if pane_id is None:
+            return False
+        try:
+            pane = self._client._herdr_json("pane", "get", pane_id).get("pane", {})
+        except MultiplexerError:
+            return False
+        tab_id = pane.get("tab_id") if isinstance(pane, dict) else None
+        if not isinstance(tab_id, str) or not tab_id:
+            return False
+        try:
+            proc = self._client._run(["tab", "focus", tab_id], check=False)
+        except (subprocess.SubprocessError, OSError):
+            return False
+        return proc.returncode == 0
 
     def available(self) -> bool:
         # A plain PATH probe — NEVER touches the server (detect_multiplexers
@@ -905,6 +1219,29 @@ def _envelope_items(stdout: str, key: str, *, strict: bool) -> list[dict]:
     return [item for item in items if isinstance(item, dict)]
 
 
+def _session_level_tab(tabs: list[dict], active_tab_id: object) -> dict | None:
+    """The tab a session-level (``=session``) target lands on: the workspace's
+    active tab — except when that is the root shell tab and task tabs exist,
+    where the NEWEST tab wins. Rationale: ``new_window``/``new_parked_window``
+    create tabs ``--no-focus`` (never yanking an attached client's focus), so a
+    headless agent workspace keeps its root shell active while the window the
+    caller wants is the newest tab; the ctl session is unaffected because
+    ``attach_plan`` runs ``select_window`` (a ``tab focus``) first, making the
+    intended window the active one."""
+    if not tabs:
+        return None
+
+    def num(tab: dict) -> int:
+        n = tab.get("number")
+        return n if isinstance(n, int) else 0
+
+    root = min(tabs, key=num)
+    active = next((t for t in tabs if t.get("tab_id") == active_tab_id), None)
+    if active is not None and active.get("tab_id") != root.get("tab_id"):
+        return active
+    return max(tabs, key=num)  # root active (or unknown): newest tab (== root when alone)
+
+
 def _root_pane_id(result: dict) -> str | None:
     root = result.get("root_pane")
     if isinstance(root, dict) and isinstance(root.get("pane_id"), str):
@@ -923,3 +1260,23 @@ def _drop_state(section: str, key: str) -> None:
                 _save_state(state)
     except OSError:
         pass
+
+
+def _drop_windows_for_workspace(workspace_id: str) -> None:
+    """Best-effort sidecar + return-file cleanup for every window of a closed
+    workspace (pane ids are ``<workspace_id>:p<n>`` — the same prefix rule the
+    poller registry uses). Never raises."""
+    prefix = workspace_id + ":"
+    doomed: list[str] = []
+    try:
+        with _state_lock():
+            state = _load_state()
+            doomed = [key for key in state["windows"] if key.startswith(prefix)]
+            for key in doomed:
+                del state["windows"][key]
+            if doomed:
+                _save_state(state)
+    except OSError:
+        return  # unknown keys: the trailers' own `rm -f` self-cleans the files
+    for key in doomed:
+        _remove_return_file(key)

@@ -12,7 +12,6 @@ subprocess for the captured read-only commands) and is unit-testable.
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 import sys
@@ -99,8 +98,10 @@ def current_session() -> str | None:
 
 def in_ctl_session() -> bool:
     """True when we are running inside a control-session window (i.e. launched
-    detached by the TUI), as opposed to a user's own shell."""
-    return bool(os.environ.get("TMUX")) and current_session() == CTL_SESSION
+    detached by the TUI), as opposed to a user's own shell. Backend-honest:
+    current_session() is None whenever this process is not inside the selected
+    multiplexer, so no direct TMUX/HERDR_* env sniffing happens here."""
+    return current_session() == CTL_SESSION
 
 
 def detach_client() -> None:
