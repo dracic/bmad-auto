@@ -95,6 +95,24 @@ backend. `window_alive` uses `list-windows` membership, not `display-message`, b
 the fastest way to see exactly what a `new_parked_window` or `session_options` must
 produce.
 
+For the **implement-fresh** path, `adapters/herdr_backend.py` is the shipped worked
+example — a backend over [herdr](https://herdr.dev), a cross-platform,
+agent-aware workspace manager whose CLI is a different binary family from tmux. Its
+mapping: a bmad-loop **session** is a herdr **workspace** (label == session name), a
+**window** is a **tab** (one shell pane, whose `root_pane.pane_id` is the native
+window id handed back), and the launched command runs via a typed `exec <argv>`
+(`pane run` = type + Enter) so process-exit == pane-close == tab-close ==
+tmux-identical window death. Where herdr has no analogue, the backend degrades
+honestly rather than faking it: session/window **options** (which herdr lacks
+entirely) live in a cross-process JSON **sidecar**, and `pipe_pane` — herdr has no
+tee — runs a per-window **poller** thread that snapshots `pane read` into the log
+whenever the content changes, which is exactly enough to drive the two log consumers
+a tmux tee would (`generic._log_activity_key`'s stall re-arm and `probe`'s marker
+discovery). Its module docstring is a **degradation ledger** of every such
+divergence (sidecar options, poller `pipe_pane`, no-op `detach_client`, the attach
+argv, the advisory geometry, the protocol-version policy) — the reference for what
+"implement fresh" costs when the host has no tmux-shaped CLI.
+
 The hard part of a new profile isn't the TOML — it's the **facts that live in no
 doc**: the CLI's exact hook payload shape (field names and casing, whether
 `session_id` / `transcript_path` / `cwd` are present), where it writes its session

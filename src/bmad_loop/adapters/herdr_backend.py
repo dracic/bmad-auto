@@ -34,6 +34,11 @@ socket transport can replace it without touching :class:`HerdrMultiplexer`.
   log growth, and ``probe`` finds completion markers in the log.
 - ``new_parked_window`` **raises** ``HerdrError`` — only ``tui/launch.py`` calls
   it (PR 2).
+- ``attach_target_argv`` returns ``["herdr", "terminal", "attach", <terminal_id>]``
+  — it strips a tmux-style ``=`` target prefix and resolves the window's pane id to
+  its ``terminal_id`` via ``pane get``, raising ``HerdrError`` with operator
+  guidance when no terminal can be resolved. Full ``=session:window`` target
+  parsing and ``switch_client`` are PR 2 (the TUI-launch surface).
 - ``detach_client`` is a no-op — herdr detach is a keybinding, with no CLI verb.
 - Session/window **options** have no native herdr equivalent, so they live in a
   cross-process **sidecar** JSON (``~/.bmad-loop/herdr-state.json``, override

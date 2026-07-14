@@ -17,11 +17,10 @@ import time
 from pathlib import Path
 
 import pytest
+from test_herdr_backend import FakeHerdr
 
 from bmad_loop.adapters import herdr_backend
 from bmad_loop.adapters.herdr_backend import HerdrMultiplexer
-
-from test_herdr_backend import FakeHerdr
 
 
 @pytest.fixture
