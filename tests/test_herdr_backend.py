@@ -215,10 +215,11 @@ def test_constructor_does_no_io(monkeypatch):
 
 
 def test_new_session_creates_workspace_argv(fake):
+    cwd = str(Path("/work"))  # backend stringifies the Path; '\\work' on win32
     HerdrMultiplexer().new_session("bmad-loop-x", Path("/work"), 220, 50)
     creates = _creates(fake, "workspace", "create")
     assert creates == [
-        ["workspace", "create", "--label", "bmad-loop-x", "--cwd", "/work", "--no-focus"]
+        ["workspace", "create", "--label", "bmad-loop-x", "--cwd", cwd, "--no-focus"]
     ]
 
 
@@ -231,6 +232,7 @@ def test_new_session_guards_duplicate_label(fake):
 
 
 def test_new_window_tab_create_and_exec_launch(fake):
+    cwd = str(Path("/work"))  # backend stringifies the Path; '\\work' on win32
     fake.add_workspace("bmad-loop-x")
     mux = HerdrMultiplexer()
     pane_id = mux.new_window("bmad-loop-x", "win", Path("/work"), {"A": "1", "B": "2"}, "echo hi")
@@ -239,7 +241,7 @@ def test_new_window_tab_create_and_exec_launch(fake):
         "tab", "create",
         "--workspace", "w1",
         "--label", "win",
-        "--cwd", "/work",
+        "--cwd", cwd,
         "--env", "A=1",
         "--env", "B=2",
         "--no-focus",

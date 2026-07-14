@@ -1283,6 +1283,7 @@ def _patch_attach_exec(monkeypatch) -> tuple[list[list[str]], list[tuple[str, st
     return calls, stamps
 
 
+@pytest.mark.usefixtures("force_tmux_backend")  # win32: pin tmux; default mux is herdr there
 async def test_attach_targets_ctl_window_when_decision_pending(project, monkeypatch):
     run_dir = make_run(project.project, "20260611-100000-aaaa", run_type="sweep", alive=True)
     Journal(run_dir).append("decision-pending", dw_id="DW-7", question="q?")
@@ -1304,6 +1305,7 @@ async def test_attach_targets_ctl_window_when_decision_pending(project, monkeypa
     assert stamps == [("=bmad-loop-ctl:sweep-20260611-100000-aaaa", "%9")]
 
 
+@pytest.mark.usefixtures("force_tmux_backend")  # win32: pin tmux; default mux is herdr there
 async def test_attach_outside_tmux_stamps_detach(project, monkeypatch):
     # No TMUX: a throwaway client attaches under suspend, so the ctl window is
     # stamped to detach it on exit (returning to the suspended TUI) rather than
@@ -1326,6 +1328,7 @@ async def test_attach_outside_tmux_stamps_detach(project, monkeypatch):
     assert stamps == [("=bmad-loop-ctl:sweep-20260611-100000-aaaa", "detach")]
 
 
+@pytest.mark.usefixtures("force_tmux_backend")  # win32: pin tmux; default mux is herdr there
 async def test_attach_prefers_agent_session_without_decision(project, monkeypatch):
     make_run(project.project, "20260611-100000-aaaa", alive=True)
     monkeypatch.setattr(launch, "tmux_available", lambda: True)
@@ -1343,6 +1346,7 @@ async def test_attach_prefers_agent_session_without_decision(project, monkeypatc
     assert stamps == []
 
 
+@pytest.mark.usefixtures("force_tmux_backend")  # win32: pin tmux; default mux is herdr there
 async def test_attach_falls_back_to_ctl_window(project, monkeypatch):
     make_run(project.project, "20260611-100000-aaaa", alive=True)
     selected: list[str] = []
@@ -1362,6 +1366,7 @@ async def test_attach_falls_back_to_ctl_window(project, monkeypatch):
     assert stamps == [("=bmad-loop-ctl:run-20260611-100000-aaaa", "%9")]
 
 
+@pytest.mark.usefixtures("force_tmux_backend")  # win32: pin tmux; default mux is herdr there
 async def test_resolve_escalation_launches_and_attaches(project, monkeypatch):
     launched: list[str] = []
     selected: list[str] = []
