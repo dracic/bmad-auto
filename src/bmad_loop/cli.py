@@ -156,7 +156,11 @@ def _platform_preflight() -> tuple[list[str], list[str]]:
     ``sys.platform`` branch to validate. The process host is named so a
     misselection (e.g. the Windows host picked on Linux) is visible at a glance.
     """
-    from .adapters.multiplexer import detect_multiplexers, get_multiplexer
+    from .adapters.multiplexer import (
+        detect_multiplexers,
+        external_backend_errors,
+        get_multiplexer,
+    )
     from .process_host import get_process_host
 
     notes: list[str] = []
@@ -195,6 +199,12 @@ def _platform_preflight() -> tuple[list[str], list[str]]:
     chosen = next((i for i in infos if i.selected), None)
     if chosen and chosen.reason in ("env", "policy"):
         notes.append(f"multiplexer selection {_mux_reason_label(chosen.reason)}")
+
+    # Advisory, not a problem: selection already degraded past the broken
+    # package (a failed external can never be the selected backend), so the
+    # preflight outcome above is authoritative — this line explains the absence.
+    for ep_name, reason in sorted(external_backend_errors().items()):
+        notes.append(f"external mux backend '{ep_name}' failed to load: {reason}")
 
     try:
         notes.append(f"process host: {type(get_process_host()).__name__}")
@@ -323,7 +333,12 @@ def cmd_mux(args: argparse.Namespace) -> int:
     """List registered terminal-multiplexer backends and the selection, or
     persist a machine-scoped choice (`mux set <name>` / `mux set --clear`) into
     .bmad-loop/policy.toml. Never prompts — runs are unattended."""
-    from .adapters.multiplexer import MultiplexerError, detect_multiplexers, get_multiplexer
+    from .adapters.multiplexer import (
+        MultiplexerError,
+        detect_multiplexers,
+        external_backend_errors,
+        get_multiplexer,
+    )
 
     project = _project(args)
     if args.action == "set":
@@ -347,6 +362,10 @@ def cmd_mux(args: argparse.Namespace) -> int:
     widths = [max(len(h), *(len(row[i]) for row in table), 0) for i, h in enumerate(header)]
     for row in (header, *table):
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
+    # A failed external package is invisible in the table (it never registered),
+    # so name it here — the one place an operator looks when a backend is missing.
+    for ep_name, reason in sorted(external_backend_errors().items()):
+        print(f"warning: external backend '{ep_name}' failed to load: {reason}", file=sys.stderr)
     print(
         "override: BMAD_LOOP_MUX_BACKEND env var, or `bmad-loop mux set <name>` "
         f"(persists to {POLICY_FILE})"

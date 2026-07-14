@@ -71,6 +71,30 @@ backend. `bmad-loop mux` lists every registered backend with its availability,
 version, and the current selection. (The result is cached — see
 [Testing a port](#testing-a-port).)
 
+### Shipping out-of-tree: the `bmad_loop.mux_backends` entry point
+
+How does the registration snippet above ever _run_ when the backend lives in its
+own package? Advertise the module in the package's `pyproject.toml`:
+
+```toml
+[project.entry-points."bmad_loop.mux_backends"]
+psmux = "my_package.backend"
+```
+
+Before every selection, core scans that entry-point group and imports each
+advertised module (builtins first, so tmux keeps first registration and the
+precedence above is unchanged); the module's top-level `register_multiplexer(...)`
+call does the rest. Installing the package into bmad-loop's environment — e.g.
+`uv tool install bmad-loop --with <your-adapter>` — is the entire setup; no core
+edit, no config step. The entry-point _value_ is a bare module path (core only
+imports it; the name is just a diagnostic label).
+
+A package that fails to import can never break selection: the failure is
+recorded and reported by `bmad-loop mux` (a `warning:` line under the table) and
+the `validate` preflight, and selection proceeds without it. The reference
+out-of-tree adapter is
+[bmad-loop-adapter-herdr](https://github.com/pbean/bmad-loop-adapter-herdr).
+
 ### Two build paths
 
 - **Extend `BaseTmuxBackend`** (`adapters/tmux_base.py`) for a **tmux-family**

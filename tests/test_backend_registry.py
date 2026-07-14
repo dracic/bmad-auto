@@ -58,14 +58,25 @@ def fresh_registry(monkeypatch):
     saved_backends = list(m._BACKENDS)
     saved_loaded = m._BUILTINS_LOADED
     saved_configured = m._CONFIGURED
+    saved_ext_loaded = m._EXTERNALS_LOADED
+    saved_ext_errors = dict(m._EXTERNAL_ERRORS)
     m._BACKENDS.clear()
     m._BUILTINS_LOADED = False
     m._CONFIGURED = None
+    # Externals stay OFF by default (the flag reads "already scanned"): these
+    # tests pin builtin selection, and a real entry-point scan here would let
+    # whatever adapters happen to be installed on the dev box leak in. The
+    # discovery tests opt back in by resetting the flag themselves.
+    m._EXTERNALS_LOADED = True
+    m._EXTERNAL_ERRORS.clear()
     m.get_multiplexer.cache_clear()
     yield m
     m._BACKENDS[:] = saved_backends
     m._BUILTINS_LOADED = saved_loaded
     m._CONFIGURED = saved_configured
+    m._EXTERNALS_LOADED = saved_ext_loaded
+    m._EXTERNAL_ERRORS.clear()
+    m._EXTERNAL_ERRORS.update(saved_ext_errors)
     m.get_multiplexer.cache_clear()
 
 

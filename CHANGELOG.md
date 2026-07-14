@@ -9,6 +9,16 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **Out-of-tree multiplexer backends (`bmad_loop.mux_backends` entry points).** A backend
+  package installed next to bmad-loop (e.g. `uv tool install bmad-loop --with <adapter>`) now
+  registers itself with no config step: before every selection, core imports each module
+  advertised under the `bmad_loop.mux_backends` entry-point group, whose import-time
+  `register_multiplexer(...)` call makes the backend selectable exactly like a bundled one
+  (builtins load first, so default selection is unchanged by installing an adapter). A package
+  that fails to import can never break selection — the failure is recorded and surfaced as a
+  `warning:` line by `bmad-loop mux` and a note in the `validate` preflight
+  (`external_backend_errors()`).
+
 - **Unity modal-dialog guards (`[plugins.unity]`).** A chronically-dirty Unity scene raises modal
   Editor dialogs ("scene changed on disk", "save changes before closing") that freeze the MCP
   dispatch loop and stall the whole run. The bundled Unity plugin now defends in depth: it seeds an
