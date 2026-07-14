@@ -51,10 +51,16 @@ def ctl_window(run_id: str) -> str | None:
     return None
 
 
+def ctl_target(window: str | None = None) -> str:
+    """Seam-canonical target token for the control session (optionally one of
+    its windows, by name); see :meth:`TerminalMultiplexer.target`."""
+    return get_multiplexer().target(CTL_SESSION, window)
+
+
 def select_ctl_window(window: str) -> None:
     """Make `window` the control session's current window, so a plain attach
     to the session lands on it (attach-session itself takes no window)."""
-    get_multiplexer().select_window(f"={CTL_SESSION}:{window}")
+    get_multiplexer().select_window(ctl_target(window))
 
 
 def select_ctl_window_id(window_id: str) -> None:
@@ -162,9 +168,9 @@ def attach_plan(project: Path, run_id: str) -> tuple[list[str], str | None] | No
         decision_pending(runs.run_dir_for(project, run_id)) or not agent_live
     ):
         select_ctl_window(window)
-        return runs.attach_target_argv(f"={CTL_SESSION}"), f"={CTL_SESSION}:{window}"
+        return runs.attach_target_argv(ctl_target()), ctl_target(window)
     if agent_live:
-        return runs.attach_target_argv(f"={session}"), None
+        return runs.attach_target_argv(runs.session_target(run_id)), None
     return None
 
 
@@ -173,7 +179,7 @@ def kill_ctl_window(run_id: str) -> None:
     if any. A no-op when the run was not launched from the TUI or tmux is gone."""
     window = ctl_window(run_id)
     if window is not None:
-        get_multiplexer().kill_window(f"={CTL_SESSION}:{window}")
+        get_multiplexer().kill_window(ctl_target(window))
 
 
 def _ctl_window_candidates(project: Path) -> list[tuple[str, str]]:

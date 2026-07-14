@@ -360,12 +360,12 @@ class BmadLoopApp(App[None]):
         if window is not None and (self._dashboard.decision_pending is not None or not agent_live):
             launch.select_ctl_window(window)
             self._attach_to_target(
-                f"={launch.CTL_SESSION}",
-                return_window=f"={launch.CTL_SESSION}:{window}",
+                launch.ctl_target(),
+                return_window=launch.ctl_target(window),
             )
             return
         elif agent_live:
-            target = f"={session}"
+            target = runs.session_target(run_id)
         else:
             self.notify(
                 f"nothing to attach: no live agent session ({session}) and no "
@@ -459,7 +459,7 @@ class BmadLoopApp(App[None]):
             self.notify("resolve launched but its window id was not captured", severity="error")
             return
         launch.select_ctl_window_id(win_id)
-        self._attach_to_target(f"={launch.CTL_SESSION}", return_window=win_id)
+        self._attach_to_target(launch.ctl_target(), return_window=win_id)
 
     # -------------------------------------------------------- HITL pause review
 

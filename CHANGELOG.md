@@ -53,6 +53,15 @@ breaking changes may land in a minor release.
   forced selection. A tmux-less POSIX host still selects `TmuxMultiplexer` and reports it
   unavailable, exactly as before.
 
+- **Seam-canonical window targets.** The `=session[:window]` target grammar is now owned by the
+  `TerminalMultiplexer` seam instead of living as hand-assembled tmux syntax in core: a new
+  concrete `target(session, window=None)` encoder (overridable per backend, tmux inherits the
+  default and passes it straight through) and a module-level `parse_target()` decoder that
+  native-id backends reuse instead of re-deriving the grammar (the herdr backend's
+  `_parse_target` now delegates to it). `runs.py`/`tui/launch.py`/`tui/app.py` format every
+  target via `target()` (new `runs.session_target` / `launch.ctl_target` helpers) — output is
+  byte-identical, so no backend or operator behavior changes; the contract is documented in the
+  adapter authoring guide's new "Window targets" section.
 - **Herdr TUI-launch surface.** The herdr backend now covers everything `tui/launch.py` drives:
   parked orchestrator windows (a typed `exec sh -c '<argv>; banner; read; trailer'` recipe,
   tmux-identical from the operator's seat, with the return-to-origin target mirrored into a

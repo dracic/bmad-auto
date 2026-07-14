@@ -43,7 +43,10 @@ class TmuxError(MultiplexerError):
 
 class BaseTmuxBackend(TerminalMultiplexer):
     """tmux-family backend: all argv construction and every contract method, with
-    one overridable subprocess primitive (:meth:`_run`) every call funnels through."""
+    one overridable subprocess primitive (:meth:`_run`) every call funnels through.
+    The seam-canonical target grammar (``=session[:window]``, see
+    :meth:`TerminalMultiplexer.target`) coincides with tmux's exact-match target
+    syntax, so targets pass straight through to tmux — never parsed here."""
 
     #: Output decoding for captured tmux text. ``None`` (POSIX) = locale default,
     #: byte-identical to a bare ``text=True``; a Windows leaf sets ``"utf-8"``.

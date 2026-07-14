@@ -120,8 +120,14 @@ def attach_target_argv(target: str) -> list[str]:
     return get_multiplexer().attach_target_argv(target)
 
 
+def session_target(run_id: str) -> str:
+    """Seam-canonical target token for the run's agent session (see
+    :meth:`TerminalMultiplexer.target`)."""
+    return get_multiplexer().target(session_name(run_id))
+
+
 def attach_argv(run_id: str) -> list[str]:
-    return attach_target_argv(f"={session_name(run_id)}")
+    return attach_target_argv(session_target(run_id))
 
 
 # ---------------------------------------------------- run resolution / liveness

@@ -42,8 +42,9 @@ socket transport can replace it without touching :class:`HerdrMultiplexer`.
   ``herdr tab focus``). POSIX-only, like the ``exec`` launch (pwsh dialect is
   the Windows follow-up).
 - ``attach_target_argv`` accepts both target families (native pane id and the
-  tmux-style ``=session[:window]`` specs ``tui/launch.py`` builds — see
-  ``_parse_target``): outside herdr it returns ``["herdr", "terminal",
+  seam-canonical ``=session[:window]`` tokens core formats via
+  ``TerminalMultiplexer.target`` — see ``_parse_target``): outside herdr it
+  returns ``["herdr", "terminal",
   "attach", <terminal_id>]`` (which blocks, and exits when the pane closes);
   inside a herdr pane it returns the fire-and-forget ``["herdr", "tab",
   "focus", <tab_id>]`` — the switch-client move, mirroring tmux's in-``TMUX``
@@ -88,7 +89,7 @@ import warnings
 from pathlib import Path
 
 from .. import platform_util
-from .multiplexer import MultiplexerError, TerminalMultiplexer
+from .multiplexer import MultiplexerError, TerminalMultiplexer, parse_target
 
 HERDR_TIMEOUT_S = 30
 # The herdr server wire protocol this backend was written against (0.7.3). Read
@@ -665,19 +666,20 @@ class HerdrMultiplexer(TerminalMultiplexer):
     def _parse_target(self, target: str, *, strict: bool) -> str | None:
         """Resolve any window target to a native pane id.
 
-        Callers hand this two families: a tmux-style ``=session[:window]`` spec
-        (``tui/launch.py`` builds these) and our own native pane id. The ``=``
-        prefix is the discriminator — native ids contain ``:`` (``w1:p1``) but
-        never lead with ``=``. A native id passes through untouched, with no
-        server round-trip. For ``=…`` targets: session → workspace (first-match
-        label), a window name → the tab with that label, no window → the
-        session-level tab (see :func:`_session_level_tab`), then that tab's
-        pane. ``strict=True`` raises :class:`HerdrError` when the target cannot
-        be resolved; ``strict=False`` returns None (the sentinel callers' quiet
-        failure)."""
-        if not target.startswith("="):
+        Callers hand this two families: the seam-canonical ``=session[:window]``
+        token (decoded by :func:`multiplexer.parse_target`; core formats these
+        via ``TerminalMultiplexer.target``) and our own native pane id — native
+        ids contain ``:`` (``w1:p1``) but never lead with ``=``. A native id
+        passes through untouched, with no server round-trip. For ``=…`` targets:
+        session → workspace (first-match label), a window name → the tab with
+        that label, no window → the session-level tab (see
+        :func:`_session_level_tab`), then that tab's pane. ``strict=True``
+        raises :class:`HerdrError` when the target cannot be resolved;
+        ``strict=False`` returns None (the sentinel callers' quiet failure)."""
+        parsed = parse_target(target)
+        if parsed is None:
             return target
-        session, _, window = target[1:].partition(":")
+        session, window = parsed
         row = self._workspace_row(session, strict=strict)
         if row is None:
             if strict:
