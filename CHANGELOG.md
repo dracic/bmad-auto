@@ -145,6 +145,18 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
 
 ### Fixed
 
+- **Dev/review sessions can no longer livelock on their own wake nudges (#149).** The idle
+  wake nudge is delivered as a submitted turn, so a session that merely _answers_ it ends in
+  another result-less Stop — which refilled the nudge budget, re-armed the grace window, and
+  repeated until `session_timeout_min`, burning a turn per cycle. Dev/review sessions now get the
+  same monotonic cap injected workflow sessions already had: after `limits.dev_stall_nudges_cap`
+  (default 6) total nudges the session is declared stalled instead (post-kill reconcile still
+  rescues a finished one whose terminal artifact is on disk). The nudge text now also states that
+  a prose reply cannot end the session. And each result-less Stop leaves a diagnostic breadcrumb
+  (`tasks/<task_id>/resultless-stops.jsonl`: pending / not-terminal / stale-mtime / ambiguous /
+  no-artifact / no-result-json) so _why_ a completed-looking session read as result-less is
+  answerable from the run dir.
+
 - **Split-story keys (`2-6a-…`) are no longer silently skipped (#144).** The sprint-status
   parser rejected story numbers carrying BMAD's split-story letter suffix, dropping exactly the
   stories that were split to be loop-tractable — invisible to `run`/`--story`/the TUI tree, and

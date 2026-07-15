@@ -7,6 +7,7 @@ exactly what each CLI's hook registration produces), exercising spawn / env
 propagation / hook-signal waiting / kill end-to-end for any profile.
 """
 
+import json
 import shutil
 import subprocess
 import sys
@@ -575,6 +576,102 @@ def test_generic_dev_result_json_no_wait_reads_once(tmp_path, monkeypatch):
     assert calls["n"] == 1
 
 
+# ------------------------------- result-less-Stop diagnostics (#149)
+#
+# When a Stop's artifact read-back gives up empty, the adapter appends a
+# {ts, verdict, detail} line to tasks/<task_id>/resultless-stops.jsonl so the
+# WHY of a nudge/stall (issue #149's undiagnosable trigger) is readable
+# straight from the run dir.
+
+
+def _breadcrumbs(adapter, task_id="3-1-dev-1"):
+    path = adapter.tasks_dir / task_id / "resultless-stops.jsonl"
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_resultless_stop_breadcrumb_scan_no_artifact(tmp_path, monkeypatch):
+    adapter, impl = make_dev_adapter(tmp_path)
+    monkeypatch.setattr(generic, "RESULT_GRACE_S", 0.0)
+    assert adapter._result_json(_dev_handle(), _dev_spec(tmp_path), wait=True) is None
+    (crumb,) = _breadcrumbs(adapter)
+    assert crumb["verdict"] == "no-artifact"
+    assert str(impl) in crumb["detail"]  # names the searched dirs
+
+
+def test_resultless_stop_breadcrumb_stories_pending(tmp_path, monkeypatch):
+    adapter, _ = make_dev_adapter(tmp_path)
+    monkeypatch.setattr(generic, "RESULT_GRACE_S", 0.0)
+    assert adapter._result_json(_dev_handle(), _stories_spec(tmp_path), wait=True) is None
+    (crumb,) = _breadcrumbs(adapter)
+    assert crumb["verdict"] == "pending"
+
+
+def test_resultless_stop_breadcrumb_stories_ambiguous(tmp_path):
+    adapter, _ = make_dev_adapter(tmp_path)
+    _write_story_spec(tmp_path, "1", "foo", "---\nstatus: done\n---\n\ndone\n")
+    _write_story_spec(tmp_path, "1", "bar", "---\nstatus: done\n---\n\ndone\n")
+    assert adapter._result_json(_dev_handle(), _stories_spec(tmp_path), wait=True) is None
+    (crumb,) = _breadcrumbs(adapter)
+    assert crumb["verdict"] == "ambiguous"
+    assert "2 specs" in crumb["detail"]
+
+
+def test_resultless_stop_breadcrumb_stories_stale_mtime(tmp_path, monkeypatch):
+    adapter, _ = make_dev_adapter(tmp_path)
+    monkeypatch.setattr(generic, "RESULT_GRACE_S", 0.0)
+    spec = _write_story_spec(
+        tmp_path, "1", "foo", "---\nstatus: done\n---\n\n## Auto Run Result\n\nStatus: done\n"
+    )
+    handle = _dev_handle(launched_ns=spec.stat().st_mtime_ns + 1)
+    assert adapter._result_json(handle, _stories_spec(tmp_path), wait=True) is None
+    (crumb,) = _breadcrumbs(adapter)
+    assert crumb["verdict"] == "stale-mtime"
+    assert "predates session launch" in crumb["detail"]
+
+
+def test_resultless_stop_breadcrumb_stories_not_terminal(tmp_path, monkeypatch):
+    adapter, _ = make_dev_adapter(tmp_path)
+    monkeypatch.setattr(generic, "RESULT_GRACE_S", 0.0)
+    _write_story_spec(tmp_path, "1", "foo", "---\nstatus: ready-for-dev\n---\n\nplanned only\n")
+    assert adapter._result_json(_dev_handle(), _stories_spec(tmp_path), wait=True) is None
+    (crumb,) = _breadcrumbs(adapter)
+    assert crumb["verdict"] == "not-terminal"
+    assert "'ready-for-dev'" in crumb["detail"]
+
+
+def test_resultless_stop_breadcrumb_base_no_result_json(tmp_path):
+    adapter = GenericTmuxAdapter(
+        run_dir=tmp_path / "run",
+        policy=Policy(limits=LimitsPolicy()),
+        profile=get_profile("claude"),
+    )
+    assert adapter._await_result("3-1-dev-1", grace_s=0.0) is None
+    (crumb,) = _breadcrumbs(adapter)
+    assert crumb["verdict"] == "no-result-json"
+    assert "result.json" in crumb["detail"]
+
+
+def test_resultless_stop_breadcrumb_only_on_stop_readback(tmp_path):
+    """wait=False reads (the _final stall/crash re-checks) must not write
+    breadcrumbs — only the Stop-event read-back diagnoses a result-less Stop."""
+    adapter, _ = make_dev_adapter(tmp_path)
+    assert adapter._result_json(_dev_handle(), _dev_spec(tmp_path), wait=False) is None
+    assert adapter._result_json(_dev_handle(), _stories_spec(tmp_path), wait=False) is None
+    assert _breadcrumbs(adapter) == []
+
+
+def test_resultless_stop_breadcrumb_write_failure_is_swallowed(tmp_path):
+    """The breadcrumb is best-effort observability: an unwritable tasks dir
+    must never break the completion loop."""
+    adapter, _ = make_dev_adapter(tmp_path)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where the tasks dir should be")
+    adapter.tasks_dir = blocker / "tasks"  # any write under it raises OSError
+    adapter._note_resultless_stop("3-1-dev-1", "pending", "detail")  # must not raise
+
+
 def test_generic_dev_disables_nudges(tmp_path):
     adapter, _ = make_dev_adapter(tmp_path)
     assert adapter._stop_nudges == 0
@@ -1056,10 +1153,10 @@ def test_workflow_cap_bounds_refilled_stall_nudges(tmp_path, monkeypatch):
 
 
 def test_uncapped_spec_keeps_refilling_nudges_past_cap(tmp_path, monkeypatch):
-    """cap=None (dev/review sessions) preserves the pre-cap behavior byte-
-    identical: every fresh Stop restores the budget and nudging continues well
-    past any workflow cap — a legitimately slow background wait (e.g. a Unity
-    PlayMode run) may need every one of them, bounded only by spec.timeout_s."""
+    """cap=None (the raw SessionSpec default — the engine now caps every
+    session it drives, dev/review included) preserves the uncapped adapter
+    contract byte-identical: every fresh Stop restores the budget and nudging
+    continues past any cap, bounded only by spec.timeout_s."""
     adapter, _, clock, sent = _stall_loop_adapter(tmp_path, monkeypatch)
 
     def advance(call_n):

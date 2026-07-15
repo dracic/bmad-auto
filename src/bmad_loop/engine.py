@@ -2317,7 +2317,9 @@ class Engine:
             model=cfg.model,
             timeout_s=self.policy.limits.session_timeout_min * 60,
             stall_nudges_cap=(
-                self.policy.limits.workflow_stall_nudges_cap if label is not None else None
+                self.policy.limits.workflow_stall_nudges_cap
+                if label is not None
+                else self.policy.limits.dev_stall_nudges_cap
             ),
         )
         self.journal.set_active_log(task_id)

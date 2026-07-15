@@ -242,6 +242,10 @@ The canonical example lives at `src/bmad_loop/data/plugins/unity/`:
 > (wake-nudges spent on grace expiry before it is called stalled). The grace window
 > measures genuine inactivity — pane output re-arms it — so raise these (not the
 > readiness knobs) if networked/PlayMode-heavy stories are being mis-stalled.
+> `limits.dev_stall_nudges_cap` (default 6) additionally bounds the _total_ nudges
+> a session may ever receive — a very long wait needing more wake cycles than that
+> should raise the cap too (a stalled-but-finished session is still rescued
+> post-kill when its terminal artifact is on disk).
 
 Each script's module docstring documents every env knob it reads — the
 authoritative source if a default ever changes. The [Game Engine MCP guide](game-engine-mcp-guide.md)
