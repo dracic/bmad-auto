@@ -1187,12 +1187,14 @@ async def test_cleanup_unknown_sessions_notifies(project, monkeypatch):
 async def test_cleanup_sessions_mux_error_notifies(project, monkeypatch):
     # prune_ctl_windows probes has_session on the shared ctl session (raiser-side),
     # so it can raise on a server-backed backend. The worker must marshal the error
-    # to a toast via call_from_thread and return, not crash on an unhandled worker
-    # exception. (prune_sessions is stubbed benign — only sentinel-side seam calls.)
+    # to a toast via call_from_thread without crashing on an unhandled worker
+    # exception — AND, because prune_sessions already killed the agent sessions
+    # before prune_ctl_windows ran, it must still report that completed work (the
+    # "removed N session(s)" summary and the unknown-pid warning), not swallow it.
     from bmad_loop import runs
 
     monkeypatch.setattr(launch, "mux_available", lambda: True)
-    monkeypatch.setattr(runs, "prune_sessions", lambda _p: ([], [], set()))
+    monkeypatch.setattr(runs, "prune_sessions", lambda _p: (["odd-1"], [], {"odd-1"}))
 
     def boom(_p):
         raise MultiplexerError("ctl window probe unreachable")
@@ -1208,6 +1210,10 @@ async def test_cleanup_sessions_mux_error_notifies(project, monkeypatch):
         await until(
             pilot, lambda: any("ctl window probe unreachable" in m for m in notifications(app))
         )
+        # the ctl-window failure is surfaced, but the session pruning that already
+        # completed is still reported — not swallowed by an early return
+        await until(pilot, lambda: any("unverifiable engine pid" in m for m in notifications(app)))
+        assert any("removed 1 session(s)" in m for m in notifications(app))
         assert isinstance(app.screen, DashboardScreen)  # worker failed soft, no crash
 
 

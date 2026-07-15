@@ -932,8 +932,11 @@ class BmadLoopApp(App[None]):
         try:
             windows = launch.prune_ctl_windows(self.project)
         except MultiplexerError as e:
+            # prune_sessions already killed the agent sessions above; surface the
+            # ctl-window failure but keep reporting that completed work (and the
+            # unknown-pid warning) rather than swallowing it on an early return.
             self.call_from_thread(self.notify, str(e), severity="error")
-            return
+            windows = []
         if unknown:
             self.call_from_thread(
                 self.notify,
