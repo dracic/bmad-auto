@@ -647,6 +647,17 @@ def checkout_branch(repo: Path, name: str) -> None:
         raise GitError(f"git checkout {name} failed in {repo}: {out}")
 
 
+def checkout_detach(repo: Path) -> None:
+    """Detach HEAD at its current commit, leaving working tree + index untouched.
+
+    Frees a shared branch name held by a kept worktree so a sibling worktree can
+    check that branch out (git refuses a branch checked out in another worktree).
+    """
+    rc, out = _git(repo, "checkout", "--detach")
+    if rc != 0:
+        raise GitError(f"git checkout --detach failed in {repo}: {out}")
+
+
 def worktree_remove(repo: Path, path: Path, force: bool = False) -> None:
     args = ["worktree", "remove"]
     if force:

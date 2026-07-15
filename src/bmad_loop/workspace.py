@@ -119,6 +119,7 @@ def close_unit_workspace(
     run_dir: Path,
     unit_key: str,
     delete_branch: bool = True,
+    detach_kept: bool = False,
     diff_max_file_bytes: int | None = None,
 ) -> Path | None:
     """Tear down (or preserve) a unit's worktree.
@@ -129,6 +130,11 @@ def close_unit_workspace(
     happens. On success (or failure without keep_failed) the worktree is removed
     and, if delete_branch, the branch deleted. Returns the patch path it wrote,
     or None.
+
+    detach_kept (branch_per=run only): when keep_failed preserves the worktree,
+    detach its HEAD so the shared run branch it holds is freed for the next unit
+    to mount — otherwise every later unit's `git worktree add` collides on the
+    already-checked-out branch. Best effort; see the keep_failed branch below.
 
     diff_max_file_bytes caps the per-untracked-file size in that forensic patch
     (None = no cap); see verify.capture_diff.
@@ -148,7 +154,19 @@ def close_unit_workspace(
             patch.parent.mkdir(parents=True, exist_ok=True)
             patch.write_text(diff, encoding="utf-8")
         if keep_failed:
-            return patch  # leave the worktree + branch mounted
+            if detach_kept:
+                # branch_per=run shares one branch across the run; a kept worktree
+                # left checked out on it blocks every later unit's `git worktree
+                # add` (git refuses a branch checked out elsewhere). Detach HEAD to
+                # free the shared branch name while preserving the working tree,
+                # uncommitted changes, and the branch ref (still at the kept commit)
+                # for inspection. Best effort: on failure the later unit still
+                # surfaces the collision via the worktree-open-failed defer path.
+                try:
+                    verify.checkout_detach(unit.path)
+                except verify.GitError:
+                    pass
+            return patch  # leave the worktree mounted (branch detached if shared)
 
     # success, or a failure we are not keeping: remove the worktree. A failed
     # tree is dirty, so force; a successful unit was committed + merged, so its

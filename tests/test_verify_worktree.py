@@ -82,6 +82,31 @@ def test_worktree_remove_dirty_needs_force(project, tmp_path):
     assert not wt.exists()
 
 
+def test_checkout_detach_frees_branch(project, tmp_path):
+    """A worktree checked out on a branch holds that branch — git refuses to mount
+    it elsewhere. Detaching the worktree's HEAD frees the branch name for a sibling
+    worktree while preserving the branch ref, the working tree, and uncommitted
+    changes (issue #138)."""
+    repo = project.project
+    wt = tmp_path / "wt"
+    verify.worktree_add(repo, wt, "feat", "main")
+    (wt / "dirty.txt").write_text("uncommitted\n")  # local edit that must survive
+
+    # while 'feat' is checked out in wt, a sibling mount of it is refused
+    wt2 = tmp_path / "wt2"
+    with pytest.raises(verify.GitError):
+        verify.worktree_add(repo, wt2, "feat", create=False)
+
+    verify.checkout_detach(wt)
+
+    assert verify.current_branch(wt) == "HEAD"  # detached
+    assert verify.branch_exists(repo, "feat")  # branch ref preserved
+    assert (wt / "dirty.txt").read_text() == "uncommitted\n"  # working tree preserved
+    # branch name is now free → the sibling mount succeeds
+    verify.worktree_add(repo, wt2, "feat", create=False)
+    assert wt2.is_dir()
+
+
 # ---------------------------------------------------------------- merge
 
 

@@ -561,6 +561,7 @@ class Engine:
                 run_dir=self.run_dir,
                 unit_key=task.story_key,
                 delete_branch=scm.delete_branch,
+                detach_kept=scm.branch_per == "run",
                 diff_max_file_bytes=self._failed_diff_max_bytes(),
             )
             self.journal.append(
