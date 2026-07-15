@@ -107,6 +107,50 @@ def test_dry_run_selects_story_by_short_ref(project, capsys, epic, story):
     assert "3-2-foo" not in out and "4-1-bar" not in out
 
 
+@pytest.mark.parametrize(
+    "story,expected",
+    [
+        ("2-6a", ["2-6a-build-structure"]),
+        ("2.6a", ["2-6a-build-structure"]),
+        ("2-6a-build-structure", ["2-6a-build-structure"]),
+        ("2-6", ["2-6a-build-structure", "2-6b-extend-structure"]),  # whole family
+    ],
+)
+def test_dry_run_selects_split_story(project, capsys, story, expected):
+    # split-story keys (issue #144): visible, selectable, and suffix-exact
+    write_sprint(
+        project,
+        {
+            "2-6a-build-structure": "backlog",
+            "2-6b-extend-structure": "backlog",
+            "2-7-later": "backlog",
+        },
+    )
+    _write_policy(project.project)
+    pol = policy_mod.load(project.project / ".bmad-loop" / "policy.toml")
+    args = argparse.Namespace(epic=None, story=story, max_stories=None)
+
+    assert cli._dry_run(project, pol, args) == 0
+    out = capsys.readouterr().out
+    assert [k for k in ("2-6a-build-structure", "2-6b-extend-structure") if k in out] == expected
+    assert "2-7-later" not in out
+
+
+def test_dry_run_warns_unknown_keys(project, capsys):
+    write_sprint(
+        project,
+        {"1-1-a": "ready-for-dev", "totally-weird": "huh", "2-6.1-nested-split": "backlog"},
+    )
+    _write_policy(project.project)
+    pol = policy_mod.load(project.project / ".bmad-loop" / "policy.toml")
+    args = argparse.Namespace(epic=None, story=None, max_stories=None)
+
+    assert cli._dry_run(project, pol, args) == 0
+    err = capsys.readouterr().err
+    assert "warning: ignoring unparseable sprint-status keys: " in err
+    assert "totally-weird" in err and "2-6.1-nested-split" in err
+
+
 def test_dry_run_reports_targeted_not_actionable(project, capsys):
     write_sprint(project, {"3-1-user-auth": "ready-for-dev", "3-2-foo": "done"})
     _write_policy(project.project)

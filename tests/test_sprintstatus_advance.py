@@ -37,6 +37,24 @@ def test_advance_to_in_progress_lifts_backlog_epic(tmp_path):
     assert sprintstatus.load(p).epics[3] == "in-progress"  # epic lifted
 
 
+def test_advance_split_story_lifts_backlog_epic(tmp_path):
+    # a split-story key (issue #144) must advance and lift its epic like any other
+    text = (
+        "last_updated: 01-06-2026 10:00\n"
+        "development_status:\n"
+        "  epic-2: backlog\n"
+        "  2-6a-build-structure: backlog\n"
+        "  2-6b-extend-structure: backlog\n"
+    )
+    p = tmp_path / "sprint-status.yaml"
+    p.write_text(text, encoding="utf-8")
+    out = sprintstatus.advance(p, "2-6a-build-structure", "in-progress")
+    assert out == "in-progress"
+    assert sprintstatus.story_status(p, "2-6a-build-structure") == "in-progress"
+    assert sprintstatus.load(p).epics[2] == "in-progress"  # epic lifted
+    assert sprintstatus.story_status(p, "2-6b-extend-structure") == "backlog"  # sibling untouched
+
+
 def test_advance_preserves_comments_and_structure(tmp_path):
     p = _write(tmp_path)
     sprintstatus.advance(p, "3-2-digest-delivery", "in-progress")

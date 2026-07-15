@@ -32,6 +32,36 @@ def test_load_classifies_keys(project):
     assert ss.unknown_keys == ("weird-key",)
 
 
+def test_load_split_story_keys(project):
+    # BMAD splits an oversized story into 2-6a / 2-6b (issue #144); both halves
+    # must parse as stories — not fall into unknown_keys — and keep file order.
+    write_sprint(
+        project,
+        {
+            "2-5-intact": "done",
+            "2-6a-build-structure": "backlog",
+            "2-6b-extend-structure": "backlog",
+            "2-7-later": "backlog",
+            "2-6ab-not-a-split": "backlog",  # multi-letter: not the convention
+            "2-6A-not-lower": "backlog",  # uppercase: not the convention
+        },
+    )
+    ss = sprintstatus.load(project.sprint_status)
+    assert [s.key for s in ss.stories] == [
+        "2-5-intact",
+        "2-6a-build-structure",
+        "2-6b-extend-structure",
+        "2-7-later",
+    ]
+    a, b = ss.stories[1], ss.stories[2]
+    assert (a.epic, a.num, a.suffix, a.slug) == (2, 6, "a", "build-structure")
+    assert (b.epic, b.num, b.suffix, b.slug) == (2, 6, "b", "extend-structure")
+    assert ss.stories[0].suffix == ""  # whole stories carry no suffix
+    assert ss.unknown_keys == ("2-6ab-not-a-split", "2-6A-not-lower")
+    # the split halves are picked in file order, before later stories
+    assert sprintstatus.next_actionable(ss).key == "2-6a-build-structure"
+
+
 def test_load_classifies_retro_items(project):
     write_sprint(
         project,
@@ -121,6 +151,21 @@ def test_parse_selector_forms():
     assert sel.epic == 3 and not sel.is_targeted
 
 
+def test_parse_selector_split_suffix():
+    # every numeric form carries the split suffix through to the selector
+    sel = sprintstatus.parse_selector(None, "2-6a-build-structure")
+    assert (sel.epic, sel.num, sel.suffix, sel.key) == (2, 6, "a", "2-6a-build-structure")
+    for ref in ("2-6a", "2.6a"):
+        sel = sprintstatus.parse_selector(None, ref)
+        assert (sel.epic, sel.num, sel.suffix, sel.key, sel.slug) == (2, 6, "a", None, None)
+    sel = sprintstatus.parse_selector(2, "6a")
+    assert (sel.epic, sel.num, sel.suffix) == (2, 6, "a")
+    # suffix-less forms leave suffix None — the whole-family wildcard
+    for epic, ref in [(None, "2-6"), (None, "2.6"), (2, "6"), (None, "2-6-whole-slug")]:
+        sel = sprintstatus.parse_selector(epic, ref)
+        assert sel.suffix is None, ref
+
+
 def test_parse_selector_bare_number_needs_epic():
     with pytest.raises(sprintstatus.SprintStatusError, match="ambiguous story '1'"):
         sprintstatus.parse_selector(None, "1")
@@ -147,6 +192,49 @@ def test_select_actionable_short_ref_and_epic_story(project):
         "3-1-user-auth",
         "3-2-foo",
     ]
+
+
+def test_select_actionable_split_suffix(project):
+    write_sprint(
+        project,
+        {
+            "2-6a-build-structure": "backlog",
+            "2-6b-extend-structure": "backlog",
+            "2-7-later": "backlog",
+        },
+    )
+    ss = sprintstatus.load(project.sprint_status)
+    # a suffixed ref selects exactly its half — never the sibling
+    for epic, story in [(None, "2-6a"), (None, "2.6a"), (2, "6a")]:
+        got = sprintstatus.select_actionable(ss, epic, story)
+        assert [s.key for s in got] == ["2-6a-build-structure"]
+    assert [s.key for s in sprintstatus.select_actionable(ss, None, "2.6b")] == [
+        "2-6b-extend-structure"
+    ]
+    # the plain short ref selects the whole split family, in file order
+    assert [s.key for s in sprintstatus.select_actionable(ss, None, "2-6")] == [
+        "2-6a-build-structure",
+        "2-6b-extend-structure",
+    ]
+    # a suffix that doesn't exist matches nothing
+    with pytest.raises(sprintstatus.SprintStatusError, match="no story matches '2-6c'"):
+        sprintstatus.select_actionable(ss, None, "2-6c")
+
+
+def test_select_actionable_split_suffix_not_actionable(project):
+    write_sprint(
+        project,
+        {"2-6a-build-structure": "done", "2-6b-extend-structure": "backlog"},
+    )
+    ss = sprintstatus.load(project.sprint_status)
+    with pytest.raises(
+        sprintstatus.SprintStatusError,
+        match=r"story 2-6a matched 2-6a-build-structure but its status is 'done'",
+    ):
+        sprintstatus.select_actionable(ss, None, "2-6a")
+    # the family ref still finds the remaining actionable half
+    got = sprintstatus.select_actionable(ss, None, "2-6")
+    assert [s.key for s in got] == ["2-6b-extend-structure"]
 
 
 def test_select_actionable_targeted_not_actionable(project):

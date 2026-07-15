@@ -286,7 +286,7 @@ SPRINT_STYLES = {
 def sprint_story_label(story: Story) -> Text:
     glyph = SPRINT_GLYPHS.get(story.status, "?")
     style = SPRINT_STYLES.get(story.status, "dim")
-    return Text(f"{glyph} {story.num}-{story.slug}", style=style)
+    return Text(f"{glyph} {story.num}{story.suffix}-{story.slug}", style=style)
 
 
 def sprint_retro_label(status: str) -> Text:
