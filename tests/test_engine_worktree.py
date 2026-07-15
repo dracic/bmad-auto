@@ -342,17 +342,31 @@ def test_worktree_defer_then_next_story_succeeds(project):
     assert "change for 1-1-a" not in (project.project / "src.txt").read_text()
 
 
-def test_branch_per_run_kept_failure_defers_next_unit_gracefully(project):
-    """branch_per=run shares one branch; a kept-failed unit holds it, so the
-    next unit can't mount it. That degrades to a deferral, never a crash."""
+def test_branch_per_run_kept_failure_detaches_so_next_unit_runs(project):
+    """branch_per=run shares one branch; keeping a kept-failed unit's worktree
+    checked out on it would block every later unit's mount and cascade the whole
+    run into never-attempted deferrals. close_unit_workspace detaches the kept
+    worktree's HEAD, freeing the shared branch so the next unit gets a genuine
+    attempt instead of insta-deferring on a collision (issue #138)."""
     commit_sprint(project, {"1-1-a": "ready-for-dev", "1-2-b": "ready-for-dev"})
-    script = _defer_script(project, "1-1-a") + [wt_dev_effect(project, "1-2-b")]
+    script = _defer_script(project, "1-1-a") + [
+        wt_dev_effect(project, "1-2-b"),
+        wt_review_effect(project, "1-2-b", clean=True),
+    ]
     engine, _ = make_engine(project, script, policy=wt_policy(branch_per="run", limits=_NO_DAMP))
     summary = engine.run()
 
-    assert summary.deferred == 2 and summary.done == 0 and not summary.paused
-    assert "could not open worktree" in engine.state.tasks["1-2-b"].defer_reason
-    assert "worktree-open-failed" in journal_kinds(engine)
+    # 1-1-a defers (kept), but 1-2-b actually runs and lands — no collision cascade
+    assert summary.deferred == 1 and summary.done == 1 and not summary.paused
+    assert "worktree-open-failed" not in journal_kinds(engine)
+    assert engine.state.tasks["1-2-b"].phase == Phase.DONE
+    assert not engine.state.tasks["1-2-b"].defer_reason
+    assert "change for 1-2-b" in (project.project / "src.txt").read_text()
+    # the kept 1-1-a worktree is detached (freeing the shared run branch), while
+    # the branch ref itself survives for inspection
+    assert branch_exists(project.project, "bmad-loop/test-run")
+    kept = [p for p in worktree_list(project.project) if p.resolve() != project.project.resolve()]
+    assert len(kept) == 1 and current_branch(kept[0]) == "HEAD"
 
 
 def test_worktree_followup_damped_commits_and_integrates(project):
@@ -440,6 +454,48 @@ def test_worktree_merge_conflict_escalates_and_keeps_branch(project):
     assert task.phase == Phase.ESCALATED
     # the unit branch is kept for manual merge
     assert branch_exists(project.project, "bmad-loop/test-run/1-1-a")
+
+
+def test_branch_per_run_escalation_pauses_without_dispatching_next_unit(project):
+    """Issue #138 scoping guard: the shared-branch collision cascade is a property
+    of the DEFER path, which *returns* and lets the loop dispatch the next unit
+    into the held branch. A merge-conflict escalation instead *pauses* the run
+    (RunPaused), so under branch_per=run no sibling is ever dispatched while the
+    kept worktree holds the shared branch — there is nothing to detach here, and
+    on resume the re-armed unit's worktree is freed by the resume-restart discard
+    (see test_worktree_crash_restart_discards_stale_worktree) before any mount."""
+    commit_sprint(project, {"1-1-a": "ready-for-dev", "1-2-b": "ready-for-dev"})
+    engine, _ = make_engine(
+        project,
+        [wt_dev_effect(project, "1-1-a"), wt_review_effect(project, "1-1-a", clean=True)],
+        policy=wt_policy(branch_per="run", merge_strategy="ff"),
+    )
+    # diverge the target right after the (shared) worktree is cut so ff-only merge
+    # of 1-1-a cannot fast-forward → escalate + pause
+    import bmad_loop.engine as eng
+
+    real_open = eng.open_unit_workspace
+
+    def diverging_open(*a, **k):
+        unit = real_open(*a, **k)
+        if not (project.project / "diverge.txt").exists():
+            (project.project / "diverge.txt").write_text("target moved\n")
+            git(project.project, "add", "-A")
+            git(project.project, "commit", "-q", "-m", "target diverges")
+        return unit
+
+    eng.open_unit_workspace = diverging_open
+    try:
+        summary = engine.run()
+    finally:
+        eng.open_unit_workspace = real_open
+
+    assert summary.paused and summary.escalated == 1
+    assert engine.state.tasks["1-1-a"].phase == Phase.ESCALATED
+    # the run halted at the escalation: 1-2-b was never dispatched, so the
+    # shared-branch collision that cascades the DEFER path cannot arise here
+    assert "1-2-b" not in engine.state.tasks
+    assert "worktree-open-failed" not in journal_kinds(engine)
 
 
 # ----------------------------------------------------------------- resume

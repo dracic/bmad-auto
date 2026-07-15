@@ -145,6 +145,18 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
 
 ### Fixed
 
+- **`branch_per=run` + `keep_failed` no longer poisons a multi-story run after the first kept
+  failure (#138).** The first story to end deferred under `keep_failed=true` left its worktree
+  checked out on the single shared run branch, so every subsequent story's `git worktree add`
+  collided ("branch already checked out") and insta-deferred with zero dev activity — one kept
+  failure turned an N-story run into a 1-story run. A kept worktree under `branch_per=run` now
+  detaches its HEAD (`git checkout --detach`), freeing the shared branch name for the next story
+  while preserving the working tree, uncommitted changes, and the branch ref (still at the kept
+  commit) for inspection; subsequent stories mount the run branch normally and get genuine
+  attempts. Best effort — if the detach ever fails, the existing `worktree-open-failed` defer
+  still surfaces the collision (no regression). The escalate-and-pause path was already safe: it
+  halts the run rather than continuing, and resume frees the kept worktree before any sibling mounts.
+
 - **Dev/review sessions can no longer livelock on their own wake nudges (#149).** The idle
   wake nudge is delivered as a submitted turn, so a session that merely _answers_ it ends in
   another result-less Stop — which refilled the nudge budget, re-armed the grace window, and
