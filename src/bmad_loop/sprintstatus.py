@@ -18,9 +18,11 @@ import yaml
 EPIC_RE = re.compile(r"^epic-(\d+)$")
 RETRO_RE = re.compile(r"^epic-(\d+)-retrospective$")
 RETRO_ITEM_RE = re.compile(r"^epic-(\d+)-retro-item-(\d+)-(.+)$")
-STORY_RE = re.compile(r"^(\d+)-(\d+)-(.+)$")
-SHORT_REF_RE = re.compile(r"^(\d+)[-.](\d+)$")  # short story ref: 3-1 or 3.1
-BARE_NUM_RE = re.compile(r"^(\d+)$")  # a lone story number, needs --epic
+# The story number may carry a single lowercase split suffix (2-6a / 2-6b —
+# the shape BMAD produces when an oversized story is split, see issue #144).
+STORY_RE = re.compile(r"^(\d+)-(\d+)([a-z]?)-(.+)$")
+SHORT_REF_RE = re.compile(r"^(\d+)[-.](\d+)([a-z]?)$")  # short story ref: 3-1, 3.1, 3-1a
+BARE_NUM_RE = re.compile(r"^(\d+)([a-z]?)$")  # a lone story number, needs --epic
 
 STORY_STATUSES = {"backlog", "ready-for-dev", "in-progress", "review", "done"}
 # Lifecycle order, earliest -> latest. `advance` never moves a story backward
@@ -41,6 +43,7 @@ class Story:
     num: int
     slug: str
     status: str
+    suffix: str = ""  # split-story letter ("a" in 2-6a), "" for a whole story
 
 
 @dataclass(frozen=True)
@@ -111,8 +114,9 @@ def load(path: Path) -> SprintStatus:
                     key=key,
                     epic=int(m.group(1)),
                     num=int(m.group(2)),
-                    slug=m.group(3),
+                    slug=m.group(4),
                     status=status,
+                    suffix=m.group(3),
                 )
             )
         else:
@@ -237,7 +241,9 @@ class StorySelector:
 
     * full key ``3-1-user-auth`` — exact match
     * short ref ``3-1`` / ``3.1`` — epic 3, story 1 (any slug)
-    * bare number ``1`` with ``--epic 3`` — epic 3, story 1
+    * suffixed short ref ``2-6a`` / ``2.6a`` — exactly the ``a`` half of a
+      split story; the plain ``2-6`` matches the whole ``2-6a``/``2-6b`` family
+    * bare number ``1`` (or ``6a``) with ``--epic 3`` — epic 3, story 1 (or 6a)
     * slug fragment ``user-auth`` / ``auth`` — substring of the slug (must be unique)
     * epic only (``--epic 3``, blank story) — every story in the epic
     """
@@ -246,6 +252,7 @@ class StorySelector:
     num: int | None = None
     key: str | None = None  # exact full key
     slug: str | None = None  # slug substring
+    suffix: str | None = None  # split-story letter; None matches any suffix
 
     @property
     def is_targeted(self) -> bool:
@@ -259,6 +266,8 @@ class StorySelector:
         if self.epic is not None and story.epic != self.epic:
             return False
         if self.num is not None and story.num != self.num:
+            return False
+        if self.suffix is not None and story.suffix != self.suffix:
             return False
         if self.slug is not None and self.slug not in story.slug:
             return False
@@ -280,20 +289,21 @@ def parse_selector(epic: int | None, story: str | None) -> StorySelector:
                 f"--epic {epic} conflicts with story '{text}' (epic {parsed_epic})"
             )
 
+    # empty suffix group -> None: a plain `2-6` matches the whole split family
     if m := STORY_RE.match(text):  # full key 3-1-slug
         e, n = int(m.group(1)), int(m.group(2))
         _check_epic(e)
-        return StorySelector(epic=e, num=n, key=text)
-    if m := SHORT_REF_RE.match(text):  # 3-1 / 3.1
+        return StorySelector(epic=e, num=n, key=text, suffix=m.group(3) or None)
+    if m := SHORT_REF_RE.match(text):  # 3-1 / 3.1 / 3-1a
         e, n = int(m.group(1)), int(m.group(2))
         _check_epic(e)
-        return StorySelector(epic=e, num=n)
+        return StorySelector(epic=e, num=n, suffix=m.group(3) or None)
     if m := BARE_NUM_RE.match(text):  # bare story number, needs --epic
         if epic is None:
             raise SprintStatusError(
                 f"ambiguous story '{text}': use --epic E --story {text}, or E-{text}"
             )
-        return StorySelector(epic=epic, num=int(m.group(1)))
+        return StorySelector(epic=epic, num=int(m.group(1)), suffix=m.group(2) or None)
     return StorySelector(epic=epic, slug=text)  # slug fragment
 
 

@@ -538,6 +538,18 @@ def _validate_stories_queue(
     problems.extend(stories_probs)
 
 
+def _warn_unknown_keys(ss: sprintstatus.SprintStatus) -> None:
+    """Surface sprint-status keys the parser could not classify. Silently
+    dropping one reads to the operator as "that story is done, or not mine to
+    do" (issue #144) — so `run`/`--dry-run` say it out loud; the journal's
+    ``sprint-status-unknown-keys`` event stays the durable record."""
+    if ss.unknown_keys:
+        print(
+            f"warning: ignoring unparseable sprint-status keys: {', '.join(ss.unknown_keys)}",
+            file=sys.stderr,
+        )
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     if (rc := _reject_bad_run_id(args.run_id)) is not None:
         return rc
@@ -566,9 +578,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             return 1
     else:
         try:
-            sprintstatus.select_actionable(
-                sprintstatus.load(paths.sprint_status), args.epic, args.story
-            )
+            ss = sprintstatus.load(paths.sprint_status)
+            _warn_unknown_keys(ss)
+            sprintstatus.select_actionable(ss, args.epic, args.story)
         except sprintstatus.SprintStatusError as e:
             print(e, file=sys.stderr)
             return 1
@@ -660,6 +672,7 @@ def _dry_run(
         return _render_invocation(pol, paths.project, role, prompt)
 
     ss = sprintstatus.load(paths.sprint_status)
+    _warn_unknown_keys(ss)
     try:
         queue = sprintstatus.select_actionable(ss, args.epic, args.story)
     except sprintstatus.SprintStatusError as e:
@@ -1837,8 +1850,8 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--epic", type=int, help="only stories from this epic (sprint mode)")
     run_p.add_argument(
         "--story",
-        help="story: E-S / E.S, a slug fragment, or full key (sprint mode); "
-        "a story id (stories mode)",
+        help="story: E-S / E.S (split suffix ok, e.g. 2-6a), a slug fragment, "
+        "or full key (sprint mode); a story id (stories mode)",
     )
     run_p.add_argument("--max-stories", type=int, help="stop after N stories")
     run_p.add_argument("--dry-run", action="store_true", help="print the plan, spawn nothing")

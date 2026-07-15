@@ -145,6 +145,14 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
 
 ### Fixed
 
+- **Split-story keys (`2-6a-…`) are no longer silently skipped (#144).** The sprint-status
+  parser rejected story numbers carrying BMAD's split-story letter suffix, dropping exactly the
+  stories that were split to be loop-tractable — invisible to `run`/`--story`/the TUI tree, and
+  skipped by the epic-lift. The suffix is now a first-class `Story`/selector field: `--story 2-6a`
+  (or `2.6a`, or `--epic 2 --story 6a`) selects exactly that half, while a plain `2-6` selects the
+  whole `2-6a`/`2-6b` family in file order. `run` and `--dry-run` also print a stderr warning when
+  sprint-status keys remain unparseable, instead of only journaling them.
+
 - **Review leg repairs a finalize-tail death.** A review session that died between writing its
   terminal `## Auto Run Result` (`Status: done`) and flipping the spec frontmatter off the transient
   `in-review` marker left the orchestrator re-reviewing already-finished work — a burned review

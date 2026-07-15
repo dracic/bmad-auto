@@ -67,6 +67,7 @@ from bmad_loop.tui.widgets import (
     journal_line,
     pause_label,
     pause_tag,
+    sprint_story_label,
     story_checkpoint_cell,
     story_state_cell,
 )
@@ -1481,6 +1482,16 @@ def test_pause_tag_and_label_render():
     assert pause_tag("").plain == ""  # not paused → no tag
     label, style = pause_label("escalation")
     assert label == "escalation" and "red" in style
+
+
+def test_sprint_story_label_split_suffix():
+    # split halves (issue #144) must render distinctly: 6a-… / 6b-…, not both 6-…
+    from bmad_loop.sprintstatus import Story
+
+    whole = Story(key="2-5-intact", epic=2, num=5, slug="intact", status="done")
+    half = Story(key="2-6a-build", epic=2, num=6, slug="build", status="backlog", suffix="a")
+    assert sprint_story_label(whole).plain == "✓ 5-intact"
+    assert sprint_story_label(half).plain == "· 6a-build"
 
 
 def test_story_cells_render():
