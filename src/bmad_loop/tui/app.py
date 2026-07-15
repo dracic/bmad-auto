@@ -13,6 +13,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 from rich.text import Text
 from textual import work
@@ -60,6 +61,9 @@ def _engine_possibly_live(run_dir: Path) -> bool:
     # whose pid exists but is unreadable). A legacy pid-less run's 'unknown' just
     # means no session was found — it must not flag every old finished run.
     return live == "unknown" and runs.read_pid(run_dir) is not None
+
+
+_T = TypeVar("_T")
 
 
 class BmadLoopApp(App[None]):
@@ -153,6 +157,21 @@ class BmadLoopApp(App[None]):
             return False
         self.notify("multiplexer backend unavailable — launch/attach disabled", severity="error")
         return True
+
+    def _mux_guarded(self, probe: Callable[[], _T]) -> tuple[bool, _T | None]:
+        """Run a raiser-side multiplexer *read* probe from a foreground action
+        handler, converting a transport failure into an error toast. Returns
+        (ok, value); when ok is False a MultiplexerError was caught and toasted
+        and the handler must abort — a backend hiccup after the availability
+        pre-gate fails the action soft instead of crashing the TUI. Foreground
+        only: worker threads marshal notify() via call_from_thread (see
+        _cleanup_sessions_worker), and launch-layer failures convert to
+        LaunchError (see launch._ensure_ctl_session)."""
+        try:
+            return True, probe()
+        except MultiplexerError as e:
+            self.notify(str(e), severity="error")
+            return False, None
 
     def _guarded(self, go: Callable[[], None]) -> None:
         """Pre-launch guard mirroring the CLI: clean worktree required, plus a
@@ -353,7 +372,9 @@ class BmadLoopApp(App[None]):
             return
         session = runs.session_name(run_id)
         window = launch.ctl_window(run_id)
-        agent_live = launch.session_exists(session)
+        ok, agent_live = self._mux_guarded(lambda: launch.session_exists(session))
+        if not ok:
+            return
         # A sweep blocked on a decision prompt has no agent session — the
         # human answers in the orchestrator's ctl window. Otherwise prefer the
         # live agent session, falling back to the ctl window between sessions.
@@ -378,10 +399,8 @@ class BmadLoopApp(App[None]):
         self._attach_to_target(target)
 
     def _attach_to_target(self, target: str, return_window: str | None = None) -> None:
-        try:
-            argv = runs.attach_target_argv(target)
-        except MultiplexerError as e:
-            self.notify(str(e), severity="error")
+        ok, argv = self._mux_guarded(lambda: runs.attach_target_argv(target))
+        if not ok:
             return
         # Backend-honest inside-the-multiplexer probe (current_pane_id() is None
         # outside): inside, attach_target_argv returned the fire-and-forget
@@ -907,7 +926,17 @@ class BmadLoopApp(App[None]):
         # killed and unknown come from prune_sessions' single partition sample,
         # so the warning below only ever names sessions that were actually pruned
         killed, _live, unknown = runs.prune_sessions(self.project)
-        windows = launch.prune_ctl_windows(self.project)
+        # prune_ctl_windows probes has_session on the shared ctl session, a
+        # raiser-side call; on a worker thread the toast must be marshalled, and
+        # notify() must not be called directly (see _mux_guarded — foreground only).
+        try:
+            windows = launch.prune_ctl_windows(self.project)
+        except MultiplexerError as e:
+            # prune_sessions already killed the agent sessions above; surface the
+            # ctl-window failure but keep reporting that completed work (and the
+            # unknown-pid warning) rather than swallowing it on an early return.
+            self.call_from_thread(self.notify, str(e), severity="error")
+            windows = []
         if unknown:
             self.call_from_thread(
                 self.notify,
