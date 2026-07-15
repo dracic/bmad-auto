@@ -54,7 +54,10 @@ STALL_NUDGE_TEXT = (
     "You appear idle in bmad-loop automation mode, which cannot re-invoke you when "
     "a background process finishes. If you are waiting on one (e.g. a Unity PlayMode "
     "run or a long test), check its status now and continue the workflow; if it is "
-    "done, finalize the work and end your turn. If you are stuck, say so and stop."
+    "done, finalize the work and end your turn. If you are stuck, say so and stop. "
+    "Note: a prose reply cannot end this session — only your workflow's completion "
+    "artifact (the spec's terminal status / result file) does; if the work is "
+    "already complete, write it before ending your turn."
 )
 
 
@@ -190,10 +193,11 @@ class GenericAdapter(CodingCLIAdapter):
         # unresponsive session burns through it. Bounded overall by spec.timeout_s.
         stall_nudges_left = self._stall_nudges
         # monotonic total of stall nudges sent this session — never restored,
-        # unlike stall_nudges_left. When spec.stall_nudges_cap is set (injected
-        # workflow sessions), a session that keeps ending its turn without a
-        # result cannot ride the fresh-Stop refill forever: after cap total
-        # nudges it is declared stalled. cap=None (dev/review) skips the check.
+        # unlike stall_nudges_left. When spec.stall_nudges_cap is set (the
+        # engine sets it for every session it drives), a session that keeps
+        # ending its turn without a result cannot ride the fresh-Stop refill
+        # forever: after cap total nudges it is declared stalled. cap=None
+        # (raw constructor default) skips the check.
         stall_nudges_sent = 0
         # internal observability counter: counts ticks where the liveness probe
         # raised a transport error (e.g. a 30s tmux hang). It deliberately does
@@ -378,6 +382,25 @@ class GenericAdapter(CodingCLIAdapter):
     def _result_path(self, task_id: str) -> Path:
         return self.tasks_dir / task_id / "result.json"
 
+    def _note_resultless_stop(self, task_id: str, verdict: str, detail: str = "") -> None:
+        """Append a diagnostic breadcrumb when a Stop's artifact read-back gives
+        up empty: one JSON line ({ts, verdict, detail}) in
+        ``tasks/<task_id>/resultless-stops.jsonl``. Pure observability — the
+        #149 nudge livelock was undiagnosable because nothing recorded *why*
+        each Stop read as result-less. Best-effort: an unwritable run dir must
+        never break the completion loop."""
+        try:
+            path = self.tasks_dir / task_id / "resultless-stops.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(
+                {"ts": time.time_ns(), "verdict": verdict, "detail": detail},
+                ensure_ascii=False,
+            )
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
+
     def _read_result(self, task_id: str) -> dict | None:
         path = self._result_path(task_id)
         if not path.is_file():
@@ -392,8 +415,13 @@ class GenericAdapter(CodingCLIAdapter):
         deadline = time.monotonic() + grace_s
         while True:
             result = self._read_result(task_id)
-            if result is not None or time.monotonic() >= deadline:
+            if result is not None:
                 return result
+            if time.monotonic() >= deadline:
+                self._note_resultless_stop(
+                    task_id, "no-result-json", f"no readable {self._result_path(task_id)}"
+                )
+                return None
             time.sleep(RESULT_POLL_S)
 
     def _window_alive(self, handle: SessionHandle) -> bool:
@@ -490,6 +518,13 @@ class GenericDevAdapter(GenericAdapter):
                         spec_path, story_key=story_key, dw_ids=dw_ids or None
                     )
             if not wait or time.monotonic() >= deadline:
+                if wait:
+                    self._note_resultless_stop(
+                        handle.task_id,
+                        "no-artifact",
+                        "no result artifact newer than session launch under: "
+                        + ", ".join(str(d) for d in search_dirs),
+                    )
                 return None
             time.sleep(RESULT_POLL_S)
 
@@ -529,28 +564,42 @@ class GenericDevAdapter(GenericAdapter):
                 # >1 matching file — waiting can't make it collapse to one. Return now
                 # (don't burn the grace); the engine's next _pick_next re-classifies
                 # AMBIGUOUS and raises the actionable wedge for resolve.
-                return None
-            if (
-                state.kind in (stories.KIND_PRESENT, stories.KIND_SENTINEL)
-                and state.path
-                and self._written_this_session(state.path, handle.launched_ns)
-            ):
-                try:
-                    sr = devcontract.synthesize_result(
-                        state.path, story_key=story_key or None, plan_halt=plan_halt
+                if wait:
+                    self._note_resultless_stop(
+                        handle.task_id,
+                        "ambiguous",
+                        f"{len(state.paths)} specs match id {story_key!r} under {base}",
                     )
-                except UnicodeDecodeError:
-                    # A non-UTF-8 read is either a torn glimpse of a spec still
-                    # being written (keep polling — a later pass sees the finished
-                    # write) or a genuinely corrupt file: then the grace expires
-                    # result-less and the next _pick_next re-classifies it as a
-                    # wedge (resolve_story_spec degrades an undecodable PRESENT
-                    # spec to status "" → pause for resolve), never a crash of
-                    # the read-back poll.
-                    sr = None
-                if sr is not None and sr.result_json is not None:
-                    return sr
+                return None
+            # Classify this pass for the result-less breadcrumb; overwritten
+            # below when the spec is present but not (yet) this session's
+            # terminal output.
+            verdict, detail = state.kind, str(state.path or base)
+            if state.kind in (stories.KIND_PRESENT, stories.KIND_SENTINEL) and state.path:
+                if not self._written_this_session(state.path, handle.launched_ns):
+                    verdict = "stale-mtime"
+                    detail = f"{state.path} predates session launch"
+                else:
+                    try:
+                        sr = devcontract.synthesize_result(
+                            state.path, story_key=story_key or None, plan_halt=plan_halt
+                        )
+                    except UnicodeDecodeError:
+                        # A non-UTF-8 read is either a torn glimpse of a spec still
+                        # being written (keep polling — a later pass sees the finished
+                        # write) or a genuinely corrupt file: then the grace expires
+                        # result-less and the next _pick_next re-classifies it as a
+                        # wedge (resolve_story_spec degrades an undecodable PRESENT
+                        # spec to status "" → pause for resolve), never a crash of
+                        # the read-back poll.
+                        sr = None
+                    if sr is not None and sr.result_json is not None:
+                        return sr
+                    verdict = "not-terminal"
+                    detail = f"{state.path} has no terminal status (frontmatter {state.status!r})"
             if not wait or time.monotonic() >= deadline:
+                if wait:
+                    self._note_resultless_stop(handle.task_id, verdict, detail)
                 return None
             time.sleep(RESULT_POLL_S)
 

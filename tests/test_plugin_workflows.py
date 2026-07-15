@@ -224,10 +224,12 @@ def test_workflow_injects_a_session_at_post_dev_phase(project):
 
 
 def test_dev_and_review_sessions_carry_no_workflow_contract(project):
-    """The completion contract + stall-nudge cap are workflow-session-only: the
-    main dev/review sessions (their skills own their result conventions, and a
-    slow background wait may legitimately need unbounded re-nudging) must stay
-    byte-identical — no appended contract, no cap."""
+    """The completion contract is workflow-session-only: the main dev/review
+    sessions (their skills own their result conventions) must stay
+    byte-identical — no appended contract. Their stall nudges are bounded by
+    the dev cap, not the workflow one: a session whose reply to the wake nudge
+    is itself a result-less Stop would otherwise refill the budget until
+    session timeout (#149)."""
     captured: list = []
     setup_story(project)
 
@@ -247,7 +249,7 @@ def test_dev_and_review_sessions_carry_no_workflow_contract(project):
     assert summary.done == 1
     assert len(captured) == 2
     for spec in captured:
-        assert spec.stall_nudges_cap is None
+        assert spec.stall_nudges_cap == engine.policy.limits.dev_stall_nudges_cap
         assert "Completion signal" not in spec.prompt
         assert "bmad-dev-auto-result-" not in spec.prompt
 

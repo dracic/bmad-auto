@@ -280,6 +280,19 @@ def test_workflow_stall_nudges_cap_default_parse_and_template():
         policy.loads("[limits]\nworkflow_stall_nudges_cap = -1\n")
 
 
+def test_dev_stall_nudges_cap_default_parse_and_template():
+    import tomllib
+
+    assert policy.loads("").limits.dev_stall_nudges_cap == 6
+    loaded = policy.loads("[limits]\ndev_stall_nudges_cap = 0\n")
+    assert loaded.limits.dev_stall_nudges_cap == 0
+    # the emitted template documents the knob at its dataclass default
+    doc = tomllib.loads(policy.POLICY_TEMPLATE)
+    assert doc["limits"]["dev_stall_nudges_cap"] == policy.LimitsPolicy.dev_stall_nudges_cap
+    with pytest.raises(policy.PolicyError, match="dev_stall_nudges_cap"):
+        policy.loads("[limits]\ndev_stall_nudges_cap = -1\n")
+
+
 def test_max_followup_reviews_default_parse_and_template():
     import tomllib
 
