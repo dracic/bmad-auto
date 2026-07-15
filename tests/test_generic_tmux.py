@@ -72,8 +72,8 @@ def test_ensure_session_tags_project(tmp_path, monkeypatch, force_tmux_backend):
     """A freshly created agent session is stamped with its project so a cleanup
     in another project never prunes this run. The set-option now flows through
     the tmux backend, so patch its subprocess seam. ``force_tmux_backend`` pins
-    tmux on win32, where the default mux would otherwise be herdr (a no-op on
-    POSIX) — the adapter's default ``mux`` is ``get_multiplexer()``."""
+    tmux against any installed win32-matching external backend (a no-op on a
+    stock POSIX box) — the adapter's default ``mux`` is ``get_multiplexer()``."""
     from bmad_loop import runs
 
     project = tmp_path

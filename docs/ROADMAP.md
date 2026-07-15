@@ -9,7 +9,7 @@ Status legend: **planned** (agreed, not started) · **exploring** (shape still o
 
 ## Native Windows multiplexer backend
 
-**Status:** planned · **Foundation:** the full platform-seam series landed (multiplexer registry + `BaseTmuxBackend` + `ProcessHost` + hook interpreter + validate preflight, v0.7.6; availability-aware backend selection + `bmad-loop mux`, #87; original seam v0.7.0) · a first non-tmux-family, native-Windows-capable backend — **herdr** — now ships end-to-end on POSIX (engine run path + TUI-launch surface; the win32 `agent.start` launch path is the remaining follow-up)
+**Status:** planned · **Foundation:** the full platform-seam series landed (multiplexer registry + `BaseTmuxBackend` + `ProcessHost` + hook interpreter + validate preflight, v0.7.6; availability-aware backend selection + `bmad-loop mux`, #87; out-of-tree backend discovery via `bmad_loop.mux_backends` entry points; original seam v0.7.0) · a first non-tmux-family, native-Windows-capable backend — **herdr** — ships end-to-end on POSIX as the external [bmad-loop-adapter-herdr](https://github.com/pbean/bmad-loop-adapter-herdr) (the win32 `agent.start` launch path is tracked there)
 
 The orchestrator no longer fuses tmux into the engine. All session/window/pane operations
 go through a single `TerminalMultiplexer` ABC (`src/bmad_loop/adapters/multiplexer.py`),
@@ -44,27 +44,34 @@ availability-aware with discriminating `available()` probes (psmux →
 `which("tmux") and not which("psmux")`) and an explicit `bmad-loop mux set <name>` tie-break.
 
 The third — **herdr** — has **shipped** end-to-end on POSIX (engine run path +
-TUI-launch surface; operator guide:
-[Terminal multiplexer backends](multiplexer-backends.md)) as a
-different-binary-family backend: it implements `TerminalMultiplexer` fresh over herdr's
-workspace/tab/pane model rather than subclassing `BaseTmuxBackend`, and probes
-`which("herdr")`, so it is pairwise-discriminating against the tmux family by construction
-(no `mux set` tie-break needed to tell them apart). It registers with `matches = True` (all
-platforms), which keeps the door open for native Windows without disturbing POSIX. On POSIX,
-tmux stays the platform default, so herdr activates only on an explicit
-`BMAD_LOOP_MUX_BACKEND=herdr` / `bmad-loop mux set herdr`. On **win32**, `_PLATFORM_DEFAULTS`
-is **untouched** — psmux remains the declared win32 default — so herdr is picked only by
-**first-match** (the fourth precedence step) when it is `available()` and no higher-priority
-backend is: once psmux (or tmux-windows) ships and registers for win32, the win32 default
-reasserts and outranks herdr's first-match automatically, no code change. herdr's `exec`
-launch is POSIX-only for now; the Windows launch path (herdr's `agent.start`) is a follow-up,
+TUI-launch surface), and now lives **out-of-tree** as the reference external adapter,
+[pbean/bmad-loop-adapter-herdr](https://github.com/pbean/bmad-loop-adapter-herdr)
+(developed in-tree in #136/#137, extracted pre-release per core-team direction; it
+co-installs with bmad-loop and self-registers via the `bmad_loop.mux_backends`
+entry-point group). It is a different-binary-family backend: it implements
+`TerminalMultiplexer` fresh over herdr's workspace/tab/pane model rather than
+subclassing `BaseTmuxBackend`, and probes `which("herdr")`, so it is
+pairwise-discriminating against the tmux family by construction (no `mux set`
+tie-break needed to tell them apart). It registers with `matches = True` (all
+platforms), which keeps the door open for native Windows without disturbing POSIX. On
+POSIX, tmux stays the platform default, so herdr activates only on an explicit
+`BMAD_LOOP_MUX_BACKEND=herdr` / `bmad-loop mux set herdr`. On **win32**,
+`_PLATFORM_DEFAULTS` is **untouched** — psmux remains the declared win32 default — so
+herdr is picked only by **first-match** (the fourth precedence step) when installed and
+`available()` and no higher-priority backend is: once psmux (or tmux-windows) ships and
+registers for win32, the win32 default reasserts and outranks herdr's first-match
+automatically, no code change. herdr's `exec` launch is POSIX-only for now; the Windows
+launch path (herdr's `agent.start`) is tracked in
+[the adapter repo's issues](https://github.com/pbean/bmad-loop-adapter-herdr/issues),
 and the Phase-0 characterization must be re-run on a real Windows host before #92 is claimed.
 
 The seams are designed so each backend slots in as **new files plus one registration line,
 with no change to the adapters, `runs.py`, `tui/launch.py`, `probe.py`, `tui/data.py`, or
 `cli.py`'s `validate`** (`WindowsProcessHost` and its hook interpreter are already in place
 and registered; herdr proved this end to end — one registration line and one sanctioned
-`probe.py` gate fix, zero portability-guard allowlist changes). The end-to-end port path —
+`probe.py` gate fix, zero portability-guard allowlist changes; the extraction then proved
+the **fully external** path — the same registration arriving via entry-point discovery,
+zero core files). The end-to-end port path —
 both build options, the test-override env vars, and exactly what a native-Windows port costs —
 is documented in [Porting bmad-loop to a new OS](porting-to-a-new-os.md); the deep transport
 contract is in the

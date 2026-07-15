@@ -17,7 +17,6 @@ import pytest
 from bmad_loop.adapters import tmux_base
 from bmad_loop.adapters.base import SessionSpec
 from bmad_loop.adapters.generic import GenericAdapter
-from bmad_loop.adapters.herdr_backend import HerdrMultiplexer
 from bmad_loop.adapters.multiplexer import MultiplexerError, TerminalMultiplexer, parse_target
 from bmad_loop.adapters.profile import get_profile
 from bmad_loop.adapters.tmux_backend import TmuxMultiplexer
@@ -526,14 +525,6 @@ def test_target_default_grammar():
     # "=s:" -> ("s", None) decode
     assert mux.target("s", None) == "=s"
     assert mux.target("s", "") == "=s"
-
-
-def test_herdr_inherits_the_default_encoder():
-    # herdr resolves targets lazily at use time (_parse_target), so it must NOT
-    # override target() to eagerly emit native ids — a token formatted ahead of
-    # use (e.g. attach_plan's return_window) would go stale.
-    assert "target" not in HerdrMultiplexer.__dict__
-    assert HerdrMultiplexer().target("s", "w") == "=s:w"
 
 
 @pytest.mark.parametrize(

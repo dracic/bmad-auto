@@ -602,11 +602,11 @@ def test_write_mux_backend_appends_table_to_legacy_file(tmp_path):
     p = tmp_path / "policy.toml"
     legacy = '# my notes\n[gates]\nmode = "none"\n'
     p.write_text(legacy, encoding="utf-8")
-    policy.write_mux_backend(p, "herdr")
+    policy.write_mux_backend(p, "psmux")
     text = p.read_text(encoding="utf-8")
     assert text.startswith(legacy)  # untouched prefix, table appended at EOF
     pol = policy.load(p)
-    assert pol.mux.backend == "herdr"
+    assert pol.mux.backend == "psmux"
     assert pol.gates.mode == "none"
 
 
