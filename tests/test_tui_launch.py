@@ -203,6 +203,22 @@ def test_new_window_failure_raises(monkeypatch, tmp_path: Path):
         launch.start_run_detached(tmp_path, "RID")
 
 
+def test_ensure_ctl_session_probe_failure_raises_launch_error(monkeypatch, tmp_path: Path):
+    # has_session is raiser-side: a transport failure (timeout / missing binary) on
+    # the ctl-session probe must convert to LaunchError so the TUI's launch/resume/
+    # resolve handlers (which catch LaunchError) surface a toast instead of crashing
+    # on the raw MultiplexerError that would otherwise slip past their except clause.
+    def failing_run(argv, **kwargs):
+        if argv[1] == "has-session":
+            raise OSError("backend server not reachable")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(tmux_base.subprocess, "run", failing_run)
+    monkeypatch.setattr(tmux_base.shutil, "which", lambda name: f"/usr/bin/{name}")
+    with pytest.raises(launch.LaunchError, match="ctl-session setup failed"):
+        launch.start_run_detached(tmp_path, "RID")
+
+
 def test_session_exists(monkeypatch):
     fake = FakeRun(has_session_rc=0)
     monkeypatch.setattr(tmux_base.subprocess, "run", fake)

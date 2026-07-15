@@ -245,12 +245,16 @@ def prune_ctl_windows(project: Path) -> list[str]:
 
 def _ensure_ctl_session(project: Path) -> None:
     mux = get_multiplexer()
-    if mux.has_session(CTL_SESSION):
-        return
+    # has_session is raiser-side (a server-backed backend can fail the probe after
+    # the availability pre-gate). Keep it inside the try so a transport failure
+    # converts to LaunchError, which the TUI launch/resume/resolve handlers already
+    # catch — otherwise the raw MultiplexerError slips past them and crashes the app.
     try:
+        if mux.has_session(CTL_SESSION):
+            return
         mux.new_session(CTL_SESSION, project)
     except MultiplexerError as e:
-        raise LaunchError(f"multiplexer new-session failed: {e}") from e
+        raise LaunchError(f"multiplexer ctl-session setup failed: {e}") from e
 
 
 def cli_argv(*tail: str) -> list[str]:
