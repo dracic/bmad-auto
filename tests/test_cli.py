@@ -628,15 +628,36 @@ def test_make_adapters_review_synthesizes_from_spec(project):
     assert not isinstance(adapters["triage"], GenericDevAdapter)
 
 
-def test_make_adapters_hookless_profile_not_yet_wired(project):
-    """Temporary Phase 1 guard (opencode-http plan): selecting a hookless profile
-    is a clean error until the HTTP adapter lands (Phase 3) — the tmux-transport
-    adapters cannot drive a profile that registers no hooks."""
+def test_make_adapters_hookless_synthesizing_roles_guarded(project):
+    """Temporary Phase 3 guard (opencode-http plan): dev/review are synthesizing
+    bmad-dev-auto roles, and the OpencodeDevAdapter that hosts the synthesis
+    mixin over HTTP lands in Phase 4 — until then selecting a hookless profile
+    for those roles is a clean error, not a silent misdrive."""
     install_bmad_config(project)
     _write_policy(project.project, '[adapter]\nname = "opencode"\n')
     pol = policy_mod.load(project.project / ".bmad-loop" / "policy.toml")
-    with pytest.raises(SystemExit, match="needs the HTTP adapter"):
+    with pytest.raises(SystemExit, match="dev/review synthesis lands in Phase 4"):
         cli._make_adapters(project.project, project.project / ".bmad-loop" / "runs" / "r", pol)
+
+
+def test_make_adapters_hookless_triage_dispatches_http_adapter(project):
+    """A hookless profile on a non-synthesizing role (triage) dispatches to the
+    HTTP adapter — resolved via the `opencode` alias — while dev/review keep the
+    shared spec-synthesizing tmux adapter. The HTTP adapter exposes `profile`
+    (worktree provisioning keys off it) and never constructs a multiplexer."""
+    from bmad_loop.adapters.generic import GenericDevAdapter
+    from bmad_loop.adapters.opencode_http import OpencodeHttpAdapter
+
+    install_bmad_config(project)
+    _write_policy(project.project, '[adapter.triage]\nname = "opencode"\n')
+    pol = policy_mod.load(project.project / ".bmad-loop" / "policy.toml")
+    adapters = cli._make_adapters(
+        project.project, project.project / ".bmad-loop" / "runs" / "r", pol
+    )
+    assert isinstance(adapters["triage"], OpencodeHttpAdapter)
+    assert adapters["triage"].profile.name == "opencode-http"
+    assert isinstance(adapters["dev"], GenericDevAdapter)
+    assert adapters["dev"] is adapters["review"]  # (cfg, synthesizes) sharing intact
 
 
 class _StubEngine:
@@ -1798,18 +1819,60 @@ def _validate_output(capsys):
 
 
 def test_validate_hookless_profile_notes_no_hook_registration(project, capsys):
-    """A hookless profile (opencode-http, via its `opencode` alias) validates with
-    an informational note instead of the 'hooks not registered' FAIL — there is no
-    hook config to check. Exit code is not asserted: other gates (binary on PATH,
-    upstream skills) legitimately vary by machine."""
+    """A hookless profile (opencode-http, via its `opencode` alias) on a role it
+    can drive (triage) validates with an informational note instead of the
+    'hooks not registered' FAIL — there is no hook config to check. Exit code is
+    not asserted: other gates (binary on PATH, upstream skills) legitimately
+    vary by machine."""
     install_bmad_config(project)
-    _write_policy(project.project, '[adapter]\nname = "opencode"\n')
+    _write_policy(project.project, '[adapter.triage]\nname = "opencode"\n')
     args = argparse.Namespace(project=str(project.project), spec=None)
 
     cli.cmd_validate(args)
     text = _validate_output(capsys)
     assert "opencode-http: hookless (http/sse transport)" in text
     assert "hooks not registered for opencode-http" not in text
+    # httpx ships in the dev group, so the extra-dependency gate passes here
+    assert "httpx available for opencode-http" in text
+    # triage-only is runnable today: no Phase 4 guard problem
+    assert "phase 4" not in text
+
+
+def test_validate_hookless_dev_review_fails_until_phase4(project, capsys):
+    """A policy that assigns a hookless profile to the synthesizing dev/review
+    roles is unrunnable until Phase 4 — validate must FAIL it the way
+    `_make_adapters` would at run start, not approve a doomed config."""
+    install_bmad_config(project)
+    _write_policy(project.project, '[adapter]\nname = "opencode"\n')
+    args = argparse.Namespace(project=str(project.project), spec=None)
+
+    assert cli.cmd_validate(args) == 1
+    text = _validate_output(capsys)
+    assert "cannot drive the dev/review roles yet" in text
+    assert "phase 4" in text
+
+
+def test_validate_hookless_profile_flags_missing_httpx(project, capsys, monkeypatch):
+    """A hookless profile whose httpx extra is not installed FAILs validate with
+    the actionable install hint — at validate time, not deep in a run start."""
+    import importlib.util
+
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name, *args, **kwargs):
+        if name == "httpx":
+            return None
+        return real_find_spec(name, *args, **kwargs)
+
+    install_bmad_config(project)
+    _write_policy(project.project, '[adapter]\nname = "opencode"\n')
+    monkeypatch.setattr(cli.importlib.util, "find_spec", fake_find_spec)
+    args = argparse.Namespace(project=str(project.project), spec=None)
+
+    cli.cmd_validate(args)
+    text = _validate_output(capsys)
+    assert "httpx not installed" in text
+    assert "bmad-loop[opencode]" in text
 
 
 def test_validate_stories_mode_skips_sprint_gate(project, capsys):
