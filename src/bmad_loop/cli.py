@@ -259,6 +259,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     profiles = []
     pol = None
+    # Hookless profile names the policy assigns to the synthesizing dev/review
+    # roles — unrunnable until the opencode-http plan's Phase 4 lands, so
+    # validate must FAIL them exactly like `_make_adapters` would at run start.
+    synth_hookless: set[str] = set()
     try:
         pol = policy_mod.load(_policy_path(project))
         role_names = {role: pol.adapter.resolved(role).name for role in ROLES}
@@ -267,11 +271,19 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"adapter dev={role_names['dev']}, review={role_names['review']}, "
             f"triage={role_names['triage']}"
         )
+        by_raw_name = {}
         for name in dict.fromkeys(role_names.values()):
             try:
-                profiles.append(get_profile(name, project))
+                profile = get_profile(name, project)
+                profiles.append(profile)
+                by_raw_name[name] = profile
             except ProfileError as e:
                 problems.append(str(e))
+        if pol.dev.skill == "bmad-dev-auto":  # mirrors _make_adapters' synthesizes
+            for role in ("dev", "review"):
+                profile = by_raw_name.get(role_names[role])
+                if profile is not None and profile.hookless:
+                    synth_hookless.add(profile.name)
     except policy_mod.PolicyError as e:
         problems.append(str(e))
 
@@ -316,6 +328,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
             notes.append(
                 f"{profile.name}: hookless (HTTP/SSE transport) — no hook registration needed"
             )
+            if profile.name in synth_hookless:
+                problems.append(
+                    f"{profile.name}: cannot drive the dev/review roles yet — dev/review "
+                    f"synthesis lands in Phase 4 of the opencode-http plan; assign it to "
+                    f"triage only (e.g. [adapter.triage])"
+                )
             # The HTTP adapter needs httpx, which ships as an optional extra —
             # surface a missing install here instead of at run start.
             if importlib.util.find_spec("httpx") is not None:

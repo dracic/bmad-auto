@@ -1819,12 +1819,13 @@ def _validate_output(capsys):
 
 
 def test_validate_hookless_profile_notes_no_hook_registration(project, capsys):
-    """A hookless profile (opencode-http, via its `opencode` alias) validates with
-    an informational note instead of the 'hooks not registered' FAIL — there is no
-    hook config to check. Exit code is not asserted: other gates (binary on PATH,
-    upstream skills) legitimately vary by machine."""
+    """A hookless profile (opencode-http, via its `opencode` alias) on a role it
+    can drive (triage) validates with an informational note instead of the
+    'hooks not registered' FAIL — there is no hook config to check. Exit code is
+    not asserted: other gates (binary on PATH, upstream skills) legitimately
+    vary by machine."""
     install_bmad_config(project)
-    _write_policy(project.project, '[adapter]\nname = "opencode"\n')
+    _write_policy(project.project, '[adapter.triage]\nname = "opencode"\n')
     args = argparse.Namespace(project=str(project.project), spec=None)
 
     cli.cmd_validate(args)
@@ -1833,6 +1834,22 @@ def test_validate_hookless_profile_notes_no_hook_registration(project, capsys):
     assert "hooks not registered for opencode-http" not in text
     # httpx ships in the dev group, so the extra-dependency gate passes here
     assert "httpx available for opencode-http" in text
+    # triage-only is runnable today: no Phase 4 guard problem
+    assert "phase 4" not in text
+
+
+def test_validate_hookless_dev_review_fails_until_phase4(project, capsys):
+    """A policy that assigns a hookless profile to the synthesizing dev/review
+    roles is unrunnable until Phase 4 — validate must FAIL it the way
+    `_make_adapters` would at run start, not approve a doomed config."""
+    install_bmad_config(project)
+    _write_policy(project.project, '[adapter]\nname = "opencode"\n')
+    args = argparse.Namespace(project=str(project.project), spec=None)
+
+    assert cli.cmd_validate(args) == 1
+    text = _validate_output(capsys)
+    assert "cannot drive the dev/review roles yet" in text
+    assert "phase 4" in text
 
 
 def test_validate_hookless_profile_flags_missing_httpx(project, capsys, monkeypatch):

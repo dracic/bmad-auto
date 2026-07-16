@@ -394,14 +394,18 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
     def _prompt(self, sess: _ServerSession, text: str) -> None:
         """prompt_async — the injection primitive for both the initial prompt
         and the nudges. Advances the completion floor: anything completed
-        before this send is a previous turn's evidence."""
-        sess.floor_ms = max(sess.floor_ms, _now_ms())
+        before this send is a previous turn's evidence. The floor moves only
+        once the server ACCEPTS the prompt (204) — a rejected/failed send
+        starts no new turn, and consuming the floor for it would discard
+        still-valid completion evidence of the previous turn."""
+        sent_ms = _now_ms()  # sampled before the POST: it precedes the new turn
         resp = sess.client.post(
             f"/session/{sess.session_id}/prompt_async",
             json={"parts": [{"type": "text", "text": text}]},
         )
         if resp.status_code != 204:
             raise OpencodeServerError(f"prompt_async failed: {resp.status_code} {resp.text[:200]}")
+        sess.floor_ms = max(sess.floor_ms, sent_ms)
 
     def send_text(self, handle: SessionHandle, text: str) -> None:
         """Nudge the running session. Best-effort: a server that died between
@@ -523,14 +527,17 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
 
             if event == "error":
                 # session.error may precede a retry, not a turn-end (status
-                # "retry" exists); only a settled not-busy session reads as a
+                # "retry" exists); only a PROVABLY settled session reads as a
                 # result-less Stop — an errored turn may never get
                 # time.completed, so waiting on proof-of-work alone would burn
-                # the whole timeout. A dead server takes the crash path.
+                # the whole timeout. A dead server takes the crash path; an
+                # unknowable status (probe failure) keeps waiting rather than
+                # mis-nudging a session that may still be retrying — timeout_s
+                # bounds a persistently unreadable one.
                 if sess.process.poll() is not None:
                     transcript = self._capture_usage(handle, sess)
                     return self._final(handle, spec, "crashed", session_id, transcript)
-                if self._status_running(sess):
+                if self._session_status(sess) is not False:
                     continue
                 event = "idle"
 
@@ -562,10 +569,14 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
                                 spec.stall_nudges_cap is None
                                 or stall_nudges_sent < spec.stall_nudges_cap
                             ):
-                                if self._status_running(sess):
-                                    # Mid-turn (a busy child/parent the SSE
-                                    # missed): re-arm rather than injecting a
-                                    # prompt into a working session.
+                                if self._session_status(sess):
+                                    # Provably mid-turn (a busy child/parent the
+                                    # SSE missed): re-arm rather than injecting a
+                                    # prompt into a working session. Unknown
+                                    # (None) proceeds to the nudge — a transport
+                                    # too broken to answer the probe would fail
+                                    # the nudge too, and burning the bounded
+                                    # budget converges to an honest stall.
                                     stall_deadline = time.monotonic() + self._stall_grace_s
                                     continue
                                 stall_nudges_left -= 1
@@ -619,27 +630,29 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
                 stall_nudges_left = self._stall_nudges
                 continue
 
-    def _status_running(self, sess: _ServerSession) -> bool:
-        """Whether /session/status reports this session busy or retrying.
-        Idle sessions are ABSENT from the map (pins §6) — absence means not
-        running. Unreachable server reads as not-running; the process poll
-        settles real death."""
+    def _session_status(self, sess: _ServerSession) -> bool | None:
+        """Tri-state /session/status probe: True = busy/retrying, False =
+        provably settled (absent from the map — pins §6 — or explicit idle),
+        None = unknowable (unreachable server, non-200). Unknown is not
+        settled: callers must not treat a failed probe as proof a turn ended
+        (the liveness-parity doctrine); the process poll settles real death."""
         try:
             resp = sess.client.get("/session/status")
             if resp.status_code != 200:
-                return False
+                return None
             status = resp.json().get(sess.session_id) or {}
             return status.get("type") in ("busy", "retry")
         except Exception:  # noqa: BLE001 - probe is advisory
-            return False
+            return None
 
     def _probe_completion(self, sess: _ServerSession) -> bool:
         """HTTP fallback for a lossy stream (pins §6): the turn is finished
-        only when the session is not busy/retrying AND an assistant message
-        completed strictly after the completion floor exists — an idle status
-        alone is not proof a turn ran (pins §3/§8). Consuming the evidence
-        advances the floor so one completion can never be consumed twice."""
-        if self._status_running(sess):
+        only when the session is PROVABLY settled (an unknowable status is not
+        settled) AND an assistant message completed strictly after the
+        completion floor exists — an idle status alone is not proof a turn ran
+        (pins §3/§8). Consuming the evidence advances the floor so one
+        completion can never be consumed twice."""
+        if self._session_status(sess) is not False:
             return False
         try:
             resp = sess.client.get(f"/session/{sess.session_id}/message")
