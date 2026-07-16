@@ -18,9 +18,11 @@ from pathlib import Path
 import pytest
 from conftest import write_script_launcher
 
+from bmad_loop.adapters import generic
 from bmad_loop.adapters.base import SessionHandle, SessionSpec
 from bmad_loop.adapters.generic import NUDGE_TEXT, STALL_NUDGE_TEXT
 from bmad_loop.adapters.opencode_http import (
+    OpencodeDevAdapter,
     OpencodeHttpAdapter,
     OpencodeServerError,
     _free_port,
@@ -29,6 +31,7 @@ from bmad_loop.adapters.opencode_http import (
     _sum_usage,
 )
 from bmad_loop.adapters.profile import get_profile
+from bmad_loop.bmadconfig import ProjectPaths
 from bmad_loop.model import TokenUsage
 from bmad_loop.policy import LimitsPolicy, Policy
 from bmad_loop.process_host import get_process_host
@@ -53,6 +56,9 @@ PINNED_EPOCH_MS = 1_784_218_739_410
 #                      reconnect); the turn completes result+messages only —
 #                      completion is reachable only via the HTTP poll fallback
 # FAKE_OPENCODE_START_FAILURES=N makes the first N spawns exit(1) pre-bind.
+# FAKE_OPENCODE_SPEC_PATH/_SPEC_TEXT: a bmad-dev-auto-style terminal spec the
+# turn writes wherever a scenario writes its result (and at the start of
+# busy-forever, for the post-kill rescue). Unset = no-op, like RESULT_PATH.
 #
 # Recordings under FAKE_OPENCODE_DIR: sessions.jsonl (incl. the Authorization
 # header), prompts.jsonl, aborts.jsonl, pid (the server's own pid).
@@ -64,6 +70,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 SCENARIO = os.environ.get("FAKE_OPENCODE_SCENARIO", "completed")
 REC_DIR = os.environ["FAKE_OPENCODE_DIR"]
 RESULT_PATH = os.environ.get("FAKE_OPENCODE_RESULT_PATH", "")
+SPEC_PATH = os.environ.get("FAKE_OPENCODE_SPEC_PATH", "")
+SPEC_TEXT = os.environ.get("FAKE_OPENCODE_SPEC_TEXT", "")
 START_FAILURES = int(os.environ.get("FAKE_OPENCODE_START_FAILURES", "0"))
 
 argv = sys.argv[1:]
@@ -119,6 +127,13 @@ def write_result():
             json.dump({"ok": True, "workflow": "fake-triage"}, fh)
 
 
+def write_spec():
+    if SPEC_PATH:
+        os.makedirs(os.path.dirname(SPEC_PATH), exist_ok=True)
+        with open(SPEC_PATH, "w", encoding="utf-8") as fh:
+            fh.write(SPEC_TEXT)
+
+
 def finish_turn():
     with LOCK:
         STATE["completed_ms"] = now_ms()
@@ -132,7 +147,7 @@ def run_turn():
     # let the 204 flush before any scripted death tears the connection down
     time.sleep(0.15)
     if SCENARIO == "completed":
-        write_result(); finish_turn(); push(idle_event())
+        write_result(); write_spec(); finish_turn(); push(idle_event())
     elif SCENARIO == "nudge-then-complete":
         if n >= 2:
             write_result()
@@ -140,7 +155,7 @@ def run_turn():
     elif SCENARIO == "stall":
         finish_turn(); push(idle_event())
     elif SCENARIO == "busy-forever":
-        pass  # stays busy: no finish, no idle
+        write_spec()  # visible only post-kill: the turn never ends or idles
     elif SCENARIO == "die-after-result":
         write_result(); os._exit(0)
     elif SCENARIO == "die-no-result":
@@ -259,6 +274,17 @@ def _policy(**limits) -> Policy:
     return Policy(limits=LimitsPolicy(**limits) if limits else LimitsPolicy())
 
 
+def _shrink_timing(adapter: OpencodeHttpAdapter) -> OpencodeHttpAdapter:
+    """Shrink every cadence for tests; the defaults are minutes of wall clock."""
+    adapter.health_timeout_s = 10.0
+    adapter.health_poll_s = 0.05
+    adapter.reconnect_sleep_s = 0.05
+    adapter.silence_threshold_s = 2.0
+    adapter.poll_tick_s = 0.05
+    adapter.result_grace_s = 0.5
+    return adapter
+
+
 def make_adapter(tmp_path: Path, binary: str = "opencode", **kwargs) -> OpencodeHttpAdapter:
     adapter = OpencodeHttpAdapter(
         run_dir=tmp_path / "run",
@@ -267,14 +293,7 @@ def make_adapter(tmp_path: Path, binary: str = "opencode", **kwargs) -> Opencode
         binary=binary,
         **kwargs,
     )
-    # Shrink every cadence for tests; the defaults are minutes of wall clock.
-    adapter.health_timeout_s = 10.0
-    adapter.health_poll_s = 0.05
-    adapter.reconnect_sleep_s = 0.05
-    adapter.silence_threshold_s = 2.0
-    adapter.poll_tick_s = 0.05
-    adapter.result_grace_s = 0.5
-    return adapter
+    return _shrink_timing(adapter)
 
 
 @pytest.fixture
@@ -651,3 +670,193 @@ def test_e2e_spawn_gives_up_after_attempts(tmp_path, fake_opencode):
     assert adapter._sessions == {}
     # every attempt appended to one log for the task
     assert (tmp_path / "run" / "logs" / "t-1.log").exists()
+
+
+# --------------------------------------------- OpencodeDevAdapter (Phase 4)
+#
+# Dev/review sessions run the generic bmad-dev-auto skill, which writes NO
+# result.json: the outcome lives in the terminal spec it leaves on disk,
+# synthesized via devcontract by _DevSynthesisMixin — the same machinery
+# GenericDevAdapter uses, composed over the HTTP transport.
+
+_DONE_SPEC = (
+    "---\nstatus: done\nbaseline_revision: abc123\n---\n\n"
+    "## Auto Run Result\n\nStatus: done\nImplemented.\n"
+)
+
+
+def make_dev_adapter(
+    tmp_path: Path, binary: str = "opencode", **kwargs
+) -> tuple[OpencodeDevAdapter, Path]:
+    impl = tmp_path / "impl"
+    impl.mkdir(exist_ok=True)
+    # project root == tmp_path so rebased(spec.cwd=tmp_path) is a no-op: these
+    # sessions run in place, where cwd == the project root.
+    paths = ProjectPaths(
+        project=tmp_path,
+        implementation_artifacts=impl,
+        planning_artifacts=tmp_path / "plan",
+    )
+    adapter = OpencodeDevAdapter(
+        run_dir=tmp_path / "run",
+        policy=kwargs.pop("policy", _policy()),
+        profile=get_profile("opencode"),
+        binary=binary,
+        paths=paths,
+        **kwargs,
+    )
+    return _shrink_timing(adapter), impl
+
+
+def make_dev_spec(
+    tmp_path: Path,
+    rec: Path,
+    scenario: str,
+    spec_path: Path,
+    spec_text: str = _DONE_SPEC,
+    story_key: str = "3-1",
+    task_id: str = "3-1-dev-1",
+    timeout_s: float = 30.0,
+    extra_env: dict | None = None,
+) -> SessionSpec:
+    env = {
+        "FAKE_OPENCODE_SCENARIO": scenario,
+        "FAKE_OPENCODE_DIR": str(rec),
+        # Deliberately NO FAKE_OPENCODE_RESULT_PATH: the dev skill writes no
+        # result.json, and the dev adapter must never lean on one.
+        "FAKE_OPENCODE_SPEC_PATH": str(spec_path),
+        "FAKE_OPENCODE_SPEC_TEXT": spec_text,
+        "BMAD_LOOP_STORY_KEY": story_key,
+        **(extra_env or {}),
+    }
+    return SessionSpec(
+        task_id=task_id,
+        role="dev",
+        prompt=f"/bmad-dev-auto {story_key}",
+        cwd=tmp_path,
+        env=env,
+        timeout_s=timeout_s,
+        stall_nudges_cap=6,
+    )
+
+
+def test_dev_knobs_configured(tmp_path):
+    """_configure_dev_knobs over the HTTP knob names: no result-contract stop
+    nudges (the skill writes no result.json), stall grace + wake budget from
+    policy — same contract as GenericDevAdapter."""
+    adapter, _ = make_dev_adapter(
+        tmp_path, policy=_policy(dev_stall_grace_s=123, dev_stall_nudges=4)
+    )
+    assert adapter._stop_nudges == 0
+    assert adapter._stall_grace_s == 123.0
+    assert adapter._stall_nudges == 4
+
+
+def test_dev_probe_alive_never_none(tmp_path):
+    """The post-kill liveness seam: poll() on the retained Popen handle is
+    always answerable (True/False), never the tri-state unknown a tmux probe
+    can hit — and a task with no retained process owns nothing alive."""
+
+    class _Proc:
+        def __init__(self, rc):
+            self._rc = rc
+
+        def poll(self):
+            return self._rc
+
+    adapter, _ = make_dev_adapter(tmp_path)
+    handle = SessionHandle(task_id="t", native_id="ses_x")
+    assert adapter._probe_alive(handle) is False  # never spawned
+    adapter._server_procs["t"] = _Proc(None)
+    assert adapter._probe_alive(handle) is True  # kill silently failed: keep verdict
+    adapter._server_procs["t"] = _Proc(0)
+    assert adapter._probe_alive(handle) is False
+
+
+def test_dev_result_json_ignores_result_file(tmp_path):
+    """MRO pin: _DevSynthesisMixin's spec synthesis shadows the core adapter's
+    result.json read-back — a stray result.json with no spec on disk is not a
+    dev result."""
+    adapter, _ = make_dev_adapter(tmp_path)
+    task_dir = adapter.tasks_dir / "3-1-dev-1"
+    task_dir.mkdir(parents=True)
+    (task_dir / "result.json").write_text('{"ok": true}', encoding="utf-8")
+    spec = SessionSpec(
+        task_id="3-1-dev-1",
+        role="dev",
+        prompt="/bmad-dev-auto 3-1",
+        cwd=tmp_path,
+        env={"BMAD_LOOP_STORY_KEY": "3-1"},
+    )
+    handle = SessionHandle(task_id="3-1-dev-1", native_id="ses_x")
+    assert adapter._result_json(handle, spec, wait=False) is None
+
+
+def test_e2e_dev_synthesizes_terminal_spec(tmp_path, fake_opencode):
+    launcher, rec = fake_opencode
+    adapter, impl = make_dev_adapter(tmp_path, binary=str(launcher))
+    spec = make_dev_spec(tmp_path, rec, "completed", impl / "spec-3-1-foo.md")
+
+    result = adapter.run(spec)
+
+    assert result.status == "completed"
+    rj = result.result_json
+    assert rj["workflow"] == "auto-dev"
+    assert rj["status"] == "done"
+    assert rj["baseline_commit"] == "abc123"  # mapped from baseline_revision
+    assert rj["story_key"] == "3-1"
+    assert rj["escalations"] == []
+    assert "post_kill_reconciled" not in rj  # vouched by the idle, not rescued
+    # transport parity with the classic path: usage, template, teardown
+    assert adapter.read_usage(result) == TokenUsage(
+        input_tokens=100, output_tokens=55, cache_read_tokens=7, cache_creation_tokens=3
+    )
+    assert prompt_texts(rec) == ["Use the bmad-dev-auto skill now: 3-1"]
+    assert adapter._sessions == {}
+    assert_server_gone(rec)
+
+
+def test_e2e_dev_stories_mode_resolves_by_id(tmp_path, fake_opencode, monkeypatch):
+    """Folder+id dispatch (BMAD_LOOP_SPEC_FOLDER): the story spec is resolved
+    at its deterministic id-keyed path — never via the mtime scan."""
+    launcher, rec = fake_opencode
+    adapter, impl = make_dev_adapter(tmp_path, binary=str(launcher))
+
+    def boom(*a, **k):
+        raise AssertionError("stories mode must not call the mtime scan")
+
+    monkeypatch.setattr(generic.devcontract, "find_result_artifact", boom)
+    spec = make_dev_spec(
+        tmp_path,
+        rec,
+        "completed",
+        tmp_path / "epic" / "stories" / "1-foo.md",
+        story_key="1",
+        task_id="1-dev-1",
+        extra_env={"BMAD_LOOP_SPEC_FOLDER": "epic"},
+    )
+
+    result = adapter.run(spec)
+
+    assert result.status == "completed"
+    assert result.result_json["status"] == "done"
+    assert result.result_json["story_key"] == "1"
+    assert_server_gone(rec)
+
+
+def test_e2e_dev_post_kill_rescue(tmp_path, fake_opencode):
+    """#61 over HTTP: the turn wrote its terminal spec but its idle was never
+    seen (the fake stays busy forever), so the loop times out — a verdict
+    reached under a live server, where the artifact is advisory (#48/#53).
+    run()'s kill settles the liveness question; _post_kill_reconcile re-probes
+    the now-dead server process and rescues the self-consistent done spec."""
+    launcher, rec = fake_opencode
+    adapter, impl = make_dev_adapter(tmp_path, binary=str(launcher))
+    spec = make_dev_spec(tmp_path, rec, "busy-forever", impl / "spec-3-1-foo.md", timeout_s=1.5)
+
+    result = adapter.run(spec)
+
+    assert result.status == "completed"
+    assert result.result_json["status"] == "done"
+    assert result.result_json["post_kill_reconciled"] is True
+    assert_server_gone(rec)
