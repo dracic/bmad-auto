@@ -40,6 +40,12 @@ lint:
     - linters: [markdownlint, prettier]
       paths:
         - .github/CODE_OF_CONDUCT.md
+    # The archived OpenCode OpenAPI document is the byte-exact `GET /doc` response the
+    # API pins were verified against; reformatting it would break that provenance, and
+    # checkov's API-security policies audit third-party surface we don't control.
+    - linters: [prettier, checkov]
+      paths:
+        - docs/notes/opencode-openapi-1.18.2.json
 actions:
   disabled:
     - trunk-announce

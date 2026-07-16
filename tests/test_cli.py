@@ -628,6 +628,17 @@ def test_make_adapters_review_synthesizes_from_spec(project):
     assert not isinstance(adapters["triage"], GenericDevAdapter)
 
 
+def test_make_adapters_hookless_profile_not_yet_wired(project):
+    """Temporary Phase 1 guard (opencode-http plan): selecting a hookless profile
+    is a clean error until the HTTP adapter lands (Phase 3) — the tmux-transport
+    adapters cannot drive a profile that registers no hooks."""
+    install_bmad_config(project)
+    _write_policy(project.project, '[adapter]\nname = "opencode"\n')
+    pol = policy_mod.load(project.project / ".bmad-loop" / "policy.toml")
+    with pytest.raises(SystemExit, match="needs the HTTP adapter"):
+        cli._make_adapters(project.project, project.project / ".bmad-loop" / "runs" / "r", pol)
+
+
 class _StubEngine:
     def __init__(self, **kwargs):
         pass
@@ -1784,6 +1795,21 @@ STORIES_POLICY = '[stories]\nsource = "stories"\nspec_folder = "_bmad-output/epi
 def _validate_output(capsys):
     out = capsys.readouterr()
     return (out.out + out.err).lower()
+
+
+def test_validate_hookless_profile_notes_no_hook_registration(project, capsys):
+    """A hookless profile (opencode-http, via its `opencode` alias) validates with
+    an informational note instead of the 'hooks not registered' FAIL — there is no
+    hook config to check. Exit code is not asserted: other gates (binary on PATH,
+    upstream skills) legitimately vary by machine."""
+    install_bmad_config(project)
+    _write_policy(project.project, '[adapter]\nname = "opencode"\n')
+    args = argparse.Namespace(project=str(project.project), spec=None)
+
+    cli.cmd_validate(args)
+    text = _validate_output(capsys)
+    assert "opencode-http: hookless (http/sse transport)" in text
+    assert "hooks not registered for opencode-http" not in text
 
 
 def test_validate_stories_mode_skips_sprint_gate(project, capsys):

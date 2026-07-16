@@ -294,6 +294,9 @@ def strip_legacy_hooks(config: dict) -> tuple[dict, int]:
 
 
 def _register_hooks(project: Path, profile: CLIProfile) -> int:
+    if profile.hookless:
+        print(f"  no hooks needed ({profile.name}): HTTP/SSE transport")
+        return 0
     config_path = project / profile.hooks.config_path
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config: dict = {}
@@ -518,8 +521,11 @@ def provision_worktree(
                 continue
             _copy_traversable(src, dst)
 
-    # per-CLI signal-hook registration, baked to the main repo's relay (absolute)
+    # per-CLI signal-hook registration, baked to the main repo's relay (absolute).
+    # Hookless profiles (HTTP/SSE transport) have no config to merge.
     for profile in profiles:
+        if profile.hookless:
+            continue
         config_path = worktree / profile.hooks.config_path
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config: dict = {}
@@ -542,7 +548,9 @@ def provision_worktree(
     # configs) from the unit's `git add -A`, in case a project doesn't gitignore
     # its tool dirs.
     patterns = {f"/{p.skill_tree}" for p in profiles}
-    patterns |= {f"/{p.hooks.config_path}" for p in profiles}
+    # hookless profiles have no config_path — and their empty string would render
+    # as the pattern "/", git-excluding the entire worktree.
+    patterns |= {f"/{p.hooks.config_path}" for p in profiles if not p.hookless}
     patterns |= {f"/{rel}" for rel in seeded}
     _worktree_local_exclude(worktree, sorted(patterns))
 
