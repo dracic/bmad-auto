@@ -628,16 +628,25 @@ def test_make_adapters_review_synthesizes_from_spec(project):
     assert not isinstance(adapters["triage"], GenericDevAdapter)
 
 
-def test_make_adapters_hookless_synthesizing_roles_guarded(project):
-    """Temporary Phase 3 guard (opencode-http plan): dev/review are synthesizing
-    bmad-dev-auto roles, and the OpencodeDevAdapter that hosts the synthesis
-    mixin over HTTP lands in Phase 4 — until then selecting a hookless profile
-    for those roles is a clean error, not a silent misdrive."""
+def test_make_adapters_hookless_synthesizing_roles_get_dev_adapter(project):
+    """Hookless dev/review (bmad-dev-auto roles) dispatch to OpencodeDevAdapter —
+    the _DevSynthesisMixin composed over the HTTP transport — sharing one
+    instance via the (cfg, synthesizes) key, while triage on the same config
+    gets a separate plain OpencodeHttpAdapter (it reads a real result.json)."""
+    from bmad_loop.adapters.opencode_http import OpencodeDevAdapter, OpencodeHttpAdapter
+
     install_bmad_config(project)
     _write_policy(project.project, '[adapter]\nname = "opencode"\n')
     pol = policy_mod.load(project.project / ".bmad-loop" / "policy.toml")
-    with pytest.raises(SystemExit, match="dev/review synthesis lands in Phase 4"):
-        cli._make_adapters(project.project, project.project / ".bmad-loop" / "runs" / "r", pol)
+    adapters = cli._make_adapters(
+        project.project, project.project / ".bmad-loop" / "runs" / "r", pol
+    )
+    assert isinstance(adapters["dev"], OpencodeDevAdapter)
+    assert adapters["dev"] is adapters["review"]  # (cfg, synthesizes) sharing intact
+    assert adapters["dev"].paths.project == project.project
+    assert isinstance(adapters["triage"], OpencodeHttpAdapter)
+    assert not isinstance(adapters["triage"], OpencodeDevAdapter)
+    assert adapters["triage"] is not adapters["dev"]
 
 
 def test_make_adapters_hookless_triage_dispatches_http_adapter(project):
@@ -1838,18 +1847,20 @@ def test_validate_hookless_profile_notes_no_hook_registration(project, capsys):
     assert "phase 4" not in text
 
 
-def test_validate_hookless_dev_review_fails_until_phase4(project, capsys):
-    """A policy that assigns a hookless profile to the synthesizing dev/review
-    roles is unrunnable until Phase 4 — validate must FAIL it the way
-    `_make_adapters` would at run start, not approve a doomed config."""
+def test_validate_hookless_dev_review_is_runnable(project, capsys):
+    """A hookless profile on the synthesizing dev/review roles is runnable
+    since Phase 4 (OpencodeDevAdapter) — validate must not raise the retired
+    'cannot drive dev/review' problem. Exit code is not asserted: other gates
+    (binary on PATH, upstream skills) legitimately vary by machine."""
     install_bmad_config(project)
     _write_policy(project.project, '[adapter]\nname = "opencode"\n')
     args = argparse.Namespace(project=str(project.project), spec=None)
 
-    assert cli.cmd_validate(args) == 1
+    cli.cmd_validate(args)
     text = _validate_output(capsys)
-    assert "cannot drive the dev/review roles yet" in text
-    assert "phase 4" in text
+    assert "opencode-http: hookless (http/sse transport)" in text
+    assert "cannot drive the dev/review roles" not in text
+    assert "phase 4" not in text
 
 
 def test_validate_hookless_profile_flags_missing_httpx(project, capsys, monkeypatch):

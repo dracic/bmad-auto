@@ -59,12 +59,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..bmadconfig import ProjectPaths
 from ..journal import LOGS_DIR
 from ..model import TokenUsage
 from ..policy import Policy
 from ..process_host import get_process_host
 from .base import CodingCLIAdapter, SessionHandle, SessionResult, SessionSpec
-from .generic import NUDGE_TEXT, STALL_NUDGE_TEXT, _ResultFileMixin
+from .generic import NUDGE_TEXT, STALL_NUDGE_TEXT, _DevSynthesisMixin, _ResultFileMixin
 from .profile import CLIProfile
 
 # Spawn/readiness defaults; per-instance attributes so tests shrink them.
@@ -772,6 +773,40 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
             sess = self._sessions.pop(task_id, None)
             if sess is not None:
                 self._teardown(sess)
+
+
+class OpencodeDevAdapter(_DevSynthesisMixin, OpencodeHttpAdapter):
+    """Dev/review adapter for the generic ``bmad-dev-auto`` skill over HTTP.
+
+    That skill writes NO ``result.json`` — its outcome lives in the terminal
+    spec it leaves on disk, which :class:`_DevSynthesisMixin` locates and
+    synthesizes into the legacy result dict via :mod:`devcontract` (the same
+    machinery as GenericDevAdapter, mixin-shared rather than duplicated).
+    Selected by ``policy.dev.skill == "bmad-dev-auto"`` (see
+    ``cli._make_adapters``).
+    """
+
+    def __init__(self, *args, paths: ProjectPaths, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.paths = paths
+        self._configure_dev_knobs()
+        # task_id -> server process, kept past kill(): kill() pops the
+        # _ServerSession registry, but _post_kill_reconcile still needs to
+        # settle liveness after the teardown.
+        self._server_procs: dict[str, subprocess.Popen] = {}
+
+    def start_session(self, spec: SessionSpec) -> SessionHandle:
+        handle = super().start_session(spec)
+        self._server_procs[spec.task_id] = self._sessions[spec.task_id].process
+        return handle
+
+    def _probe_alive(self, handle: SessionHandle) -> bool | None:
+        proc = self._server_procs.get(handle.task_id)
+        if proc is None:
+            return False  # never spawned: nothing we own is alive
+        # Never None: the live Popen handle pins the pid, so poll() is always
+        # answerable — unlike a tmux transport there is no probe that can hang.
+        return proc.poll() is None
 
 
 def _sum_usage(messages: Any) -> TokenUsage:
