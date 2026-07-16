@@ -27,12 +27,15 @@ HOOK_DIALECTS = {
     "gemini-settings-json",
     "copilot-settings-json",
     "antigravity-hooks-json",
+    # hookless: the adapter observes completion itself (HTTP/SSE transport) —
+    # no hook config is ever written, so config_path/events must stay empty.
+    "none",
 }
 CANONICAL_EVENTS = {"SessionStart", "Stop", "SessionEnd", "PreCompact"}
 USER_PROFILES_REL = Path(".bmad-loop") / "profiles"
 
-# legacy adapter names from older policy.toml files
-ALIASES = {"claude-code-tmux": "claude"}
+# legacy adapter names from older policy.toml files, plus friendly short names
+ALIASES = {"claude-code-tmux": "claude", "opencode": "opencode-http"}
 
 
 class ProfileError(Exception):
@@ -85,6 +88,13 @@ class CLIProfile:
     # from the main repo so isolated dev/review sessions can reach the MCP server.
     seed_files: tuple[str, ...] = ()
 
+    @property
+    def hookless(self) -> bool:
+        """True for profiles whose adapter observes completion itself (HTTP/SSE)
+        instead of via hook scripts — no hook config exists to register, merge,
+        validate, or git-exclude."""
+        return self.hooks.dialect == "none"
+
     def render_prompt(self, prompt: str) -> str:
         """Render the engine's canonical "/skill args" prompt for this CLI.
 
@@ -113,16 +123,26 @@ def _parse_profile(doc: dict, source: str) -> CLIProfile:
     dialect = str(hooks_d.get("dialect", ""))
     if dialect not in HOOK_DIALECTS:
         raise fail(f"hooks.dialect must be one of {sorted(HOOK_DIALECTS)}: got {dialect!r}")
-    config_path = str(hooks_d.get("config_path", ""))
-    if not config_path or is_absolute_path(config_path) or has_parent_ref(config_path):
-        raise fail("hooks.config_path must be a project-relative path")
-    events_d = hooks_d.get("events")
-    if not isinstance(events_d, dict) or not events_d:
-        raise fail("hooks.events must map native event names to canonical ones")
-    events = {str(k): str(v) for k, v in events_d.items()}
-    bad = sorted(set(events.values()) - CANONICAL_EVENTS)
-    if bad:
-        raise fail(f"hooks.events values must be canonical {sorted(CANONICAL_EVENTS)}: got {bad}")
+    if dialect == "none":
+        # hookless: nothing is ever registered, so a config_path or events map
+        # is a contradiction — reject rather than silently ignore.
+        if hooks_d.get("config_path") or hooks_d.get("events"):
+            raise fail('hookless profiles (dialect = "none") must not set hooks.config_path/events')
+        config_path = ""
+        events: dict[str, str] = {}
+    else:
+        config_path = str(hooks_d.get("config_path", ""))
+        if not config_path or is_absolute_path(config_path) or has_parent_ref(config_path):
+            raise fail("hooks.config_path must be a project-relative path")
+        events_d = hooks_d.get("events")
+        if not isinstance(events_d, dict) or not events_d:
+            raise fail("hooks.events must map native event names to canonical ones")
+        events = {str(k): str(v) for k, v in events_d.items()}
+        bad = sorted(set(events.values()) - CANONICAL_EVENTS)
+        if bad:
+            raise fail(
+                f"hooks.events values must be canonical {sorted(CANONICAL_EVENTS)}: got {bad}"
+            )
 
     usage_parser = str(doc.get("usage_parser", "none"))
     if usage_parser not in USAGE_PARSERS:

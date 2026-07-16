@@ -126,6 +126,12 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
                 profile = get_profile(cfg.name, project)
             except ProfileError as e:
                 raise SystemExit(f"error: {e}") from e
+            # TODO(opencode-http Phase 3): dispatch hookless profiles to the HTTP
+            # adapter instead of erroring — the tmux adapters below cannot drive them.
+            if profile.hookless:
+                raise SystemExit(
+                    f"error: profile '{profile.name}' needs the HTTP adapter (not yet wired)"
+                )
             common = dict(
                 run_dir=run_dir,
                 policy=policy,
@@ -287,6 +293,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
             problems.append(f"{tool} not found on PATH")
 
     for profile in profiles:
+        if profile.hookless:
+            notes.append(
+                f"{profile.name}: hookless (HTTP/SSE transport) — no hook registration needed"
+            )
+            continue
         hook_config = project / profile.hooks.config_path
         hooks_ok = False
         if hook_config.is_file():

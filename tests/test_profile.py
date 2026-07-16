@@ -18,9 +18,18 @@ events = { SessionStart = "SessionStart", Stop = "Stop" }
 """
 
 
+HOOKLESS_PROFILE = """
+name = "mycli-http"
+binary = "mycli"
+
+[hooks]
+dialect = "none"
+"""
+
+
 def test_builtin_profiles_load():
     profiles = load_profiles()
-    assert {"claude", "codex", "gemini"} <= set(profiles)
+    assert {"claude", "codex", "gemini", "opencode-http"} <= set(profiles)
     assert profiles["claude"].usage_parser == "claude-jsonl"
     assert profiles["codex"].hooks.dialect == "codex-hooks-json"
     assert "SessionEnd" not in profiles["codex"].hooks.events  # codex has no such hook
@@ -66,6 +75,19 @@ def test_builtin_profiles_load():
     for name in sorted(set(profiles) - {"claude"}):
         assert "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN" not in profiles[name].env
         assert "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" not in profiles[name].env
+    # opencode-http is hookless (HTTP/SSE transport): no hook dialect surfaces,
+    # skills read from the claude tree, usage comes over HTTP (no transcript parser)
+    opencode = profiles["opencode-http"]
+    assert opencode.hookless is True
+    assert opencode.hooks.dialect == "none"
+    assert opencode.hooks.config_path == ""
+    assert opencode.hooks.events == {}
+    assert opencode.skill_tree == ".claude/skills"
+    assert opencode.usage_parser == "none"
+    assert opencode.binary == "opencode"
+    # every hook-driven built-in stays non-hookless
+    for name in sorted(set(profiles) - {"opencode-http"}):
+        assert profiles[name].hookless is False
 
 
 def test_usage_grace_and_nudges_default_when_unset(tmp_path):
@@ -96,6 +118,21 @@ def test_legacy_alias_resolves():
     assert get_profile("claude-code-tmux").name == "claude"
 
 
+def test_opencode_alias_resolves():
+    assert get_profile("opencode").name == "opencode-http"
+
+
+def test_hookless_user_profile_parses(tmp_path):
+    profiles_dir = tmp_path / ".bmad-loop" / "profiles"
+    profiles_dir.mkdir(parents=True)
+    (profiles_dir / "mycli-http.toml").write_text(HOOKLESS_PROFILE)
+    prof = load_profiles(tmp_path)["mycli-http"]
+    assert prof.hookless is True
+    assert prof.hooks.dialect == "none"
+    assert prof.hooks.config_path == ""
+    assert prof.hooks.events == {}
+
+
 def test_unknown_profile_raises():
     with pytest.raises(ProfileError, match="unknown CLI profile"):
         get_profile("acme-cli")
@@ -107,6 +144,10 @@ def test_render_prompt_passthrough_and_template():
     codex = get_profile("codex")
     assert codex.render_prompt("/bmad-dev-auto 1-1-a") == (
         "Use the $bmad-dev-auto skill now, and use subagents as needed: 1-1-a"
+    )
+    opencode = get_profile("opencode-http")
+    assert opencode.render_prompt("/bmad-dev-auto 1-1-a") == (
+        "Use the bmad-dev-auto skill now: 1-1-a"
     )
     # non-slash prompts pass through {prompt}; {skill}/{args} degrade gracefully
     assert claude.render_prompt("just do it") == "just do it"
@@ -168,6 +209,22 @@ def test_user_profile_overlay(tmp_path):
         (
             MINIMAL_PROFILE.replace("[hooks]", "stop_without_result_nudges = -2\n[hooks]"),
             "stop_without_result_nudges",
+        ),
+        # real dialects still hard-require config_path and events
+        (
+            MINIMAL_PROFILE.replace('config_path = ".mycli/settings.json"', ""),
+            "config_path",
+        ),
+        (
+            MINIMAL_PROFILE.replace(
+                'events = { SessionStart = "SessionStart", Stop = "Stop" }', ""
+            ),
+            "events",
+        ),
+        # hookless must not carry hook plumbing (config_path/events)
+        (
+            MINIMAL_PROFILE.replace('dialect = "claude-settings-json"', 'dialect = "none"'),
+            "hookless",
         ),
     ],
 )

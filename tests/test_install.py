@@ -740,6 +740,53 @@ def test_provision_worktree_seed_shielded_in_local_exclude(project, tmp_path):
     assert "/.mcp.json" in exclude.splitlines()
 
 
+# ----------------------------------------------------------------- hookless profiles
+
+
+def test_install_into_hookless_skips_hook_registration(tmp_path, capsys):
+    """A hookless profile (opencode-http) gets skills but never a hook config —
+    there is nothing to register for an HTTP/SSE-transport adapter."""
+    assert install_into(tmp_path, clis=("opencode-http",)) == 0
+    for skill in MODULE_SKILLS:
+        assert (tmp_path / ".claude" / "skills" / skill / "SKILL.md").is_file()
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+    assert "no hooks needed (opencode-http)" in capsys.readouterr().out
+
+
+def test_install_resolves_opencode_alias(tmp_path):
+    assert install_into(tmp_path, clis=("opencode",)) == 0
+    assert (tmp_path / ".claude" / "skills" / "bmad-loop-sweep" / "SKILL.md").is_file()
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_provision_worktree_hookless_skips_hook_merge(tmp_path):
+    """Worktree provisioning for a hookless profile lays down the skill tree but
+    writes no hook config (and still nothing into the worktree's .bmad-loop/)."""
+    wt, repo = tmp_path / "wt", tmp_path / "repo"
+    opencode = get_profile("opencode-http")
+    provision_worktree(wt, [opencode], repo)
+
+    for skill in MODULE_SKILLS:
+        assert (wt / opencode.skill_tree / skill / "SKILL.md").is_file()
+    assert not (wt / ".claude" / "settings.json").exists()
+    assert not (wt / ".bmad-loop").exists()
+
+
+def test_provision_worktree_hookless_exclude_never_blankets_worktree(project, tmp_path):
+    """A hookless profile has config_path == "", which must not become the git
+    exclude pattern "/" (that would exclude the entire worktree from the unit's
+    `git add -A` commit). Only the skill tree is shielded."""
+    repo = project.project
+    wt = tmp_path / "wt"
+    verify.worktree_add(repo, wt, "feat", "main")
+
+    provision_worktree(wt, [get_profile("opencode-http")], repo)
+
+    lines = (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8").splitlines()
+    assert "/.claude/skills" in lines
+    assert "/" not in lines
+
+
 # ----------------------------------------------------------------- seed_globs (engine plugin)
 
 
