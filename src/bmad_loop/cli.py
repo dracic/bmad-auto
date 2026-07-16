@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -126,26 +127,44 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
                 profile = get_profile(cfg.name, project)
             except ProfileError as e:
                 raise SystemExit(f"error: {e}") from e
-            # TODO(opencode-http Phase 3): dispatch hookless profiles to the HTTP
-            # adapter instead of erroring — the tmux adapters below cannot drive them.
             if profile.hookless:
-                raise SystemExit(
-                    f"error: profile '{profile.name}' needs the HTTP adapter (not yet wired)"
+                # Hookless profiles (opencode-http) are driven over HTTP/SSE —
+                # the tmux adapters below cannot host them.
+                if synthesizes:
+                    # TODO(opencode-http Phase 4): OpencodeDevAdapter composes
+                    # _DevSynthesisMixin over the HTTP adapter for dev/review.
+                    raise SystemExit(
+                        f"error: profile '{profile.name}' cannot drive dev/review yet — "
+                        f"dev/review synthesis lands in Phase 4 of the opencode-http plan"
+                    )
+                from .adapters.opencode_http import OpencodeHttpAdapter, OpencodeServerError
+
+                try:
+                    by_cfg[key] = OpencodeHttpAdapter(
+                        run_dir=run_dir,
+                        policy=policy,
+                        profile=profile,
+                        extra_args=cfg.extra_args,
+                        usage_grace_s=cfg.usage_grace_s,
+                        stop_without_result_nudges=cfg.stop_without_result_nudges,
+                    )
+                except OpencodeServerError as e:
+                    raise SystemExit(f"error: {e}") from e
+            else:
+                common = dict(
+                    run_dir=run_dir,
+                    policy=policy,
+                    profile=profile,
+                    extra_args=cfg.extra_args,
+                    usage_grace_s=cfg.usage_grace_s,
+                    stop_without_result_nudges=cfg.stop_without_result_nudges,
+                    mux=mux,
                 )
-            common = dict(
-                run_dir=run_dir,
-                policy=policy,
-                profile=profile,
-                extra_args=cfg.extra_args,
-                usage_grace_s=cfg.usage_grace_s,
-                stop_without_result_nudges=cfg.stop_without_result_nudges,
-                mux=mux,
-            )
-            by_cfg[key] = (
-                GenericDevAdapter(**common, paths=paths)
-                if synthesizes
-                else GenericAdapter(**common)
-            )
+                by_cfg[key] = (
+                    GenericDevAdapter(**common, paths=paths)
+                    if synthesizes
+                    else GenericAdapter(**common)
+                )
         adapters[role] = by_cfg[key]
     return adapters
 
@@ -297,6 +316,15 @@ def cmd_validate(args: argparse.Namespace) -> int:
             notes.append(
                 f"{profile.name}: hookless (HTTP/SSE transport) — no hook registration needed"
             )
+            # The HTTP adapter needs httpx, which ships as an optional extra —
+            # surface a missing install here instead of at run start.
+            if importlib.util.find_spec("httpx") is not None:
+                notes.append(f"httpx available for {profile.name}")
+            else:
+                problems.append(
+                    f"{profile.name}: httpx not installed — "
+                    f"run `pip install 'bmad-loop[opencode]'`"
+                )
             continue
         hook_config = project / profile.hooks.config_path
         hooks_ok = False

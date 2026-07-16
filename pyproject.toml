@@ -26,6 +26,9 @@ tui = ["textual>=8.0,<9", "tomlkit>=0.13", "pyte>=0.8.2"]
 # macOS opt-in for psutil (identity/force-kill niceties); win32 gets it as a core
 # dep above, Linux stays dep-free. `pip install bmad-loop[non-linux]` on macOS.
 non-linux = ["psutil>=7.2.2"]
+# HTTP client for the opencode-http adapter (drives `opencode serve` over
+# HTTP/SSE). `pip install 'bmad-loop[opencode]'`.
+opencode = ["httpx>=0.28"]
 
 [dependency-groups]
 # dev gets tui via `uv sync --all-extras` (groups can't self-reference an extra).
@@ -35,6 +38,8 @@ dev = [
   "pytest-asyncio>=1.0",
   "pytest-rerunfailures>=16.0",
   "pytest-xdist>=3.6",
+  # the opencode-http adapter tests exercise the real httpx client
+  "httpx>=0.28",
 ]
 
 [tool.hatch.build.targets.wheel]
