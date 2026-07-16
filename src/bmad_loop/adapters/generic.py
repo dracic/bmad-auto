@@ -61,7 +61,91 @@ STALL_NUDGE_TEXT = (
 )
 
 
-class GenericAdapter(CodingCLIAdapter):
+class _ResultFileMixin:
+    """Result-file read-back and verdict finalization: acquire the
+    skill-written result dict and fold it into the session's final
+    ``SessionResult``. Transport-agnostic — shared by the tmux adapters and
+    any adapter whose skill writes ``tasks/<task_id>/result.json``; needs
+    only ``self.tasks_dir``."""
+
+    def _result_json(self, handle: SessionHandle, spec: SessionSpec, *, wait: bool) -> dict | None:
+        """Acquire this session's result dict. Base behavior: read the
+        skill-written ``result.json`` (briefly awaiting it on the Stop event,
+        reading once otherwise). Subclasses whose skill writes no result.json
+        (GenericDevAdapter) override this to synthesize the dict from another
+        on-disk artifact."""
+        return self._await_result(handle.task_id) if wait else self._read_result(handle.task_id)
+
+    def _final(
+        self,
+        handle: SessionHandle,
+        spec: SessionSpec,
+        fallback: str,
+        session_id: str | None,
+        transcript: str | None,
+        *,
+        accept_result: bool = True,
+    ) -> SessionResult:
+        """Session is gone or done responding: completed if the result file
+        landed anyway, otherwise the fallback status. ``accept_result=False``
+        (a stall verdict reached under a live window) pins the fallback: an
+        artifact that appeared without a Stop or window death is not trusted."""
+        result_json = self._result_json(handle, spec, wait=False) if accept_result else None
+        status = "completed" if result_json is not None else fallback
+        return SessionResult(
+            status=status,
+            result_json=result_json,
+            session_id=session_id,
+            transcript_path=transcript,
+        )
+
+    def _result_path(self, task_id: str) -> Path:
+        return self.tasks_dir / task_id / "result.json"
+
+    def _note_resultless_stop(self, task_id: str, verdict: str, detail: str = "") -> None:
+        """Append a diagnostic breadcrumb when a Stop's artifact read-back gives
+        up empty: one JSON line ({ts, verdict, detail}) in
+        ``tasks/<task_id>/resultless-stops.jsonl``. Pure observability — the
+        #149 nudge livelock was undiagnosable because nothing recorded *why*
+        each Stop read as result-less. Best-effort: an unwritable run dir must
+        never break the completion loop."""
+        try:
+            path = self.tasks_dir / task_id / "resultless-stops.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(
+                {"ts": time.time_ns(), "verdict": verdict, "detail": detail},
+                ensure_ascii=False,
+            )
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
+
+    def _read_result(self, task_id: str) -> dict | None:
+        path = self._result_path(task_id)
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _await_result(self, task_id: str, grace_s: float = RESULT_GRACE_S) -> dict | None:
+        deadline = time.monotonic() + grace_s
+        while True:
+            result = self._read_result(task_id)
+            if result is not None:
+                return result
+            if time.monotonic() >= deadline:
+                self._note_resultless_stop(
+                    task_id, "no-result-json", f"no readable {self._result_path(task_id)}"
+                )
+                return None
+            time.sleep(RESULT_POLL_S)
+
+
+class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
     injection = "tmux-initial-prompt"
     observation = "hook-signal"
     state = "local-jsonl"
@@ -348,82 +432,6 @@ class GenericAdapter(CodingCLIAdapter):
             return None
         return (st.st_mtime_ns, st.st_size)
 
-    def _result_json(self, handle: SessionHandle, spec: SessionSpec, *, wait: bool) -> dict | None:
-        """Acquire this session's result dict. Base behavior: read the
-        skill-written ``result.json`` (briefly awaiting it on the Stop event,
-        reading once otherwise). Subclasses whose skill writes no result.json
-        (GenericDevAdapter) override this to synthesize the dict from another
-        on-disk artifact."""
-        return self._await_result(handle.task_id) if wait else self._read_result(handle.task_id)
-
-    def _final(
-        self,
-        handle: SessionHandle,
-        spec: SessionSpec,
-        fallback: str,
-        session_id: str | None,
-        transcript: str | None,
-        *,
-        accept_result: bool = True,
-    ) -> SessionResult:
-        """Session is gone or done responding: completed if the result file
-        landed anyway, otherwise the fallback status. ``accept_result=False``
-        (a stall verdict reached under a live window) pins the fallback: an
-        artifact that appeared without a Stop or window death is not trusted."""
-        result_json = self._result_json(handle, spec, wait=False) if accept_result else None
-        status = "completed" if result_json is not None else fallback
-        return SessionResult(
-            status=status,
-            result_json=result_json,
-            session_id=session_id,
-            transcript_path=transcript,
-        )
-
-    def _result_path(self, task_id: str) -> Path:
-        return self.tasks_dir / task_id / "result.json"
-
-    def _note_resultless_stop(self, task_id: str, verdict: str, detail: str = "") -> None:
-        """Append a diagnostic breadcrumb when a Stop's artifact read-back gives
-        up empty: one JSON line ({ts, verdict, detail}) in
-        ``tasks/<task_id>/resultless-stops.jsonl``. Pure observability — the
-        #149 nudge livelock was undiagnosable because nothing recorded *why*
-        each Stop read as result-less. Best-effort: an unwritable run dir must
-        never break the completion loop."""
-        try:
-            path = self.tasks_dir / task_id / "resultless-stops.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            line = json.dumps(
-                {"ts": time.time_ns(), "verdict": verdict, "detail": detail},
-                ensure_ascii=False,
-            )
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
-        except OSError:
-            pass
-
-    def _read_result(self, task_id: str) -> dict | None:
-        path = self._result_path(task_id)
-        if not path.is_file():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return None
-        return data if isinstance(data, dict) else None
-
-    def _await_result(self, task_id: str, grace_s: float = RESULT_GRACE_S) -> dict | None:
-        deadline = time.monotonic() + grace_s
-        while True:
-            result = self._read_result(task_id)
-            if result is not None:
-                return result
-            if time.monotonic() >= deadline:
-                self._note_resultless_stop(
-                    task_id, "no-result-json", f"no readable {self._result_path(task_id)}"
-                )
-                return None
-            time.sleep(RESULT_POLL_S)
-
     def _window_alive(self, handle: SessionHandle) -> bool:
         return handle.native_id in self.mux.list_window_ids(self.session_name)
 
@@ -449,21 +457,17 @@ class GenericAdapter(CodingCLIAdapter):
             time.sleep(RESULT_POLL_S)
 
 
-class GenericDevAdapter(GenericAdapter):
-    """Dev adapter for Alex Verhovsky's generic ``bmad-dev-auto`` skill.
+class _DevSynthesisMixin(_ResultFileMixin):
+    """Result synthesis for the generic ``bmad-dev-auto`` skill, shared by
+    every transport that drives it (tmux today; see GenericDevAdapter for the
+    skill contract). Locates the terminal spec the skill leaves on disk and
+    synthesizes the legacy result dict via :mod:`devcontract`. Hosts provide
+    ``self.paths`` (a :class:`ProjectPaths`), the ``self.policy`` knobs read
+    by ``_configure_dev_knobs``, and the ``_probe_alive`` liveness seam."""
 
-    That skill writes NO ``result.json`` — its outcome lives in the spec it
-    leaves on disk (frontmatter ``status:`` plus an appended ``## Auto Run
-    Result``, or, when it never created a spec, a ``bmad-dev-auto-result-*.md``
-    fallback). On the Stop event we locate that artifact and synthesize the
-    legacy result dict from it via :mod:`devcontract`, so verify/escalation and
-    the rest of the pipeline consume it unchanged. Selected by
-    ``policy.dev.skill == "bmad-dev-auto"`` (see ``cli._make_adapters``).
-    """
-
-    def __init__(self, *args, paths: ProjectPaths, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.paths = paths
+    def _configure_dev_knobs(self) -> None:
+        """Override the base result-file knobs for the bmad-dev-auto contract;
+        hosts call this at the end of ``__init__``."""
         # The generic skill never writes result.json, so the base "write the
         # result JSON file" nudge is meaningless — and actively misleading — for
         # it. A Stop without a terminal spec is a stall *unless* the session
@@ -472,6 +476,13 @@ class GenericDevAdapter(GenericAdapter):
         self._stop_nudges = 0
         self._stall_grace_s = float(self.policy.limits.dev_stall_grace_s)
         self._stall_nudges = int(self.policy.limits.dev_stall_nudges)
+
+    def _probe_alive(self, handle: SessionHandle) -> bool | None:
+        """Liveness of the session's native surface (tmux window, server
+        process) for ``_post_kill_reconcile``: True = alive, False = provably
+        dead, None = liveness unknown (a transport hiccup — unknown is not
+        dead, so the caller keeps its verdict)."""
+        raise NotImplementedError
 
     def _artifact_dirs(self, cwd: Path) -> list[Path]:
         # In worktree isolation the skill runs with cwd set to the worktree and
@@ -645,12 +656,12 @@ class GenericDevAdapter(GenericAdapter):
         kill is rescued by the same trust model."""
         if result.status not in ("stalled", "timeout") or result.result_json is not None:
             return result
-        try:
-            if self._window_alive(handle):
-                # The kill silently failed (best-effort teardown): the window
-                # is still alive, so the live-window invariant still applies.
-                return result
-        except MultiplexerError:
+        alive = self._probe_alive(handle)
+        if alive:
+            # The kill silently failed (best-effort teardown): the window
+            # is still alive, so the live-window invariant still applies.
+            return result
+        if alive is None:
             return result  # liveness unknowable: unknown is not dead
         try:
             sr = self._synth_result(handle, spec, wait=False)
@@ -678,6 +689,30 @@ class GenericDevAdapter(GenericAdapter):
             session_id=result.session_id,
             transcript_path=result.transcript_path,
         )
+
+
+class GenericDevAdapter(_DevSynthesisMixin, GenericAdapter):
+    """Dev adapter for Alex Verhovsky's generic ``bmad-dev-auto`` skill.
+
+    That skill writes NO ``result.json`` — its outcome lives in the spec it
+    leaves on disk (frontmatter ``status:`` plus an appended ``## Auto Run
+    Result``, or, when it never created a spec, a ``bmad-dev-auto-result-*.md``
+    fallback). On the Stop event we locate that artifact and synthesize the
+    legacy result dict from it via :mod:`devcontract`, so verify/escalation and
+    the rest of the pipeline consume it unchanged. Selected by
+    ``policy.dev.skill == "bmad-dev-auto"`` (see ``cli._make_adapters``).
+    """
+
+    def __init__(self, *args, paths: ProjectPaths, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.paths = paths
+        self._configure_dev_knobs()
+
+    def _probe_alive(self, handle: SessionHandle) -> bool | None:
+        try:
+            return self._window_alive(handle)
+        except MultiplexerError:
+            return None
 
 
 # Back-compat alias: the adapter was ``GenericTmuxAdapter`` before tmux moved
