@@ -166,6 +166,19 @@ def same_commit(a: str, b: str) -> bool:
     return a.startswith(b) or b.startswith(a)
 
 
+def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    """True when `ancestor` is an ancestor of (or equal to) `descendant`.
+
+    Any git failure — unknown ref, shallow history, not a repo — reads as
+    False: callers use this to *relax* a gate, so uncertainty must keep the
+    gate strict."""
+    try:
+        code, _ = _git(repo, "merge-base", "--is-ancestor", ancestor, descendant)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return code == 0
+
+
 def has_changes_since(
     repo: Path,
     baseline: str,
@@ -1153,6 +1166,7 @@ def _verify_shared_gates(
     *,
     expected_status: str,
     extra_exclude: tuple[str, ...] | None,
+    allow_ancestor_baseline: bool = False,
 ) -> VerifyOutcome | None:
     """The workflow-tag, expected-status, baseline-match, and proof-of-work gates
     shared verbatim by :func:`verify_dev`, :func:`verify_dev_bundle`, and
@@ -1193,10 +1207,22 @@ def _verify_shared_gates(
     claimed_baseline = str(fm.get("baseline_commit", fm.get("baseline_revision", ""))).strip()
     if task.baseline_commit and claimed_baseline not in ("", "NO_VCS"):
         if not same_commit(claimed_baseline, task.baseline_commit):
-            return VerifyOutcome.retry(
-                f"spec baseline {claimed_baseline[:12]} does not match "
-                f"orchestrator-recorded baseline {task.baseline_commit[:12]}"
-            )
+            # A deferred-work bundle may legitimately adopt a pre-existing story
+            # spec: bmad-dev-auto routes a "follow-up review of story X" bundle
+            # into that story's done spec, whose baseline_revision is the
+            # story's original dev baseline — necessarily older than the unit
+            # worktree cut for the bundle (#161). An *ancestor* baseline means
+            # the session diffed from an earlier commit on the unit's own
+            # history (a superset of the unit's changes), which is sound; a
+            # diverged or unknown baseline still fails.
+            if not (
+                allow_ancestor_baseline
+                and is_ancestor(paths.project, claimed_baseline, task.baseline_commit)
+            ):
+                return VerifyOutcome.retry(
+                    f"spec baseline {claimed_baseline[:12]} does not match "
+                    f"orchestrator-recorded baseline {task.baseline_commit[:12]}"
+                )
 
     if extra_exclude is not None and task.baseline_commit:
         exclude = verify_dev_exclude_relpaths(paths, spec_path, task.restore_patch) + extra_exclude
@@ -1282,6 +1308,8 @@ def verify_dev_bundle(
         return VerifyOutcome.retry(f"claimed spec file does not exist: {spec_path}")
 
     # With review disabled, the dev session finalizes the bundle straight to done.
+    # allow_ancestor_baseline: a bundle that adopts a pre-existing story spec
+    # (follow-up review) carries that spec's older-but-ancestral baseline (#161).
     gate = _verify_shared_gates(
         spec_path,
         rj,
@@ -1289,6 +1317,7 @@ def verify_dev_bundle(
         paths,
         expected_status="in-review" if review_enabled else "done",
         extra_exclude=(),
+        allow_ancestor_baseline=True,
     )
     if gate is not None:
         return gate

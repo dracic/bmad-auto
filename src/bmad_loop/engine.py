@@ -872,7 +872,16 @@ class Engine:
         if task.baseline_commit and not dirty:
             self.journal.append("rollback-skipped-clean", story_key=task.story_key)
             return
-        if resolved or self.policy.scm.rollback_on_failure:
+        # A mounted unit worktree is disposable by design: its branch never
+        # touches the operator's checkout and the attempt's work is parked on
+        # recovery refs before any reset. `scm.rollback_on_failure` gates
+        # *in-place* (isolation="none") recovery only — pausing here would emit
+        # main-checkout reset instructions for a tree the operator never works
+        # in (#161). Compared by path, not by policy: a worktree-mode call that
+        # reaches this method *outside* a mounted unit (e.g. resume with no
+        # worktree recorded) still targets the main checkout and must pause.
+        in_unit_worktree = self.workspace.root != self.paths.repo_root
+        if resolved or in_unit_worktree or self.policy.scm.rollback_on_failure:
             self.journal.append(
                 "rollback-auto",
                 story_key=task.story_key,
@@ -1096,11 +1105,18 @@ class Engine:
         escalation never reaches here — `_rollback_or_pause` auto-recovers that
         human-initiated re-drive regardless of `scm.rollback_on_failure`."""
         short = baseline[:12] or "<baseline_commit>"
+        # Name the tree every instruction targets. Usually the main checkout,
+        # but a preserve-failure pause can fire while a unit worktree is
+        # mounted — a bare "current HEAD" / `git reset --hard` there reads as
+        # the operator's own checkout (whose HEAD is typically *at* the
+        # baseline, making the quoted commit range empty) and invites a
+        # destructive reset of a tree the attempt never touched (#161).
+        root = self.workspace.root
         commits: list[str] = []
         if baseline:
             # advisory probe: a git fault here must not block the pause itself
             try:
-                commits = verify.commits_above(self.workspace.root, baseline)
+                commits = verify.commits_above(root, baseline)
             except verify.GitError:
                 commits = []
         if preserve_failed:
@@ -1110,12 +1126,12 @@ class Engine:
                 "baseline, but a recovery ref for those commits could not be created, "
                 "so the automatic rollback was refused rather than `reset --hard` "
                 "past (and discard) them. **Your commits are intact at the current "
-                "HEAD.**\n"
-                "  1. **Save them first** — e.g. `git branch my-rescue HEAD` (the "
-                f"commits are `{short}..HEAD`).\n"
+                f"HEAD of `{root}`.**\n"
+                f"  1. **Save them first** — e.g. `git -C {root} branch my-rescue "
+                f"HEAD` (the commits are `{short}..HEAD` there).\n"
                 "  2. Only once they are safe, discard the attempt if you want to: "
-                f"`git reset --hard {short}`, then review/remove leftover untracked "
-                "files.\n"
+                f"`git -C {root} reset --hard {short}`, then review/remove leftover "
+                "untracked files.\n"
                 f"Then run `bmad-loop resume {self.state.run_id}`."
             )
         elif commits:
@@ -1123,22 +1139,22 @@ class Engine:
                 "**ACTION REQUIRED — manual recovery needed (committed work present)**\n"
                 f"Story **{task.story_key}**'s attempt was stopped with auto-rollback "
                 "OFF, and it **committed work above its baseline**. **Your commits "
-                "are intact at the current HEAD.** They may already be integrated "
-                "or pushed to a remote — do NOT reset before checking.\n"
-                f"  1. **Save them first** — e.g. `git branch my-rescue HEAD` (the "
-                f"commits are `{short}..HEAD`).\n"
+                f"are intact at the current HEAD of `{root}`.** They may already be "
+                "integrated or pushed to a remote — do NOT reset before checking.\n"
+                f"  1. **Save them first** — e.g. `git -C {root} branch my-rescue "
+                f"HEAD` (the commits are `{short}..HEAD` there).\n"
                 "  2. Check whether they are already integrated (merged, pushed to "
                 "a remote, referenced by open PRs) before discarding anything.\n"
                 "  3. Only if you decide to discard the attempt: "
-                f"`git reset --hard {short}`, then review/remove leftover untracked "
-                "files.\n"
+                f"`git -C {root} reset --hard {short}`, then review/remove leftover "
+                "untracked files.\n"
                 f"Then run `bmad-loop resume {self.state.run_id}`."
             )
         else:
             why = (
                 f"Story **{task.story_key}**'s attempt was stopped and auto-rollback "
-                "is OFF, so the working tree was left exactly as-is for you to "
-                "inspect.\n"
+                f"is OFF, so the working tree at `{root}` was left exactly as-is "
+                "for you to inspect.\n"
             )
             notice = (
                 "**ACTION REQUIRED — manual rollback needed**\n"
@@ -1146,8 +1162,8 @@ class Engine:
                 "To discard this attempt yourself:\n"
                 "  1. **BACK UP any untracked files you want to keep** — the reset "
                 "below deletes uncommitted work.\n"
-                f"  2. `git reset --hard {short}` then review/remove leftover "
-                "untracked files.\n"
+                f"  2. `git -C {root} reset --hard {short}` then review/remove "
+                "leftover untracked files.\n"
                 "  3. **Restore the files you backed up in step 1.**\n"
                 f"Then run `bmad-loop resume {self.state.run_id}`. To let the "
                 "orchestrator do a safe automatic rollback next time, enable "

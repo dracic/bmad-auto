@@ -428,6 +428,55 @@ def test_verify_dev_bundle_absent_dw_ids_passes(project, claim):
     assert task.spec_file == str(sp)
 
 
+def test_verify_dev_bundle_ancestor_baseline_passes(project):
+    """#161: a bundle that adopts a pre-existing story spec (bmad-dev-auto
+    routes a "follow-up review of story X" bundle into that story's done spec)
+    carries the story's original baseline — an *ancestor* of the unit baseline,
+    never equal to it. The bundle gate accepts the ancestor instead of failing
+    the whole attempt after the work is done."""
+    ancestor = verify.rev_parse_head(project.project)
+    (project.project / "story-work.txt").write_text("stories 1.1-1.3\n")
+    git(project.project, "add", "-A")
+    git(project.project, "commit", "-q", "-m", "story work")
+    task = make_bundle_task(project, dw_ids=("DW-1",))  # baseline = new HEAD
+    sp = project.implementation_artifacts / "spec-1-1-a.md"
+    write_spec(sp, "in-review", ancestor)  # adopted spec: the older baseline
+    (project.project / "src.txt").write_text("review fixes\n")
+    rj = {"workflow": "auto-dev", "spec_file": str(sp), "dw_ids": ["DW-1"]}
+    out = verify.verify_dev_bundle(task, project, rj)
+    assert out.ok
+    assert task.spec_file == str(sp)
+
+
+def test_verify_dev_bundle_foreign_baseline_still_fails(project):
+    """The bundle relaxation is ancestor-only: a baseline unknown to (or
+    diverged from) the unit's history still fails the gate."""
+    task = make_bundle_task(project, dw_ids=("DW-1",))
+    sp = project.implementation_artifacts / "spec-dw-test-bundle.md"
+    write_spec(sp, "in-review", "0" * 40)
+    (project.project / "src.txt").write_text("changed\n")
+    rj = {"workflow": "auto-dev", "spec_file": str(sp), "dw_ids": ["DW-1"]}
+    out = verify.verify_dev_bundle(task, project, rj)
+    assert not out.ok and "baseline" in out.reason
+
+
+def test_verify_dev_sprint_ancestor_baseline_still_fails(project):
+    """The ancestor relaxation is bundle-only: a sprint-mode dev spec is
+    authored by this session, so its baseline must match the orchestrator's
+    exactly — an older ancestor means the session planned from a stale tree."""
+    ancestor = verify.rev_parse_head(project.project)
+    (project.project / "story-work.txt").write_text("advance\n")
+    git(project.project, "add", "-A")
+    git(project.project, "commit", "-q", "-m", "advance")
+    write_sprint(project, {"1-1-a": "review"})
+    task = make_task(project)  # baseline = new HEAD
+    sp = spec_path(project, "1-1-a")
+    write_spec(sp, "in-review", ancestor)
+    (project.project / "src.txt").write_text("changed\n")
+    out = verify.verify_dev(task, project, dev_result(sp))
+    assert not out.ok and "baseline" in out.reason
+
+
 def test_verify_dev_bundle_ledger_only_counts_as_real_work(project):
     """Same false-negative as verify_dev (KNOWN-BUG-ledger-only-story-false-no-
     changes.md), on the bundle path: a dw-bundle's entire authorized diff is
