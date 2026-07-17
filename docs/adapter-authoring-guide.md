@@ -260,6 +260,23 @@ human call — a `token_count`-style event that carries running totals (codex) i
 read differently from per-message blocks that are summed (claude/gemini). Re-run
 scan after wiring the parser: the **parsed counts** self-check should now appear.
 
+**`none` is a legitimate final answer, not only a placeholder.** If the report
+comes back with no `token_field_candidates`, the CLI may simply not expose usage
+anywhere a parser can reach — `antigravity` is the worked example: it counts
+tokens (its TUI displays them) but writes them only into an internal SQLite
+protobuf blob, never into the transcript. Leave `usage_parser = "none"`, and
+record _why_ in the profile so nobody re-litigates it. Do not reach outside the
+`(transcript_path) -> TokenUsage | None` contract to scrape a vendor's internal
+store: it is undocumented, unversioned, and will break.
+
+**Trust the payload over the docs.** A CLI that reports its own transcript path
+in the hook payload is telling you the truth; a path in its documentation may be
+illustrative. agy's `hooks.md` shows a workspace-relative
+`<workspace>/.gemini/antigravity/transcript.jsonl`, but the live payload's
+`transcriptPath` is home-rooted under `brain/<conversationId>/` — and named
+`transcript_full.jsonl`. `--probe` prefers the captured path for exactly this
+reason; the convention glob is the fallback.
+
 ---
 
 ## Flags reference
