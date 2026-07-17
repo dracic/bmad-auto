@@ -9,6 +9,18 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **OpenCode adapter (`opencode-http` profile, alias `opencode`).** Drives
+  [OpenCode](https://opencode.ai) ≥ 1.18 entirely over HTTP/SSE — one headless
+  `opencode serve` per session (no tmux window), SSE `session.idle` as the completion
+  signal with an HTTP poll fallback, per-session server password, hermetic skills, and
+  token usage read back over the API. Full dev/review synthesis parity via the new
+  `_ResultFileMixin`/`_DevSynthesisMixin` seams in `generic.py`; profiles gained a
+  hookless `[hooks] dialect = "none"` mode (no hook registration anywhere). Install the
+  HTTP client with `pip install 'bmad-loop[opencode]'`; set `model` as `provider/model`.
+  The pinned 1.18.2 API contract lives in `docs/notes/opencode-api-pins.md`, guarded by
+  a zero-token real-binary smoke test (`tests/test_opencode_live.py`, skipped when the
+  binary is absent).
+
 - **Out-of-tree multiplexer backends (`bmad_loop.mux_backends` entry points).** A backend
   package installed next to bmad-loop (e.g. `uv tool install bmad-loop --with <adapter>`) now
   registers itself with no config step: before every selection, core imports each module

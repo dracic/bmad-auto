@@ -217,6 +217,18 @@ def test_cli_unknown_cli_with_binary_reduced_report(tmp_path, capsys):
     assert "reduced report" in out or "no (reduced report)" in out
 
 
+def test_cli_hookless_profile_politely_refused(tmp_path, capsys):
+    """opencode-http (resolved via its `opencode` alias) is HTTP/SSE-driven —
+    there is no transcript or hook surface to finalize, so probe-adapter
+    explains itself instead of producing a meaningless report."""
+    rc = cli.main(["probe-adapter", "opencode", "--project", str(tmp_path)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "hookless" in err
+    assert "opencode-api-pins" in err
+    assert "FAIL" not in err  # a polite refusal, not an error dump
+
+
 def test_cli_out_writes_file(tmp_path):
     path = _write_jsonl(tmp_path / "t.jsonl", CLAUDE_ROWS)
     out_file = tmp_path / "report.md"

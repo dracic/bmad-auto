@@ -437,11 +437,63 @@ Optional capabilities (default to "unsupported" / no-op):
 - `read_usage(result) -> TokenUsage | None` — parse token usage from the result
   (returns `None` by default).
 
+### Worked example: the opencode adapter
+
+[`adapters/opencode_http.py`](../src/bmad_loop/adapters/opencode_http.py) is the
+shipped non-tmux adapter: it drives [OpenCode](https://opencode.ai) entirely over
+`opencode serve`'s HTTP API + SSE event stream (`injection = "http"`,
+`observation = "sse"`, `state = "remote"`). Every API fact it relies on is pinned
+against a real binary in
+[`docs/notes/opencode-api-pins.md`](notes/opencode-api-pins.md) — start there
+when the upstream API drifts. The design decisions worth stealing:
+
+- **One server per session.** The API has no per-session env, but the engine's
+  `BMAD_LOOP_*` contract must reach tool subprocesses — so each session gets its
+  own `opencode serve` spawned with `cwd = spec.cwd` and `env ⊇ spec.env`.
+  Permissions, the model, and a hermetic skills path are injected via the
+  `OPENCODE_CONFIG_CONTENT` env var (zero worktree pollution), and each server
+  gets its own `OPENCODE_SERVER_PASSWORD` so a foreign process on a recycled
+  port can never impersonate it.
+- **Map the transport onto the hook-signal semantics** instead of inventing new
+  ones: the SSE `session.idle` event ≙ the Stop hook, server-process death ≙
+  window death (`crashed`, landed artifact honored), and a poll fallback
+  (`GET /session/status` + message `time.completed` proof-of-work) covers SSE
+  loss. Completion evidence is gated by a forward-advancing floor so an idle
+  event without proof of new work never completes a session — the same
+  artifact-distrust invariant the tmux adapters enforce.
+- **Hookless profile.** The profile sets `[hooks] dialect = "none"`: no hook
+  registration, no hook-config merge into worktrees; `init`, `validate` and
+  worktree provisioning all understand `profile.hookless`. Skills still install
+  and copy normally — opencode discovers `.claude/skills/<name>/SKILL.md`
+  natively.
+- **Reuse the synthesis mixins, never fork them.** `_ResultFileMixin`
+  (`result.json` read-back) and `_DevSynthesisMixin` (the whole bmad-dev-auto
+  dev/review synthesis machinery) live in
+  [`adapters/generic.py`](../src/bmad_loop/adapters/generic.py).
+  `OpencodeDevAdapter(_DevSynthesisMixin, OpencodeHttpAdapter)` plugs into two
+  seams: `_probe_alive(handle) -> bool | None` (post-kill liveness; `None` =
+  unknown ⇒ the verdict stands) and `_configure_dev_knobs()` (stall-nudge
+  budgets). A new adapter class that should run dev/review sessions composes
+  the same way.
+- **Usage before teardown, kill in `finally`.** Token usage only exists inside
+  the server (`state = "remote"`), so it is captured over HTTP before every
+  return path; `kill()` is idempotent, sweeps via `atexit`, and force-kills the
+  process tree first on Windows (the npm shim is a `.cmd` wrapper — a polite
+  kill orphans the real server).
+
+The test story mirrors the transport split:
+[`tests/test_opencode_http.py`](../tests/test_opencode_http.py) runs the full
+adapter against a scripted stdlib FakeOpencode (no binary, no network beyond
+127.0.0.1), and [`tests/test_opencode_live.py`](../tests/test_opencode_live.py)
+smoke-checks the pinned HTTP contract against a real local binary — skipped
+when absent, zero tokens spent.
+
 ### References
 
 - [`adapters/opencode_http.py`](../src/bmad_loop/adapters/opencode_http.py) — the
-  worked **design stub** for a non-tmux (HTTP/SSE) transport.
+  worked example above: a real non-tmux (HTTP/SSE) transport.
 - [`adapters/mock.py`](../src/bmad_loop/adapters/mock.py) — the test-only reference
   implementation.
 - [`adapters/generic.py`](../src/bmad_loop/adapters/generic.py) — the tmux +
-  hook-signal adapter to reuse with a profile rather than subclass.
+  hook-signal adapter to reuse with a profile rather than subclass; also home of
+  the `_ResultFileMixin` / `_DevSynthesisMixin` seams.

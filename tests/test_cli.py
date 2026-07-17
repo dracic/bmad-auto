@@ -1886,6 +1886,61 @@ def test_validate_hookless_profile_flags_missing_httpx(project, capsys, monkeypa
     assert "bmad-loop[opencode]" in text
 
 
+OPENCODE_QUALIFIED_POLICY = '[adapter]\nname = "opencode"\nmodel = "anthropic/claude-haiku-4-5"\n'
+
+
+def test_dry_run_renders_hookless_http_line(project, capsys):
+    """A hookless adapter has no shell invocation — dry-run renders the honest
+    HTTP sequence (server spawn → session → prompt_async) instead of a fake
+    argv that run would never execute."""
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    _write_policy(project.project, OPENCODE_QUALIFIED_POLICY)
+    pol = policy_mod.load(project.project / ".bmad-loop" / "policy.toml")
+    args = argparse.Namespace(epic=None, story=None, max_stories=None)
+
+    assert cli._dry_run(project, pol, args) == 0
+    out = capsys.readouterr().out
+    dev_line = next(line for line in out.splitlines() if "dev:" in line)
+    assert "opencode serve --hostname 127.0.0.1 --port <auto>" in dev_line
+    assert "POST /session" in dev_line and "prompt_async" in dev_line
+    # the profile's codex-style template is rendered into the prompt_async body
+    assert "Use the bmad-dev-auto skill now:" in dev_line
+    assert "model=anthropic/claude-haiku-4-5" in dev_line
+
+
+def test_validate_warns_on_bare_opencode_model(project, capsys):
+    """opencode model ids are 'provider/model'; a bare name silently falls back
+    to the server's default model — validate surfaces an advisory warning (a
+    note, not a FAIL)."""
+    install_bmad_config(project)
+    _write_policy(project.project, '[adapter]\nname = "opencode"\nmodel = "haiku"\n')
+    args = argparse.Namespace(project=str(project.project), spec=None)
+
+    cli.cmd_validate(args)
+    text = _validate_output(capsys)
+    assert "warning: dev model 'haiku' is not 'provider/model'" in text
+
+
+def test_validate_model_warning_spares_qualified_model(project, capsys):
+    install_bmad_config(project)
+    _write_policy(project.project, OPENCODE_QUALIFIED_POLICY)
+    args = argparse.Namespace(project=str(project.project), spec=None)
+
+    cli.cmd_validate(args)
+    assert "is not 'provider/model'" not in _validate_output(capsys)
+
+
+def test_validate_model_warning_ignores_tmux_profiles(project, capsys):
+    """Bare model names are the norm for tmux CLIs (claude 'opus', codex
+    'gpt-5-codex') — the provider/model advisory is hookless-only."""
+    install_bmad_config(project)
+    _write_policy(project.project)  # DUAL_CLIENT_POLICY: bare models, tmux profiles
+    args = argparse.Namespace(project=str(project.project), spec=None)
+
+    cli.cmd_validate(args)
+    assert "is not 'provider/model'" not in _validate_output(capsys)
+
+
 def test_validate_stories_mode_skips_sprint_gate(project, capsys):
     """Item 8: a stories-mode project (no sprint-status.yaml) validates its
     stories.yaml manifest instead of failing on the missing sprint gate."""

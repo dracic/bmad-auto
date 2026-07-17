@@ -260,6 +260,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     from .adapters.profile import ProfileError, get_profile
 
     profiles = []
+    profile_by_name: dict[str, object] = {}
     pol = None
     try:
         pol = policy_mod.load(_policy_path(project))
@@ -271,7 +272,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
         )
         for name in dict.fromkeys(role_names.values()):
             try:
-                profiles.append(get_profile(name, project))
+                profile = get_profile(name, project)
+                profiles.append(profile)
+                profile_by_name[name] = profile
             except ProfileError as e:
                 problems.append(str(e))
     except policy_mod.PolicyError as e:
@@ -346,6 +349,19 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 f"bmad-loop hooks not registered for {profile.name} — "
                 f"run `bmad-loop init --cli {profile.name}`"
             )
+
+    # opencode model ids are "provider/model" (docs/notes/opencode-api-pins.md §9);
+    # a bare model name silently falls back to the server's default model, so warn
+    # (advisory — a note, not a FAIL: an empty model legitimately means "default").
+    if pol is not None:
+        for role in ROLES:
+            cfg = pol.adapter.resolved(role)
+            prof = profile_by_name.get(cfg.name)
+            if prof is not None and prof.hookless and cfg.model and "/" not in cfg.model:
+                notes.append(
+                    f"  warning: {role} model {cfg.model!r} is not 'provider/model' — "
+                    f"{prof.name} expects e.g. 'anthropic/claude-haiku-4-5'"
+                )
 
     base_problems = install.missing_base_skills(project, [p.skill_tree for p in profiles])
     if profiles and not base_problems:
@@ -687,6 +703,16 @@ def _render_invocation(pol, project: Path, role: str, prompt: str) -> str:
 
     cfg = pol.adapter.resolved(role)
     profile = get_profile(cfg.name, project)
+    if profile.hookless:
+        # HTTP/SSE transport — there is no shell invocation to print. Render
+        # the real sequence (per-session server spawn + API prompt) instead of
+        # a fake argv that run would never execute.
+        model = f" model={cfg.model}" if cfg.model else ""
+        return (
+            f"{profile.binary} serve --hostname 127.0.0.1 --port <auto> "
+            f'(cwd=<worktree>) → POST /session → prompt_async "{profile.render_prompt(prompt)}"'
+            f"{model}"
+        )
     extra = cfg.extra_args if cfg.extra_args is not None else profile.bypass_args
     argv = [
         profile.binary,
@@ -1683,6 +1709,16 @@ def cmd_probe(args: argparse.Namespace) -> int:
             return 1
         print(f"  ok: unknown profile {args.cli!r}; reduced report from --binary {args.binary}")
 
+    if profile is not None and profile.hookless:
+        print(
+            f"{profile.name}: hookless HTTP/SSE profile — probe-adapter finalizes "
+            "tmux/transcript-driven CLIs (hook dialects, transcript shapes) and has "
+            "nothing to collect here. The HTTP contract is pinned in "
+            "docs/notes/opencode-api-pins.md.",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.probe:
         if profile is None:
             print("FAIL: --probe needs a known profile (its hook dialect/events)", file=sys.stderr)
@@ -1805,7 +1841,8 @@ def main(argv: list[str] | None = None) -> int:
         "--cli",
         action="append",
         metavar="PROFILE",
-        help="CLI profile(s) to register hooks for (claude | codex | gemini | copilot | antigravity | custom; "
+        help="CLI profile(s) to register hooks for (claude | codex | gemini | copilot | "
+        "antigravity | opencode-http | custom; "
         "repeatable; default: profiles referenced by .bmad-loop/policy.toml, or claude)",
     )
     init_p.add_argument(
@@ -1858,7 +1895,9 @@ def main(argv: list[str] | None = None) -> int:
         aliases=["collect-adapter-data"],
     )
     probe_p.add_argument(
-        "cli", help="CLI profile name (claude | codex | gemini | copilot | antigravity | custom)"
+        "cli",
+        help="CLI profile name (claude | codex | gemini | copilot | antigravity | custom; "
+        "opencode-http is HTTP-driven — nothing to probe)",
     )
     probe_p.add_argument(
         "--probe",
