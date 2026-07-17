@@ -51,7 +51,7 @@ sleep 60  # stay alive like an idle interactive session
 
 
 def make_adapter(
-    tmp_path, profile_name="claude", binary=None, extra_args=None, **policy_kw
+    tmp_path, profile_name="claude", binary=None, extra_args=None, mux=None, **policy_kw
 ) -> GenericTmuxAdapter:
     # session_name derives from run_dir.name, and the live tests all share one
     # tmux server — a fixed "run" name races one test's kill-session teardown
@@ -66,6 +66,7 @@ def make_adapter(
         profile=profile,
         binary=binary,
         extra_args=extra_args,
+        mux=mux,
     )
 
 
@@ -167,6 +168,111 @@ def test_await_result_grace_expires_fast(tmp_path):
     start = time.monotonic()
     assert adapter._await_result("t1", grace_s=0.2) is None
     assert time.monotonic() - start < 5
+
+
+# ------------------------------------------- verified kill escalation (#157)
+#
+# GenericAdapter.kill was a single best-effort kill_window with no verification
+# the window died. These pin the new bounded escalation: verify within
+# teardown_grace_s, then force-kill the pane pids and re-kill — degrading
+# cleanly for a backend that doesn't offer window_pane_pids (herdr returns the
+# seam default []).
+
+
+class _TeardownMux:
+    """Only the ops kill() drives — kill_window, list_window_ids (liveness),
+    window_pane_pids — with scriptable survival: the window stays alive until
+    ``survives_kills`` kill_window calls have landed."""
+
+    def __init__(self, survives_kills=0, pids=()):
+        self.survives_kills = survives_kills
+        self.pids = list(pids)
+        self.kill_windows = 0
+        self.liveness_probes = 0
+        self.pane_pid_reads = 0
+
+    def kill_window(self, target):
+        self.kill_windows += 1
+
+    def list_window_ids(self, session):
+        self.liveness_probes += 1
+        return ["@w1"] if self.kill_windows <= self.survives_kills else []
+
+    def window_pane_pids(self, target):
+        self.pane_pid_reads += 1
+        return list(self.pids)
+
+
+class _RecordingHost:
+    def __init__(self):
+        self.force_killed: list[int] = []
+
+    def force_kill(self, pid):
+        self.force_killed.append(pid)
+
+
+def _kill_handle() -> SessionHandle:
+    return SessionHandle(task_id="3-1-dev-1", native_id="@w1")
+
+
+def _lifecycle_lines(adapter, task_id="3-1-dev-1"):
+    path = adapter.tasks_dir / task_id / "session-lifecycle.jsonl"
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_kill_returns_on_first_dead_probe_without_escalating(tmp_path, monkeypatch):
+    monkeypatch.setattr(generic, "KILL_POLL_S", 0)
+    mux = _TeardownMux(survives_kills=0)
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
+    adapter.kill(_kill_handle())
+    assert mux.kill_windows == 1
+    assert mux.liveness_probes == 1
+    assert mux.pane_pid_reads == 0
+    assert _lifecycle_lines(adapter) == []  # the normal path leaves no breadcrumbs
+
+
+def test_kill_escalates_to_pane_pid_force_kill(tmp_path, monkeypatch):
+    monkeypatch.setattr(generic, "KILL_POLL_S", 0)
+    host = _RecordingHost()
+    monkeypatch.setattr(generic, "get_process_host", lambda: host)
+    mux = _TeardownMux(survives_kills=99, pids=[4242])
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
+    adapter.kill(_kill_handle())
+    assert host.force_killed == [4242]
+    assert mux.kill_windows == 2  # first strike + post-escalation re-kill
+    events = _lifecycle_lines(adapter)
+    assert [e["event"] for e in events] == ["kill-escalated", "kill-outcome"]
+    assert events[0]["pids"] == [4242]
+    assert events[1]["alive"] is True  # honest outcome: the window survived even the escalation
+    assert events[1]["escalated"] is True
+
+
+def test_kill_degrades_when_backend_offers_no_pids(tmp_path, monkeypatch):
+    """A herdr-shaped backend inherits the seam default [] — the escalation
+    degrades to the re-kill + breadcrumb, force-killing nothing."""
+    monkeypatch.setattr(generic, "KILL_POLL_S", 0)
+    host = _RecordingHost()
+    monkeypatch.setattr(generic, "get_process_host", lambda: host)
+    mux = _TeardownMux(survives_kills=99, pids=())
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
+    adapter.kill(_kill_handle())
+    assert host.force_killed == []
+    assert mux.kill_windows == 2
+    events = _lifecycle_lines(adapter)
+    assert [e["event"] for e in events] == ["kill-escalated", "kill-outcome"]
+    assert events[0]["pids"] == []
+
+
+def test_kill_grace_zero_is_the_legacy_single_strike(tmp_path):
+    mux = _TeardownMux(survives_kills=99, pids=[4242])
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0)
+    adapter.kill(_kill_handle())
+    assert mux.kill_windows == 1
+    assert mux.liveness_probes == 0
+    assert mux.pane_pid_reads == 0
+    assert _lifecycle_lines(adapter) == []
 
 
 # ----------------------------------------------- GenericDevAdapter (B1/B7)

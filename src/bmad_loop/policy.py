@@ -75,6 +75,12 @@ class LimitsPolicy:
     # exceeding it is a handled GitError, never a run crash, and raising the
     # bound here is the fix when it fires spuriously.
     git_timeout_s: int = 120
+    # bounded grace for verified session teardown (#157): after the first
+    # best-effort window kill the adapter polls liveness up to this many
+    # seconds; a window that survives it gets its pane pids force-killed and
+    # the window killed again. 0 = the old single unverified best-effort kill
+    # (the rollback lever if escalation ever misfires).
+    teardown_grace_s: int = 20
     stop_without_result_nudges: int = 1
     # how long a dev session may sit on a result-less Stop — i.e. it ended its
     # turn awaiting a long-running background process (a Unity PlayMode run, a
@@ -566,6 +572,7 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
             limits_d.get("session_timeout_min", LimitsPolicy.session_timeout_min)
         ),
         git_timeout_s=int(limits_d.get("git_timeout_s", LimitsPolicy.git_timeout_s)),
+        teardown_grace_s=int(limits_d.get("teardown_grace_s", LimitsPolicy.teardown_grace_s)),
         stop_without_result_nudges=int(
             limits_d.get("stop_without_result_nudges", LimitsPolicy.stop_without_result_nudges)
         ),
@@ -590,6 +597,8 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
         )
     if limits.git_timeout_s < 1:
         raise PolicyError(f"limits.git_timeout_s must be >= 1: got {limits.git_timeout_s}")
+    if limits.teardown_grace_s < 0:
+        raise PolicyError(f"limits.teardown_grace_s must be >= 0: got {limits.teardown_grace_s}")
     if not 0.0 <= limits.cache_read_weight <= 1.0:
         raise PolicyError(
             f"limits.cache_read_weight must be between 0 and 1: got {limits.cache_read_weight}"
@@ -837,6 +846,7 @@ max_dev_attempts = 2
 max_followup_reviews = 1     # additional review rounds granted solely because a finalized (status: done) round still recommended a follow-up; once spent, such a round converges + refiles the recommendation instead of burning another cycle. 0 = never honor a pass's own recommendation
 session_timeout_min = 90
 git_timeout_s = 120          # bound on any single git subprocess; exceeding it pauses/degrades (never crashes the run) — raise on a loaded host or a very large worktree
+teardown_grace_s = 20        # verified teardown: poll a killed session window up to this long, then force-kill its pane pids and re-kill (#157). 0 = single unverified best-effort kill
 stop_without_result_nudges = 1
 dev_stall_grace_s = 600      # grace for a dev session that ended its turn awaiting a background process (e.g. a slow PlayMode/test run) before it is called stalled; each re-invocation resets it. 0 = fail fast on the first result-less Stop
 dev_stall_nudges = 2         # times an idle dev session is nudged awake on grace expiry before it is called stalled (bmad-loop has no background-completion re-invocation); pane output re-arms the grace window and a fresh Stop restores the budget. 0 = stall on grace expiry

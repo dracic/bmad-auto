@@ -317,6 +317,19 @@ class BaseTmuxBackend(TerminalMultiplexer):
         except (subprocess.SubprocessError, OSError):
             pass
 
+    def window_pane_pids(self, target: str) -> list[int]:
+        # Capability method (see the seam default): a transport failure, a dead
+        # window, or unparsable output all degrade to the documented "unknown"
+        # sentinel [] — this feeds the kill escalation, which must never be the
+        # thing that raises.
+        try:
+            probe = self._run(["list-panes", "-t", target, "-F", "#{pane_pid}"], check=False)
+            if probe.returncode != 0:
+                return []
+            return [int(line) for line in probe.stdout.split()]
+        except (subprocess.SubprocessError, OSError, ValueError):
+            return []
+
     def list_windows(self, session: str, fields: list[str]) -> list[tuple[str, ...]]:
         fmt = "\t".join(f"#{{{field}}}" for field in fields)
         try:

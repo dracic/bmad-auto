@@ -254,6 +254,14 @@ class TerminalMultiplexer(ABC):
         stays behind the seam."""
         return None
 
+    def window_pane_pids(self, target: str) -> list[int]:
+        """Best-effort OS pids of ``target``'s pane root processes, for the kill
+        escalation. Not abstract: backends that can't (or don't) report pids
+        inherit this default. ``[]`` means unknown or capability not offered —
+        callers must degrade (skip the pid-level escalation) and never read
+        ``[]`` as "no processes". Must not raise."""
+        return []
+
 
 # (name, matches(platform) -> bool, factory() -> TerminalMultiplexer)
 _BACKENDS: list[tuple[str, Callable[[str], bool], Callable[[], TerminalMultiplexer]]] = []

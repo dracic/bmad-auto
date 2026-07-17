@@ -28,6 +28,7 @@ from ..bmadconfig import ProjectPaths
 from ..journal import LOGS_DIR
 from ..model import TokenUsage
 from ..policy import Policy
+from ..process_host import get_process_host
 from ..signals import SignalWatcher
 from ..tokens import read_usage as tally_usage
 from .base import CodingCLIAdapter, SessionHandle, SessionResult, SessionSpec
@@ -39,6 +40,7 @@ PANE_COLUMNS = 220
 PANE_LINES = 50
 RESULT_GRACE_S = 15.0
 RESULT_POLL_S = 0.5
+KILL_POLL_S = 0.5
 # min spacing between heartbeat.json overwrites in wait_for_completion; the
 # heartbeat's staleness is what makes a frozen orchestrator (#157) diagnosable.
 HEARTBEAT_INTERVAL_S = 30.0
@@ -510,7 +512,40 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
         self.mux.send_text(handle.native_id, text)
 
     def kill(self, handle: SessionHandle) -> None:
+        # First strike stays the plain best-effort window kill; everything below
+        # verifies it landed. teardown_grace_s = 0 restores this line alone.
         self.mux.kill_window(handle.native_id)
+        grace = float(self.policy.limits.teardown_grace_s)
+        if grace <= 0:
+            return
+        deadline = time.monotonic() + grace
+        while True:
+            try:
+                if not self._window_alive(handle):
+                    return  # normal case: dead on the first probe
+            except MultiplexerError:
+                pass  # transport hiccup — liveness unknown this tick, keep polling
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(KILL_POLL_S)
+        # The window outlived the grace: the kill was ignored (a wedged CLI, a
+        # shell that trapped the hangup). Harvest the pane pids NOW, while the
+        # window is provably still alive, so a reused pid can never be signalled.
+        # [] = capability not offered / unknown — degrade to the re-kill alone.
+        pids = self.mux.window_pane_pids(handle.native_id)
+        self._note_lifecycle(handle.task_id, "kill-escalated", pids=pids)
+        host = get_process_host()
+        for pid in pids:
+            try:
+                host.force_kill(pid)
+            except Exception:  # noqa: BLE001  # nosec B110 - already-gone races are fine
+                pass
+        self.mux.kill_window(handle.native_id)
+        try:
+            alive: bool | None = self._window_alive(handle)
+        except MultiplexerError:
+            alive = None  # unknown is not dead — record it honestly
+        self._note_lifecycle(handle.task_id, "kill-outcome", alive=alive, escalated=True)
 
     def read_usage(self, result: SessionResult) -> TokenUsage | None:
         if not result.transcript_path:
