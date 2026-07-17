@@ -180,9 +180,10 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
   orchestrator (the previously uninstrumented gap). The engine journals **session-end
   unconditionally** — even a teardown that throws still records the ended session (status
   `aborted` when the outcome is unknowable), carrying `fired_at`/`teardown_s`/`expired_clock`.
-  (3) Teardown is now a **verified, bounded kill**: `terminate → wait → force_kill` escalation
-  capped by `limits.teardown_grace_s` (default 20; `0` = a single unverified best-effort kill),
-  so a timeout can no longer hang on an unkillable session. Covers the tmux (`generic`) and
+  (3) Teardown is now a **verified kill escalation**: `terminate → wait → force_kill`, where
+  `limits.teardown_grace_s` bounds the liveness-wait before escalating (default 20; `0` = a
+  single unverified best-effort kill) and every escalation step carries its own bound, so a
+  timeout can no longer hang on an unkillable session. Covers the tmux (`generic`) and
   `opencode-http` adapters alike. A frozen
   process still cannot run this code while frozen, but recurrence is now diagnosable rather
   than silent.

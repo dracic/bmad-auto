@@ -1325,13 +1325,6 @@ def test_capped_session_still_completes_when_marker_lands_late(tmp_path, monkeyp
 # throttled heartbeat.json whose staleness diagnoses a frozen orchestrator.
 
 
-def _lifecycle_lines(adapter, task_id="3-1-dev-1"):
-    path = adapter.tasks_dir / task_id / "session-lifecycle.jsonl"
-    if not path.is_file():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-
-
 def _timeout_clock_adapter(tmp_path, monkeypatch):
     """Adapter + independently steerable monotonic/wall clocks for driving the
     timeout-fire path. The window stays alive and no hook event ever arrives,

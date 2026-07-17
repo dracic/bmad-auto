@@ -194,10 +194,11 @@ One row per story (or sweep bundle/triage task) in the selected run:
   unknowable, even after a teardown that threw); a timed-out one carries
   `fired_at`, `teardown_s`, and `expired_clock` (`monotonic` / `wall` / `both` —
   `wall` alone fingerprints a host suspend that froze the monotonic clock). The
-  matching `tasks/<id>/` dir holds the forensic breadcrumbs the engine wrote
-  while the session ran: `session-lifecycle.jsonl` (the timeout-fire line),
-  `heartbeat.json` (the wait loop's proof-of-life — stale under a live session
-  means the orchestrator itself was frozen), and `resultless-stops.jsonl`.
+  matching `tasks/<id>/` dir holds the forensic breadcrumbs the adapter wrote
+  while the session ran: `session-lifecycle.jsonl` (timeout-fire and
+  kill-escalation lines), `heartbeat.json` (the wait loop's proof-of-life —
+  stale under a live session means the orchestrator itself was frozen), and
+  `resultless-stops.jsonl`.
 - **Log** — the active agent session's pane output (`logs/<task-id>.log`),
   ANSI colors preserved, starting with a dim `— <task-id>.log —` header. The
   active task is the last `session-start` without a matching `session-end`
