@@ -3,9 +3,38 @@
 OpenCode (opencode.ai) is client/server: its TUI is just a client of a local
 HTTP server (``opencode serve``) exposing an OpenAPI 3.1 API. This adapter
 drives sessions entirely over that API (``injection="http"``,
-``observation="sse"``) — every load-bearing endpoint, event name and body
-schema is pinned against the real 1.18.2 binary in
-``docs/notes/opencode-api-pins.md`` (read that first; it wins over memory).
+``observation="sse"``).
+
+API contract — every fact below was pinned live against the real 1.18.2
+binary (2026-07-16; the full probe record and the archived OpenAPI spec live
+in git history, commit b85d8ca / PR #167). This list wins over memory:
+
+- Readiness target is ``GET /global/health`` (``/health`` is the web-UI SPA
+  shell). With ``OPENCODE_SERVER_PASSWORD`` set *every* endpoint 401s, health
+  included — basic-auth username is literally ``opencode``; Bearer is
+  rejected.
+- SSE ``GET /event``: flat ``data:``-only frames, first frame
+  ``server.connected``, ``server.heartbeat`` ≈ every 10 s, no server-side
+  filtering — clients filter by ``properties.sessionID``.
+- ``session.idle`` fires even when aborting an idle session, so an idle event
+  alone is never proof a turn ran — it must pair with an assistant message
+  whose ``time.completed`` post-dates the last prompt sent.
+- Poll fallback ``GET /session/status`` returns a ``{sessionID: status}`` map
+  in which idle sessions are simply **absent** — the rule is "absent ⇒ not
+  busy", never "wait for idle".
+- Per-prompt ``model`` is the object form ``{providerID, modelID}``; the
+  ``"provider/model"`` string form belongs only to the config-file ``model``
+  key.
+- ``OPENCODE_CONFIG_CONTENT`` outranks the project's ``opencode.json``
+  (applied as a final local-scope merge over all config files).
+- Hermetic skills need ``OPENCODE_DISABLE_EXTERNAL_SKILLS=1`` **plus**
+  ``skills.paths=["<worktree>/.claude/skills"]`` inside the config content —
+  by default every server also sees the operator's personal
+  ``~/.claude/skills`` and ``~/.agents/skills``.
+- ``opencode serve`` survives parent SIGKILL (reparents to init and keeps
+  serving); SIGTERM exits it cleanly.
+- All ``time.*`` fields are epoch **milliseconds**; ``POST /session/:id/abort``
+  returns ``200 true`` even when nothing is running.
 
 Transport shape (the settled design drivers):
 
@@ -15,8 +44,8 @@ Transport shape (the settled design drivers):
   ``cwd=spec.cwd`` and the session env. Ports are OS-assigned free ports,
   re-picked on a bind race.
 - **Config injected via ``OPENCODE_CONFIG_CONTENT``** (outranks the project's
-  ``opencode.json``; pins §9): a blanket permission allow (the bypass-flags
-  analogue), the pins §10 hermetic-skills recipe (project ``.claude/skills``
+  ``opencode.json``): a blanket permission allow (the bypass-flags
+  analogue), the hermetic-skills recipe above (project ``.claude/skills``
   only — without it every session sees the operator's personal skills), and
   the policy model when set. A per-session ``OPENCODE_SERVER_PASSWORD`` makes
   the health poll self-discriminating against a foreign server on a reused
@@ -25,7 +54,7 @@ Transport shape (the settled design drivers):
   child/subagent sessions share the stream and emit their own idles. SSE is
   lossy upstream, so a silent or reconnecting stream degrades to an HTTP poll
   (``GET /session/status`` + message-level proof-of-work): an idle event alone
-  is NOT proof a turn ran (abort emits one on an idle session; pins §3/§8),
+  is NOT proof a turn ran (abort emits one on an idle session),
   so the fallback demands an assistant message completed *after* the last
   prompt this adapter sent. OpenCode timestamps are epoch **milliseconds**.
 - **Server death ≙ window death** (``crashed``, landed artifact honored);
@@ -36,7 +65,7 @@ Transport shape (the settled design drivers):
   raw messages dumped to ``tasks/<task_id>/messages.json`` as the transcript.
   Child-session (subagent) tokens are not counted — the API scopes messages
   per session.
-- ``opencode serve`` survives parent death (pins §11), so teardown is
+- ``opencode serve`` survives parent death, so teardown is
   authoritative: kill in ``run()``'s finally plus an atexit sweep. On Windows
   the binary is an npm ``.cmd`` shim, so the kill goes straight to the
   process-tree force-kill while the wrapper is still alive to enumerate.
@@ -78,7 +107,7 @@ KILL_WAIT_S = 5.0
 SPAWN_ATTEMPTS = 3
 POLL_TICK_S = 5.0  # max event-queue wait per loop tick (generic's cadence)
 
-# Fixed basic-auth username in OPENCODE_SERVER_PASSWORD mode (pins §2).
+# Fixed basic-auth username in OPENCODE_SERVER_PASSWORD mode (Bearer is rejected).
 AUTH_USER = "opencode"
 
 
@@ -100,7 +129,7 @@ def _require_httpx():
 
 
 def _now_ms() -> int:
-    """Wall clock in epoch milliseconds — OpenCode's ``time.*`` unit (pins §4).
+    """Wall clock in epoch milliseconds — OpenCode's ``time.*`` unit.
     Comparisons against ``SessionHandle.launched_ns`` must divide by 1e6 first;
     a raw ns-vs-ms comparison is always False and silently disables the poll
     fallback."""
@@ -222,7 +251,7 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self._sessions: dict[str, _ServerSession] = {}
         self._usage: dict[str, TokenUsage] = {}
-        # opencode serve survives parent death (pins §11): sweep whatever is
+        # opencode serve survives parent death: sweep whatever is
         # still registered when the interpreter exits cooperatively. A hard
         # SIGKILL of the engine still leaks — documented residual risk.
         atexit.register(self._atexit_sweep)
@@ -245,7 +274,7 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
         ]
 
     def _config_content(self, spec: SessionSpec) -> str:
-        """The OPENCODE_CONFIG_CONTENT JSON for this session (pins §9/§10):
+        """The OPENCODE_CONFIG_CONTENT JSON for this session:
         blanket permission allow (the bypass-flags analogue), the hermetic
         skills path (project skills only, paired with
         OPENCODE_DISABLE_EXTERNAL_SKILLS=1 in the env), and the model when the
@@ -633,7 +662,7 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
 
     def _session_status(self, sess: _ServerSession) -> bool | None:
         """Tri-state /session/status probe: True = busy/retrying, False =
-        provably settled (absent from the map — pins §6 — or explicit idle),
+        provably settled (absent from the map or explicit idle),
         None = unknowable (unreachable server, non-200). Unknown is not
         settled: callers must not treat a failed probe as proof a turn ended
         (the liveness-parity doctrine); the process poll settles real death."""
@@ -647,11 +676,11 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
             return None
 
     def _probe_completion(self, sess: _ServerSession) -> bool:
-        """HTTP fallback for a lossy stream (pins §6): the turn is finished
+        """HTTP fallback for a lossy stream: the turn is finished
         only when the session is PROVABLY settled (an unknowable status is not
         settled) AND an assistant message completed strictly after the
         completion floor exists — an idle status alone is not proof a turn ran
-        (pins §3/§8). Consuming the evidence advances the floor so one
+        (abort emits idle even on an idle session). Consuming the evidence advances the floor so one
         completion can never be consumed twice."""
         if self._session_status(sess) is not False:
             return False
@@ -753,7 +782,7 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
                 pass
         else:
             try:
-                host.terminate(process.pid)  # SIGTERM exits opencode cleanly (pins §11)
+                host.terminate(process.pid)  # SIGTERM exits opencode cleanly
             except OSError:
                 pass
         try:
@@ -810,7 +839,7 @@ class OpencodeDevAdapter(_DevSynthesisMixin, OpencodeHttpAdapter):
 
 
 def _sum_usage(messages: Any) -> TokenUsage:
-    """Sum assistant-message token counts (pins §7). Reasoning tokens are
+    """Sum assistant-message token counts. Reasoning tokens are
     billed as output; OpenCode's cache read/write map onto the claude-style
     cache_read/cache_creation fields. Child-session (subagent) tokens are not
     visible here — the messages endpoint is scoped per session."""

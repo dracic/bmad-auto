@@ -350,7 +350,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 f"run `bmad-loop init --cli {profile.name}`"
             )
 
-    # opencode model ids are "provider/model" (docs/notes/opencode-api-pins.md §9);
+    # opencode config-file model ids are "provider/model" (see the opencode_http docstring);
     # a bare model name silently falls back to the server's default model, so warn
     # (advisory — a note, not a FAIL: an empty model legitimately means "default").
     if pol is not None:
@@ -1713,8 +1713,8 @@ def cmd_probe(args: argparse.Namespace) -> int:
         print(
             f"{profile.name}: hookless HTTP/SSE profile — probe-adapter finalizes "
             "tmux/transcript-driven CLIs (hook dialects, transcript shapes) and has "
-            "nothing to collect here. The HTTP contract is pinned in "
-            "docs/notes/opencode-api-pins.md.",
+            "nothing to collect here. The HTTP contract is documented in the "
+            "opencode_http adapter (src/bmad_loop/adapters/opencode_http.py).",
             file=sys.stderr,
         )
         return 1

@@ -442,10 +442,10 @@ Optional capabilities (default to "unsupported" / no-op):
 [`adapters/opencode_http.py`](../src/bmad_loop/adapters/opencode_http.py) is the
 shipped non-tmux adapter: it drives [OpenCode](https://opencode.ai) entirely over
 `opencode serve`'s HTTP API + SSE event stream (`injection = "http"`,
-`observation = "sse"`, `state = "remote"`). Every API fact it relies on is pinned
-against a real binary in
-[`docs/notes/opencode-api-pins.md`](notes/opencode-api-pins.md) — start there
-when the upstream API drifts. The design decisions worth stealing:
+`observation = "sse"`, `state = "remote"`). Every API fact it relies on was
+pinned live against a real 1.18.2 binary and is recorded in the module's
+API-contract docstring — start there when the upstream API drifts. The design
+decisions worth stealing:
 
 - **One server per session.** The API has no per-session env, but the engine's
   `BMAD_LOOP_*` contract must reach tool subprocesses — so each session gets its

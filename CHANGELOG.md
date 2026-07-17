@@ -17,9 +17,9 @@ breaking changes may land in a minor release.
   `_ResultFileMixin`/`_DevSynthesisMixin` seams in `generic.py`; profiles gained a
   hookless `[hooks] dialect = "none"` mode (no hook registration anywhere). Install the
   HTTP client with `pip install 'bmad-loop[opencode]'`; set `model` as `provider/model`.
-  The pinned 1.18.2 API contract lives in `docs/notes/opencode-api-pins.md`, guarded by
-  a zero-token real-binary smoke test (`tests/test_opencode_live.py`, skipped when the
-  binary is absent).
+  The pinned 1.18.2 API contract is recorded in the adapter's module docstring, guarded
+  by a zero-token real-binary smoke test (`tests/test_opencode_live.py`, skipped when
+  the binary is absent).
 
 - **Out-of-tree multiplexer backends (`bmad_loop.mux_backends` entry points).** A backend
   package installed next to bmad-loop (e.g. `uv tool install bmad-loop --with <adapter>`) now
