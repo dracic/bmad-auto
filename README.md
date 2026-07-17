@@ -345,7 +345,7 @@ trigger = "recommended"    # when enabled: "recommended" runs the separate revie
                            # (the loop is bounded by limits.max_review_cycles either way)
 
 [adapter]
-name = "claude"            # CLI profile: claude | codex | gemini | copilot | antigravity | opencode-http | custom
+name = "claude"            # CLI profile: claude | codex | gemini | copilot | antigravity | opencode-http (alias: opencode) | custom
 model = ""                 # empty = CLI default (opencode-http wants "provider/model")
 cleanup_session_on_finish = true  # kill the run's tmux session when it finishes (false keeps it for inspection)
 # extra_args replaces the profile's default bypass flags when set:
@@ -487,7 +487,7 @@ For `per_worktree`, set `editor_mode = "per_worktree"` with `[scm] isolation = "
 
 Everything about a run lives in `.bmad-loop/runs/<run-id>/` (gitignored): `state.json` (resumable engine state), `journal.jsonl` (every decision), `events/` (hook signals), `tasks/<id>/` (per-session prompt + result + escalations), `logs/` (raw pane output, debugging only), `deferred/` (stashed specs from deferred stories), `resolve/<story>/` (escalation `context.json` + the resolve agent's `resolution.json`), `ATTENTION` (human-readable alerts).
 
-Token usage is read from each CLI's local session transcript (selected by the profile's `usage_parser`) and aggregated per story (`bmad-loop status`).
+Token usage is read from each CLI's local session transcript (selected by the profile's `usage_parser`) and aggregated per story (`bmad-loop status`); the hookless `opencode` profile is the exception — its adapter pulls token usage from the OpenCode server over HTTP just before teardown (server state is sqlite; there is no local transcript).
 
 Each run drives its agents inside a dedicated tmux session, `bmad-loop-<run-id>`. It is torn down automatically when the run finishes (disable with `[adapter] cleanup_session_on_finish = false` to inspect agent windows afterwards), and `stop` always kills it. A paused or interrupted run keeps its session for `resume`, which clears any stale session and spins up a fresh one. Sessions left behind by older runs — or by a `cleanup_session_on_finish = false` policy — can be swept any time with `bmad-loop cleanup` (or `c` in the TUI).
 
