@@ -157,6 +157,15 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
 
 ### Fixed
 
+- **A git call exceeding its timeout no longer crashes the whole run (#156).** Every git
+  subprocess the orchestrator spawns now translates `subprocess.TimeoutExpired` into
+  `GitError`, so the existing degrade guards handle a slow git like any other git failure.
+  The rollback gate specifically (`_rollback_or_pause`'s dirty check — the reported crash
+  path) degrades to assume-dirty: rollback OFF pauses with the manual-recovery notice and
+  the worktree kept; ON / resolved re-drives still auto-recover behind their preserve
+  steps. A `rollback-dirty-check-failed` journal entry records the fault. The bound is now
+  configurable as `limits.git_timeout_s` (default 120).
+
 - **`validate` and `probe-adapter` no longer report antigravity's hooks as unregistered
   (#159).** The `antigravity-hooks-json` dialect keys `.agents/hooks.json` by hook-group name
   at the top level, with no `"hooks"` wrapper — but both readers looked up `"hooks"`, got `{}`,

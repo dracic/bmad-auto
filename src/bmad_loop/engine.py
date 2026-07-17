@@ -169,6 +169,7 @@ class Engine:
         # only mode) → the repo root in place; Phase 3 swaps in per-unit worktrees.
         self.workspace = Workspace.default(paths)
         self.policy = policy
+        verify.configure_git_timeout(policy.limits.git_timeout_s)
         self.adapters = {
             "dev": adapter,
             "review": review_adapter if review_adapter is not None else adapter,
@@ -842,9 +843,25 @@ class Engine:
         # reset; the auto-recover (pause-vs-reset) decision below is unaffected.
         redrive = resolved or task.resolved_redrive
         protected = self._protected_relpaths() if redrive else ()
-        if task.baseline_commit and not verify.attempt_dirty(
-            self.workspace.root, task.baseline_commit, task.baseline_untracked, exclude=protected
-        ):
+        # Un-determinable dirty check (git timeout/failure, #156) ⇒ assume dirty:
+        # never skip recovery on an unproven "clean", never crash the run. The
+        # normal branching below then decides — OFF pauses (worktree kept), ON /
+        # resolved auto-recovers behind its preserve steps, keeping the re-drive
+        # pause-free contract intact.
+        dirty = True
+        if task.baseline_commit:
+            try:
+                dirty = verify.attempt_dirty(
+                    self.workspace.root,
+                    task.baseline_commit,
+                    task.baseline_untracked,
+                    exclude=protected,
+                )
+            except verify.GitError as exc:
+                self.journal.append(
+                    "rollback-dirty-check-failed", story_key=task.story_key, error=str(exc)
+                )
+        if task.baseline_commit and not dirty:
             self.journal.append("rollback-skipped-clean", story_key=task.story_key)
             return
         if resolved or self.policy.scm.rollback_on_failure:

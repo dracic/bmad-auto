@@ -26,6 +26,19 @@ from .sprintstatus import story_status
 GIT_TIMEOUT_S = 120
 COMMAND_TIMEOUT_S = 30 * 60
 
+# Current bound on a single git subprocess. Module state rather than a per-call
+# parameter so the ~40 git helpers need no threading; the engine overrides it
+# from `limits.git_timeout_s` at startup, everything else keeps the default.
+_git_timeout_s = GIT_TIMEOUT_S
+
+
+def configure_git_timeout(seconds: int) -> None:
+    """Set the per-git-call timeout (`limits.git_timeout_s`). Called once by the
+    engine when it binds its policy; standalone verify users keep GIT_TIMEOUT_S."""
+    global _git_timeout_s
+    _git_timeout_s = seconds
+
+
 # How git's own diff format names the absent side of a creation/deletion. A
 # protocol token git emits verbatim on every platform, Windows included — never
 # opened, never joined onto. Only `patch_new_files` reads it.
@@ -85,13 +98,28 @@ class VerifyOutcome:
         return not self.ok and not self.severity
 
 
+def _run_git(
+    cmd: list[str], repo: Path, *, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Sole spawn point for git subprocesses. A timeout is raised by
+    `subprocess.run` *before* any return code exists, so left uncaught it would
+    bypass every `except GitError` guard and crash the run (#156); translating
+    it here puts timeouts in the same taxonomy as any other git failure —
+    observation guards degrade, unguarded paths fail typed."""
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_git_timeout_s,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitError(f"git {cmd[3]} timed out after {_git_timeout_s}s in {repo}") from exc
+
+
 def _git(repo: Path, *args: str) -> tuple[int, str]:
-    proc = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        timeout=GIT_TIMEOUT_S,
-    )
+    proc = _run_git(["git", "-C", str(repo), *args], repo)
     return proc.returncode, (proc.stdout + proc.stderr).strip()
 
 
@@ -99,12 +127,7 @@ def _git_raw(repo: Path, *args: str) -> tuple[int, str]:
     """Like `_git` but returns stdout verbatim (no strip, no stderr merge) — for
     NUL-delimited (`-z`) output whose records can begin with a space (porcelain
     status codes like ' M'), which `_git`'s strip() would corrupt."""
-    proc = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        timeout=GIT_TIMEOUT_S,
-    )
+    proc = _run_git(["git", "-C", str(repo), *args], repo)
     return proc.returncode, proc.stdout
 
 
@@ -112,13 +135,7 @@ def _git_env(repo: Path, *args: str, env: dict[str, str]) -> tuple[int, str]:
     """Like `_git` but runs with an explicit environment — used to point git at a
     throwaway `GIT_INDEX_FILE` so a snapshot can stage the tree without touching
     the real index."""
-    proc = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        timeout=GIT_TIMEOUT_S,
-        env=env,
-    )
+    proc = _run_git(["git", "-C", str(repo), *args], repo, env=env)
     return proc.returncode, (proc.stdout + proc.stderr).strip()
 
 
@@ -848,12 +865,7 @@ def capture_diff(repo: Path, baseline: str, *, max_file_bytes: int | None = None
     size, so a stray build dir or huge log can't balloon the patch. None lifts the
     cap (capture everything regardless of size).
     """
-    proc = subprocess.run(
-        ["git", "-C", str(repo), "diff", baseline, "--"],
-        capture_output=True,
-        text=True,
-        timeout=GIT_TIMEOUT_S,
-    )
+    proc = _run_git(["git", "-C", str(repo), "diff", baseline, "--"], repo)
     if proc.returncode != 0:
         raise GitError(f"git diff {baseline} failed in {repo}: {proc.stderr.strip()}")
     parts = [proc.stdout]
@@ -881,12 +893,7 @@ def capture_diff(repo: Path, baseline: str, *, max_file_bytes: int | None = None
         # it exits 1 precisely because the files differ — expected here. Any other
         # non-zero code is a real failure (bad path, internal error), not "files
         # differ", so don't silently fold it into the patch.
-        u = subprocess.run(
-            ["git", "-C", str(repo), "diff", "--no-index", "--", os.devnull, rel],
-            capture_output=True,
-            text=True,
-            timeout=GIT_TIMEOUT_S,
-        )
+        u = _run_git(["git", "-C", str(repo), "diff", "--no-index", "--", os.devnull, rel], repo)
         if u.returncode not in (0, 1):
             raise GitError(
                 f"git diff --no-index for untracked {rel!r} failed in {repo}: {u.stderr.strip()}"
