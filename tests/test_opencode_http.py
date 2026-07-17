@@ -2,7 +2,7 @@
 
 The E2E cases spawn the adapter's real code path end to end: a fake `opencode`
 binary (a stdlib-only HTTP server implementing the pinned 1.18.2 surface —
-docs/notes/opencode-api-pins.md) is launched by the adapter itself via the
+see the ``opencode_http`` module docstring) is launched by the adapter itself via the
 conftest ``write_script_launcher`` shim, scripted per scenario through env vars
 riding ``spec.env`` (the same channel the engine's BMAD_LOOP_* contract uses).
 Everything binds 127.0.0.1; no real opencode binary or network access anywhere.
@@ -372,7 +372,7 @@ def test_free_port_is_bindable():
 
 
 def test_ms_floor_unit_matches_opencode_timestamps():
-    """OpenCode timestamps are epoch ms (pins §4). The completion floor derives
+    """OpenCode timestamps are epoch ms. The completion floor derives
     from time_ns // 1e6 and MUST be comparable to them: same unit, same epoch."""
     floor = time.time_ns() // 1_000_000
     assert abs(floor - _now_ms()) < 5_000
@@ -386,7 +386,7 @@ def test_config_content_shapes(tmp_path):
     spec = SessionSpec(task_id="t", role="triage", prompt="p", cwd=tmp_path)
     config = json.loads(adapter._config_content(spec))
     assert config["permission"] == "allow"
-    # pins §10 hermetic recipe: the project skill tree, absolute
+    # hermetic-skills recipe (adapter docstring): the project skill tree, absolute
     assert config["skills"]["paths"] == [str(tmp_path / ".claude" / "skills")]
     assert "model" not in config
 

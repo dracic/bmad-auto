@@ -225,7 +225,7 @@ def test_cli_hookless_profile_politely_refused(tmp_path, capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert "hookless" in err
-    assert "opencode-api-pins" in err
+    assert "opencode_http" in err
     assert "FAIL" not in err  # a polite refusal, not an error dump
 
 

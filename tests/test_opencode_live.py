@@ -7,8 +7,9 @@ inspected and deleted freely, which spends nothing (verified during Phase 0
 pinning). Servers are spawned through the adapter's own `_spawn_server`, so
 the spawn/auth/health/teardown code paths run for real.
 
-Each assert pins a fact from docs/notes/opencode-api-pins.md (recorded against
-1.18.2). A newer opencode that breaks the contract surfaces here as a loud —
+Each assert pins a fact from the adapter's API-contract docstring
+(``opencode_http``, verified live against 1.18.2). A newer opencode that
+breaks the contract surfaces here as a loud —
 but cleanly skippable — failure instead of a silent adapter break.
 
 Windows is excluded: opencode-on-Windows is unverified for this adapter
