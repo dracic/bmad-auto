@@ -57,6 +57,12 @@ class SessionResult:
     result_json: dict[str, Any] | None = None
     session_id: str | None = None
     transcript_path: str | None = None
+    # wall time.time() when wait_for_completion declared the deadline elapsed;
+    # None unless this session's timeout actually fired (#157).
+    timeout_fired_at: float | None = None
+    # which clock(s) had expired at fire time: "monotonic" | "wall" | "both".
+    # "wall" alone is the suspend signature — a frozen monotonic clock.
+    timeout_expired_clock: str | None = None
 
 
 class CodingCLIAdapter(ABC):
