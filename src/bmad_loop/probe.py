@@ -38,7 +38,7 @@ from pathlib import Path
 from . import sanitize
 from .adapters.multiplexer import MultiplexerError, get_multiplexer
 from .adapters.profile import CLIProfile
-from .install import merge_hooks
+from .install import merge_hooks, relay_registered
 from .process_host import get_process_host
 from .signals import SignalWatcher
 from .tokens import _jsonl_entries, read_usage
@@ -340,12 +340,12 @@ def _hooks_registered(project: Path, profile: CLIProfile) -> bool:
     import json
 
     try:
-        hooks = json.loads(config_path.read_text(encoding="utf-8")).get("hooks", {})
+        config = json.loads(config_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return False
-    return any(
-        "bmad_loop_hook" in json.dumps(hooks.get(event, [])) for event in profile.hooks.events
-    )
+    if not isinstance(config, dict):
+        return False
+    return relay_registered(config, profile.hooks.dialect, profile.hooks.events)
 
 
 # ----------------------------------------------------------------- SCAN mode

@@ -32,6 +32,9 @@ HOOK_SCRIPT_REL = ".bmad-loop/bmad_loop_hook.py"
 # relay (bmad_loop_hook.py) and the probe-adapter capture hook
 # (bmad_loop_probe_hook.py) — so merge_hooks stays idempotent for either.
 HOOK_MARKER = "bmad_loop"
+# Narrower than HOOK_MARKER: matches the relay script name specifically, so a
+# project path that merely contains "bmad_loop" can't read as a registration.
+RELAY_MARKER = "bmad_loop_hook"
 # Pre-rename marker: the old relay/probe hooks lived under .automator/ and carried
 # `bmad_auto` in their command. `bmad-loop init` strips them on upgrade so a project
 # renamed from bmad-auto isn't left double-signalling. Underscore form, so it never
@@ -185,6 +188,27 @@ def _hook_entry(dialect: str, command: str) -> dict:
         return handler
     # claude-settings-json and codex-hooks-json share the schema
     return {"hooks": [handler]}
+
+
+def hook_event_container(config: dict, dialect: str) -> dict:
+    """The `native event -> handlers` map inside a parsed hook config.
+
+    Most dialects nest it under "hooks". agy instead keys the file by hook GROUP
+    name at the top level, so our relay lives under ANTIGRAVITY_HOOK_GROUP —
+    reading "hooks" there yields {} and reports a correctly-installed relay as
+    unregistered (issue #159). Every reader must go through this, or it drifts.
+    """
+    if dialect == "antigravity-hooks-json":
+        container = config.get(ANTIGRAVITY_HOOK_GROUP, {})
+    else:
+        container = config.get("hooks", {})
+    return container if isinstance(container, dict) else {}
+
+
+def relay_registered(config: dict, dialect: str, events) -> bool:
+    """True if the bmad-loop relay is registered for any of `events`."""
+    container = hook_event_container(config, dialect)
+    return any(RELAY_MARKER in json.dumps(container.get(event, [])) for event in events)
 
 
 def merge_hooks(config: dict, registrations: dict[str, str], dialect: str) -> tuple[dict, bool]:

@@ -157,6 +157,13 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
 
 ### Fixed
 
+- **`validate` and `probe-adapter` no longer report antigravity's hooks as unregistered
+  (#159).** The `antigravity-hooks-json` dialect keys `.agents/hooks.json` by hook-group name
+  at the top level, with no `"hooks"` wrapper — but both readers looked up `"hooks"`, got `{}`,
+  and reported a correctly-installed relay as missing (`FAIL: bmad-loop hooks not registered
+for antigravity`, immediately after a successful `init --cli antigravity`). Both now share
+  one `install.relay_registered()` helper that resolves each dialect's container shape, so the
+  two call sites can no longer drift apart.
 - **`branch_per=run` + `keep_failed` no longer poisons a multi-story run after the first kept
   failure (#138).** The first story to end deferred under `keep_failed=true` left its worktree
   checked out on the single shared run branch, so every subsequent story's `git worktree add`
