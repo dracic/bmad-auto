@@ -42,6 +42,17 @@ class SessionSpec:
     # missing completion artifact degrades to "stalled" instead of livelocking
     # until timeout_s.
     stall_nudges_cap: int | None = None
+    # Mid-session token-budget guard (#158): weighted per-session cap the wait
+    # loop samples cumulative usage against on its heartbeat cadence. None (the
+    # raw constructor default) or mode "off" leaves the guard inert, so adapters
+    # constructed outside the engine (tests, MockAdapter) are unaffected. The
+    # engine sets these from limits.max_tokens_per_session /
+    # limits.session_budget_mode / limits.session_budget_grace_s /
+    # limits.cache_read_weight for every session it drives.
+    token_budget: int | None = None
+    token_budget_mode: str = "off"  # "off" | "warn" | "enforce"
+    token_budget_grace_s: float = 240.0
+    cache_read_weight: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -53,7 +64,7 @@ class SessionHandle:
 
 @dataclass(frozen=True)
 class SessionResult:
-    status: str  # "completed" | "stalled" | "timeout" | "crashed"
+    status: str  # "completed" | "stalled" | "timeout" | "crashed" | "over_budget"
     result_json: dict[str, Any] | None = None
     session_id: str | None = None
     transcript_path: str | None = None
@@ -63,6 +74,10 @@ class SessionResult:
     # which clock(s) had expired at fire time: "monotonic" | "wall" | "both".
     # "wall" alone is the suspend signature — a frozen monotonic clock.
     timeout_expired_clock: str | None = None
+    # weighted usage sampled when the session-budget guard tripped (#158); None
+    # unless the guard tripped. Set on every post-trip exit — warn-mode sessions
+    # that run to completion carry it too — so the engine can journal it.
+    budget_weighted: int | None = None
 
 
 class CodingCLIAdapter(ABC):

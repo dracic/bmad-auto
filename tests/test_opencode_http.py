@@ -21,7 +21,7 @@ from conftest import write_script_launcher
 
 from bmad_loop.adapters import generic, opencode_http
 from bmad_loop.adapters.base import SessionHandle, SessionSpec
-from bmad_loop.adapters.generic import NUDGE_TEXT, STALL_NUDGE_TEXT
+from bmad_loop.adapters.generic import BUDGET_NUDGE_TEXT, NUDGE_TEXT, STALL_NUDGE_TEXT
 from bmad_loop.adapters.opencode_http import (
     OpencodeDevAdapter,
     OpencodeHttpAdapter,
@@ -35,7 +35,7 @@ from bmad_loop.adapters.opencode_http import (
 from bmad_loop.adapters.profile import get_profile
 from bmad_loop.bmadconfig import ProjectPaths
 from bmad_loop.model import TokenUsage
-from bmad_loop.policy import LimitsPolicy, Policy
+from bmad_loop.policy import LimitsPolicy, NotifyPolicy, Policy
 from bmad_loop.process_host import get_process_host
 
 # A pinned example timestamp from the pins file (§4): OpenCode `time.*` values
@@ -52,6 +52,13 @@ PINNED_EPOCH_MS = 1_784_218_739_410
 #                      writes the result and idles
 #   stall              every prompt idles result-less, forever
 #   busy-forever       the turn never finishes and never idles
+#   busy-big-usage     busy-forever, but /session/:id/message reports an
+#                      assistant message with huge token counts mid-turn
+#                      (completed=0, so the poll fallback never reads it as
+#                      proof-of-work) — the budget-guard runaway
+#   big-usage-then-complete  same huge mid-turn usage, but the turn finishes
+#                      after ~0.5s (result + idle) — the warn-mode runaway
+#                      that runs to its natural end
 #   die-after-result   prompt -> write result.json -> the server process exits
 #   die-no-result      prompt -> the server process exits
 #   sse-black-hole     the SSE stream closes right after connecting (every
@@ -156,8 +163,11 @@ def run_turn():
         finish_turn(); push(idle_event())
     elif SCENARIO == "stall":
         finish_turn(); push(idle_event())
-    elif SCENARIO == "busy-forever":
+    elif SCENARIO in ("busy-forever", "busy-big-usage"):
         write_spec()  # visible only post-kill: the turn never ends or idles
+    elif SCENARIO == "big-usage-then-complete":
+        time.sleep(0.35)  # stay busy through several fast heartbeat samples
+        write_result(); finish_turn(); push(idle_event())
     elif SCENARIO == "die-after-result":
         write_result(); os._exit(0)
     elif SCENARIO == "die-no-result":
@@ -189,7 +199,18 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 done = STATE["completed_ms"]
             msgs = []
-            if done:
+            if SCENARIO in ("busy-big-usage", "big-usage-then-complete"):
+                msgs = [{
+                    "info": {
+                        "id": "msg_big1", "role": "assistant",
+                        "time": {"created": now_ms() - 10, "completed": done},
+                        "tokens": {"input": 4000000, "output": 1000000, "reasoning": 0,
+                                   "cache": {"read": 0, "write": 0}},
+                        "cost": 1.0,
+                    },
+                    "parts": [],
+                }]
+            elif done:
                 msgs = [{
                     "info": {
                         "id": "msg_fake1", "role": "assistant",
@@ -317,6 +338,7 @@ def make_spec(
     timeout_s: float = 30.0,
     stall_nudges_cap: int | None = 6,
     extra_env: dict | None = None,
+    **spec_kw,
 ) -> SessionSpec:
     env = {
         "FAKE_OPENCODE_SCENARIO": scenario,
@@ -332,6 +354,7 @@ def make_spec(
         env=env,
         timeout_s=timeout_s,
         stall_nudges_cap=stall_nudges_cap,
+        **spec_kw,
     )
 
 
@@ -513,6 +536,35 @@ def test_read_usage_returns_stash_by_session_id(tmp_path):
     assert adapter.read_usage(SessionResult(status="completed")) is None
 
 
+def test_sample_weighted_usage_inert_on_http_failure(tmp_path):
+    """The budget guard's mid-session sample must never break the wait loop:
+    no live session yet, a transport error, or a non-200 all read as None
+    (guard inert this tick)."""
+    adapter = make_adapter(tmp_path)
+    spec = SessionSpec(task_id="t", role="triage", prompt="p", cwd=tmp_path)
+    sess = _ServerSession(process=None, port=0, base_url="", password="", log_fh=None)
+    assert adapter._sample_weighted_usage(sess, spec) is None  # no session id yet
+
+    sess.session_id = "ses_1"
+
+    class _BoomClient:
+        def get(self, path):
+            raise RuntimeError("connection refused")
+
+    sess.client = _BoomClient()
+    assert adapter._sample_weighted_usage(sess, spec) is None
+
+    class _Client500:
+        def get(self, path):
+            class _Resp:
+                status_code = 500
+
+            return _Resp()
+
+    sess.client = _Client500()
+    assert adapter._sample_weighted_usage(sess, spec) is None
+
+
 # ------------------------------------------------------------------- E2E tests
 
 
@@ -606,6 +658,295 @@ def test_e2e_timeout_aborts(tmp_path, fake_opencode):
     aborts = read_jsonl(rec / "aborts.jsonl")
     assert aborts and "/abort" in aborts[0]["path"]
     assert_server_gone(rec)
+
+
+# ------------------------------ mid-session token-budget guard (#158)
+#
+# Mirrors the generic-adapter guard on the HTTP transport: cumulative usage is
+# sampled from GET /session/:id/message on the heartbeat cadence (the first
+# tick always samples), and an enforce-mode trip nudges, arms the grace, then
+# aborts the session and returns over_budget — the timeout path's exit shape.
+
+
+def _budget_policy() -> Policy:
+    return Policy(limits=LimitsPolicy(), notify=NotifyPolicy(desktop=False, file=True))
+
+
+def test_e2e_budget_enforce_trips_nudges_and_aborts_over_budget(tmp_path, fake_opencode):
+    launcher, rec = fake_opencode
+    adapter = make_adapter(tmp_path, binary=str(launcher), policy=_budget_policy())
+    spec = make_spec(
+        tmp_path,
+        rec,
+        "busy-big-usage",
+        timeout_s=30.0,
+        token_budget=1_000_000,
+        token_budget_mode="enforce",
+        token_budget_grace_s=0.3,
+    )
+
+    result = adapter.run(spec)
+
+    assert result.status == "over_budget"
+    assert result.result_json is None
+    # fake reports input 4M + output 1M, no cache: weighted = 5M
+    assert result.budget_weighted == 5_000_000
+    texts = prompt_texts(rec)
+    assert len(texts) == 2 and texts[1] == BUDGET_NUDGE_TEXT
+    aborts = read_jsonl(rec / "aborts.jsonl")
+    assert aborts and "/abort" in aborts[0]["path"]
+    # trip actions fired exactly once: one ATTENTION line, one breadcrumb
+    attention = (tmp_path / "run" / "ATTENTION").read_text(encoding="utf-8")
+    assert len(attention.splitlines()) == 1
+    lifecycle = read_jsonl(tmp_path / "run" / "tasks" / "t-1" / "session-lifecycle.jsonl")
+    tripped = [ln for ln in lifecycle if ln["event"] == "budget-tripped"]
+    assert len(tripped) == 1
+    assert tripped[0]["weighted"] == 5_000_000 and tripped[0]["mode"] == "enforce"
+    # the verdict leaves a breadcrumb, like timeout-fired (#157 forensics)
+    fired = [ln for ln in lifecycle if ln["event"] == "over-budget-fired"]
+    assert len(fired) == 1
+    assert fired[0]["weighted"] == 5_000_000 and fired[0]["zero_grace"] is False
+    # usage was captured over HTTP before teardown
+    assert result.transcript_path and Path(result.transcript_path).is_file()
+    usage = adapter.read_usage(result)
+    assert usage == TokenUsage(input_tokens=4_000_000, output_tokens=1_000_000)
+    assert_server_gone(rec)
+
+
+def test_e2e_budget_zero_grace_terminates_at_trip_without_nudge(tmp_path, fake_opencode):
+    launcher, rec = fake_opencode
+    adapter = make_adapter(tmp_path, binary=str(launcher), policy=_budget_policy())
+    spec = make_spec(
+        tmp_path,
+        rec,
+        "busy-big-usage",
+        timeout_s=30.0,
+        token_budget=1_000_000,
+        token_budget_mode="enforce",
+        token_budget_grace_s=0.0,
+    )
+
+    result = adapter.run(spec)
+
+    assert result.status == "over_budget"
+    assert result.budget_weighted == 5_000_000
+    assert prompt_texts(rec) == ["Use the bmad-loop-sweep skill now: run it"]  # no nudge
+    assert_server_gone(rec)
+
+
+def test_e2e_budget_inert_under_cap(tmp_path, fake_opencode):
+    """A session under its cap never trips: no ATTENTION, no breadcrumb, no
+    budget_weighted on the completed result."""
+    launcher, rec = fake_opencode
+    adapter = make_adapter(tmp_path, binary=str(launcher), policy=_budget_policy())
+    spec = make_spec(
+        tmp_path,
+        rec,
+        "completed",
+        token_budget=10**9,
+        token_budget_mode="enforce",
+        token_budget_grace_s=240.0,
+    )
+
+    result = adapter.run(spec)
+
+    assert result.status == "completed"
+    assert result.budget_weighted is None
+    assert not (tmp_path / "run" / "ATTENTION").exists()
+    assert_server_gone(rec)
+
+
+def test_e2e_budget_warn_trips_once_and_completes(tmp_path, fake_opencode, monkeypatch):
+    """Warn mode across MULTIPLE heartbeat samples (interval shrunk to 0.05s
+    while the fake stays busy ~0.5s): exactly one ATTENTION line and one
+    budget-tripped breadcrumb (the trip latch), NO nudge, NO abort while the
+    session ran — it completes naturally with budget_weighted on the result."""
+    monkeypatch.setattr(opencode_http, "HEARTBEAT_INTERVAL_S", 0.05)
+    launcher, rec = fake_opencode
+    adapter = make_adapter(tmp_path, binary=str(launcher), policy=_budget_policy())
+    spec = make_spec(
+        tmp_path,
+        rec,
+        "big-usage-then-complete",
+        timeout_s=30.0,
+        token_budget=1_000_000,
+        token_budget_mode="warn",
+        token_budget_grace_s=240.0,
+    )
+
+    handle = adapter.start_session(spec)
+    try:
+        result = adapter.wait_for_completion(handle, spec)
+        # no abort while the session ran (kill() below aborts at teardown)
+        assert not (rec / "aborts.jsonl").exists()
+    finally:
+        adapter.kill(handle)
+
+    assert result.status == "completed"
+    assert result.result_json == {"ok": True, "workflow": "fake-triage"}
+    assert result.budget_weighted == 5_000_000
+    assert prompt_texts(rec) == ["Use the bmad-loop-sweep skill now: run it"]  # no nudge
+    attention = (tmp_path / "run" / "ATTENTION").read_text(encoding="utf-8")
+    assert len(attention.splitlines()) == 1
+    lifecycle = read_jsonl(tmp_path / "run" / "tasks" / "t-1" / "session-lifecycle.jsonl")
+    tripped = [ln for ln in lifecycle if ln["event"] == "budget-tripped"]
+    assert len(tripped) == 1
+    assert tripped[0]["mode"] == "warn"
+    assert [ln for ln in lifecycle if ln["event"] == "over-budget-fired"] == []
+    assert_server_gone(rec)
+
+
+# Clock-driven budget unit tests: the _timeout_driven_session machinery plus a
+# fake control client whose /message answer reports runaway usage (weighted 5M).
+
+
+class _BigUsageClient:
+    def __init__(self):
+        self.posts: list[str] = []
+
+    def get(self, path):
+        class _Resp:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return [
+                    {
+                        "info": {
+                            "role": "assistant",
+                            "tokens": {"input": 4_000_000, "output": 1_000_000},
+                        }
+                    }
+                ]
+
+        return _Resp()
+
+    def post(self, path):
+        self.posts.append(path)
+
+        class _Resp:
+            status_code = 200
+
+        return _Resp()
+
+    def close(self):
+        pass
+
+
+def _budget_unit_spec(tmp_path, grace_s: float, timeout_s: float = 30_000.0) -> SessionSpec:
+    return SessionSpec(
+        task_id="t-1",
+        role="dev",
+        prompt="p",
+        cwd=tmp_path,
+        timeout_s=timeout_s,
+        token_budget=1_000_000,
+        token_budget_mode="enforce",
+        token_budget_grace_s=grace_s,
+    )
+
+
+def test_budget_grace_fires_on_wall_clock_when_monotonic_frozen(tmp_path, monkeypatch):
+    """The #157 suspend signature on the budget grace: time.monotonic() stands
+    still through a host suspend, so the monotonic grace alone would stretch
+    the wrap-up window by the nap's length. The wall co-bound fires anyway."""
+    adapter = make_adapter(tmp_path, policy=_budget_policy())
+    clock = _install_clock(monkeypatch)
+    (adapter.tasks_dir / "t-1").mkdir(parents=True)
+
+    def advance():
+        clock["wall"] += 11.0  # suspended host: wall counts on, monotonic frozen
+
+    sess = _timeout_driven_session(adapter, advance)
+    sess.client = _BigUsageClient()
+    adapter.send_text = lambda handle, text: None  # nudge delivery not under test
+
+    result = adapter.wait_for_completion(
+        SessionHandle(task_id="t-1", native_id="ses_1"), _budget_unit_spec(tmp_path, grace_s=50.0)
+    )
+
+    assert result.status == "over_budget"
+    assert result.budget_weighted == 5_000_000
+    fired = [ln for ln in _lifecycle_lines(adapter) if ln["event"] == "over-budget-fired"]
+    assert len(fired) == 1 and fired[0]["zero_grace"] is False
+
+
+def test_budget_nudge_send_failure_still_arms_grace(tmp_path, monkeypatch):
+    """A dead/hung server can reject the wrap-up nudge (the HTTP send raises);
+    the trip must survive it and the grace still arm — the session is then
+    scored via the normal paths (here: grace expiry → over_budget)."""
+    adapter = make_adapter(tmp_path, policy=_budget_policy())
+    clock = _install_clock(monkeypatch)
+    (adapter.tasks_dir / "t-1").mkdir(parents=True)
+
+    def advance():
+        clock["mono"] += 11.0
+
+    sess = _timeout_driven_session(adapter, advance)
+    sess.client = _BigUsageClient()
+
+    def boom(handle, text):
+        raise RuntimeError("http send failed")
+
+    adapter.send_text = boom
+
+    result = adapter.wait_for_completion(
+        SessionHandle(task_id="t-1", native_id="ses_1"), _budget_unit_spec(tmp_path, grace_s=50.0)
+    )
+
+    assert result.status == "over_budget"
+    assert result.budget_weighted == 5_000_000
+
+
+def test_budget_zero_grace_dead_server_takes_crash_path(tmp_path, monkeypatch):
+    """A trip coinciding with server death must not discard a landed artifact
+    just because grace is 0: the zero-grace exit checks the process first and
+    routes a dead server through the crash path, which honors the artifact."""
+    adapter = make_adapter(tmp_path, policy=_budget_policy())
+    _install_clock(monkeypatch)
+    (adapter.tasks_dir / "t-1").mkdir(parents=True)
+    (adapter.tasks_dir / "t-1" / "result.json").write_text('{"ok": true}')
+
+    sess = _timeout_driven_session(adapter, lambda: None)
+    sess.client = _BigUsageClient()
+
+    class _DeadProc:
+        def poll(self):
+            return 1
+
+    sess.process = _DeadProc()
+
+    result = adapter.wait_for_completion(
+        SessionHandle(task_id="t-1", native_id="ses_1"), _budget_unit_spec(tmp_path, grace_s=0.0)
+    )
+
+    assert result.status == "completed"  # crash path honored the artifact
+    assert result.result_json == {"ok": True}
+    assert result.budget_weighted == 5_000_000
+
+
+def test_budget_notify_failure_does_not_break_trip(tmp_path, monkeypatch):
+    """observe-degrade: an ATTENTION append failure (disk full, perms) degrades
+    to a missing notification; the trip and the over_budget verdict proceed."""
+    from bmad_loop import gates as gates_mod
+
+    adapter = make_adapter(tmp_path, policy=_budget_policy())
+    _install_clock(monkeypatch)
+    (adapter.tasks_dir / "t-1").mkdir(parents=True)
+
+    def boom(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(gates_mod, "notify", boom)
+    sess = _timeout_driven_session(adapter, lambda: None)
+    sess.client = _BigUsageClient()
+
+    result = adapter.wait_for_completion(
+        SessionHandle(task_id="t-1", native_id="ses_1"), _budget_unit_spec(tmp_path, grace_s=0.0)
+    )
+
+    assert result.status == "over_budget"
+    assert result.budget_weighted == 5_000_000
 
 
 # ---------------- timeout instrumentation + wall-clock co-bound (#157)

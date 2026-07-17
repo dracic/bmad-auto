@@ -15,6 +15,7 @@ POLICY_FILE = Path(".bmad-loop") / "policy.toml"
 
 GATE_MODES = {"none", "per-epic", "per-story-spec-approval"}
 RETRO_MODES = {"never", "notify", "auto"}
+SESSION_BUDGET_MODES = {"off", "warn", "enforce"}
 SWEEP_AUTO_MODES = {"never", "per-epic", "run-end"}
 REVIEW_TRIGGER_MODES = {"always", "recommended"}
 # Where the run gets its story queue. "sprint-status" (default) is the classic
@@ -121,6 +122,20 @@ class LimitsPolicy:
     max_tokens_per_story: int = 2_000_000
     # weight of cache-read tokens in the budget check (1.0 = count raw)
     cache_read_weight: float = 0.1
+    # Mid-session token-budget guard (#158). "off" = no sampling; "warn" =
+    # ATTENTION + lifecycle breadcrumb once, session runs to its natural end;
+    # "enforce" = warn actions + wrap-up nudge + grace window, then the session
+    # ends over_budget (rides the ordinary retry→defer arm). Adapters with no
+    # mid-session usage signal (usage_parser "none", copilot's shutdown-only
+    # flush) leave the guard inert regardless of mode.
+    session_budget_mode: str = "warn"
+    # weighted (cache_read_weight-discounted) per-SESSION cap the adapter wait
+    # loops sample cumulative usage against every ~30s heartbeat tick. Distinct
+    # from the advisory post-done max_tokens_per_story.
+    max_tokens_per_session: int = 4_000_000
+    # enforce mode: seconds a tripped session gets to wrap up after the nudge
+    # before it is terminated over_budget. 0 = terminate at trip, no nudge.
+    session_budget_grace_s: int = 240
 
 
 @dataclass(frozen=True)
@@ -588,6 +603,15 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
             limits_d.get("max_tokens_per_story", LimitsPolicy.max_tokens_per_story)
         ),
         cache_read_weight=float(limits_d.get("cache_read_weight", LimitsPolicy.cache_read_weight)),
+        session_budget_mode=str(
+            limits_d.get("session_budget_mode", LimitsPolicy.session_budget_mode)
+        ),
+        max_tokens_per_session=int(
+            limits_d.get("max_tokens_per_session", LimitsPolicy.max_tokens_per_session)
+        ),
+        session_budget_grace_s=int(
+            limits_d.get("session_budget_grace_s", LimitsPolicy.session_budget_grace_s)
+        ),
     )
     if limits.max_review_cycles < 1 or limits.max_dev_attempts < 1:
         raise PolicyError("limits.max_review_cycles and limits.max_dev_attempts must be >= 1")
@@ -614,6 +638,19 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
     if limits.workflow_stall_nudges_cap < 0:
         raise PolicyError(
             f"limits.workflow_stall_nudges_cap must be >= 0: got {limits.workflow_stall_nudges_cap}"
+        )
+    if limits.session_budget_mode not in SESSION_BUDGET_MODES:
+        raise PolicyError(
+            f"limits.session_budget_mode must be one of {sorted(SESSION_BUDGET_MODES)}: "
+            f"got {limits.session_budget_mode!r}"
+        )
+    if limits.max_tokens_per_session < 1:
+        raise PolicyError(
+            f"limits.max_tokens_per_session must be >= 1: got {limits.max_tokens_per_session}"
+        )
+    if limits.session_budget_grace_s < 0:
+        raise PolicyError(
+            f"limits.session_budget_grace_s must be >= 0: got {limits.session_budget_grace_s}"
         )
 
     verify = VerifyPolicy(commands=tuple(str(c) for c in verify_d.get("commands", ())))
@@ -854,6 +891,9 @@ dev_stall_nudges_cap = 6     # total (never-restored) stall nudges for a dev/rev
 workflow_stall_nudges_cap = 3 # total (never-restored) stall nudges for an injected plugin-workflow session before it is called stalled; bounds a session that finished its work but never wrote its completion marker. 0 = stall on first grace expiry
 max_tokens_per_story = 2000000
 cache_read_weight = 0.1      # cache reads bill at ~0.1x input on all vendors; 1.0 = count raw
+session_budget_mode = "warn"  # off | warn | enforce — weighted per-SESSION cap sampled every ~30s mid-session; warn = one ATTENTION + breadcrumb; enforce = wrap-up nudge (best-effort courtesy; the kill is the guarantee) then over_budget termination (retry→defer). Live-verified on claude; other transcript parsers sample best-effort (mid-turn flush unverified); inert where no mid-session usage signal exists (usage_parser "none", copilot's shutdown-only flush)
+max_tokens_per_session = 4000000 # weighted cap a single session may spend before the guard trips; healthy sessions run ~1-2.5M weighted, so the default trips only true runaways (#158)
+session_budget_grace_s = 240 # enforce mode: seconds a tripped session gets to wrap up after the nudge before over_budget termination. 0 = terminate at trip, no nudge
 
 [verify]
 # Deterministic gates run by the orchestrator after a clean review, before commit.

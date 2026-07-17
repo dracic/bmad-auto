@@ -7,6 +7,7 @@ exactly what each CLI's hook registration produces), exercising spawn / env
 propagation / hook-signal waiting / kill end-to-end for any profile.
 """
 
+import dataclasses
 import json
 import shutil
 import subprocess
@@ -24,7 +25,7 @@ from bmad_loop.adapters.multiplexer import MultiplexerError
 from bmad_loop.adapters.profile import get_profile
 from bmad_loop.bmadconfig import ProjectPaths
 from bmad_loop.model import TokenUsage
-from bmad_loop.policy import LimitsPolicy, Policy
+from bmad_loop.policy import LimitsPolicy, NotifyPolicy, Policy
 from bmad_loop.signals import HookEvent
 
 HAVE_TMUX = sys.platform != "win32" and shutil.which("tmux") is not None
@@ -1463,6 +1464,429 @@ def test_lifecycle_and_heartbeat_write_failure_is_swallowed(tmp_path):
     adapter._write_heartbeat("3-1-dev-1", {"ts": 0.0})  # must not raise
 
 
+# ------------------------------ mid-session token-budget guard (#158)
+#
+# The wait loop samples cumulative weighted usage on the heartbeat cadence and
+# trips AT MOST ONCE per session on crossing spec.token_budget: warn =
+# ATTENTION + lifecycle breadcrumb only; enforce = wrap-up nudge + a monotonic
+# grace window, then an over_budget exit that never accepts an on-disk
+# artifact under a live window. Driven with a scripted watcher, a steerable
+# clock (ticks advance past HEARTBEAT_INTERVAL_S to cross the throttle), and a
+# real claude-jsonl transcript file.
+
+
+def _write_claude_transcript(path: Path, input_tokens: int) -> None:
+    entry = {
+        "type": "assistant",
+        "message": {
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            }
+        },
+    }
+    path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+
+
+def _budget_adapter(tmp_path, monkeypatch, usage_parser="claude-jsonl"):
+    """Base adapter (result.json contract) + steerable clock + recorded nudges.
+    Desktop notifications are off so gates.notify only appends the ATTENTION
+    file under the run dir."""
+    monkeypatch.setattr(generic, "RESULT_GRACE_S", 0.0)
+    monkeypatch.setattr(generic, "RESULT_POLL_S", 0.0)
+    profile = dataclasses.replace(get_profile("claude"), usage_parser=usage_parser)
+    adapter = GenericTmuxAdapter(
+        run_dir=tmp_path / "run",
+        policy=Policy(limits=LimitsPolicy(), notify=NotifyPolicy(desktop=False, file=True)),
+        profile=profile,
+    )
+    adapter._window_alive = lambda handle: True
+    sent: list[str] = []
+    adapter.send_text = lambda handle, text: sent.append(text)
+    (adapter.tasks_dir / "b-1").mkdir()
+
+    # wall starts frozen at 0 (the session's #157 co-bound never fires) but is
+    # steerable so the budget-grace wall co-bound can be driven independently.
+    clock = {"t": 1000.0, "wall": 0.0}
+
+    class _Clock:
+        monotonic = staticmethod(lambda: clock["t"])
+        time = staticmethod(lambda: clock["wall"])
+        sleep = staticmethod(lambda *_: None)
+        time_ns = staticmethod(lambda: 0)
+
+    monkeypatch.setattr(generic, "time", _Clock)
+    return adapter, clock, sent
+
+
+def _budget_handle() -> SessionHandle:
+    return SessionHandle(task_id="b-1", native_id="@1", launched_ns=0)
+
+
+def _budget_spec(tmp_path, mode="enforce", budget=1000, grace_s=50.0, timeout_s=100_000.0):
+    return SessionSpec(
+        task_id="b-1",
+        role="dev",
+        prompt="p",
+        cwd=tmp_path,
+        timeout_s=timeout_s,
+        token_budget=budget,
+        token_budget_mode=mode,
+        token_budget_grace_s=grace_s,
+        cache_read_weight=0.1,
+    )
+
+
+def _start_event(transcript_path):
+    return HookEvent(
+        ts=1,
+        event="SessionStart",
+        task_id="b-1",
+        session_id="sess",
+        transcript_path=str(transcript_path),
+        path=Path("x"),
+    )
+
+
+def _advance_31(clock):
+    """on_call hook: every tick after the SessionStart crosses the heartbeat
+    throttle, so each watcher call is one sampling opportunity."""
+
+    def advance(call_n):
+        if call_n >= 2:
+            clock["t"] += 31.0
+
+    return advance
+
+
+def test_budget_warn_trips_once_and_session_completes(tmp_path, monkeypatch):
+    """Warn mode: one ATTENTION line + one budget-tripped breadcrumb, no nudge,
+    no termination — the session runs to its natural end with budget_weighted
+    on the result. The latch stops all further sampling."""
+    adapter, clock, sent = _budget_adapter(tmp_path, monkeypatch)
+    transcript = tmp_path / "t.jsonl"
+    _write_claude_transcript(transcript, input_tokens=5000)
+    (adapter.tasks_dir / "b-1" / "result.json").write_text('{"ok": true}')
+
+    samples: list[str] = []
+    real_tally = generic.tally_usage
+
+    def spying_tally(parser, path):
+        samples.append(str(path))
+        return real_tally(parser, path)
+
+    monkeypatch.setattr(generic, "tally_usage", spying_tally)
+
+    adapter.watcher = _ScriptedWatcher(
+        [_start_event(transcript), None, None, _stop_event("b-1", "sess", str(transcript))],
+        on_call=_advance_31(clock),
+    )
+    result = adapter.wait_for_completion(_budget_handle(), _budget_spec(tmp_path, mode="warn"))
+
+    assert result.status == "completed"
+    assert result.result_json == {"ok": True}
+    assert result.budget_weighted == 5000
+    assert sent == []  # warn mode: no nudge
+    assert samples == [str(transcript)]  # latched after the trip: no re-sampling
+    attention = (adapter.run_dir / "ATTENTION").read_text(encoding="utf-8")
+    assert len(attention.splitlines()) == 1
+    tripped = [ln for ln in _lifecycle_lines(adapter, "b-1") if ln["event"] == "budget-tripped"]
+    assert len(tripped) == 1
+    assert tripped[0]["weighted"] == 5000
+    assert tripped[0]["budget"] == 1000
+    assert tripped[0]["mode"] == "warn"
+
+
+def test_budget_enforce_nudges_then_terminates_over_budget(tmp_path, monkeypatch):
+    """Enforce mode: BUDGET_NUDGE_TEXT at trip, then grace expiry under a live
+    window ends over_budget WITHOUT accepting the on-disk artifact (#48/#53)."""
+    adapter, clock, sent = _budget_adapter(tmp_path, monkeypatch)
+    transcript = tmp_path / "t.jsonl"
+    _write_claude_transcript(transcript, input_tokens=5000)
+    # a result on disk must NOT upgrade the over_budget exit: live-window distrust
+    (adapter.tasks_dir / "b-1" / "result.json").write_text('{"ok": true}')
+
+    adapter.watcher = _ScriptedWatcher([_start_event(transcript)], on_call=_advance_31(clock))
+    result = adapter.wait_for_completion(
+        _budget_handle(), _budget_spec(tmp_path, mode="enforce", grace_s=50.0)
+    )
+
+    assert result.status == "over_budget"
+    assert result.result_json is None
+    assert result.budget_weighted == 5000
+    assert sent == [generic.BUDGET_NUDGE_TEXT]
+    attention = (adapter.run_dir / "ATTENTION").read_text(encoding="utf-8")
+    assert len(attention.splitlines()) == 1
+    # the verdict leaves a breadcrumb, like timeout-fired (#157 forensics)
+    fired = [ln for ln in _lifecycle_lines(adapter, "b-1") if ln["event"] == "over-budget-fired"]
+    assert len(fired) == 1
+    assert fired[0]["weighted"] == 5000
+    assert fired[0]["budget"] == 1000
+    assert fired[0]["zero_grace"] is False
+
+
+def test_budget_enforce_completion_within_grace_completes(tmp_path, monkeypatch):
+    """A Stop with a result inside the grace window completes the session
+    normally — budget_weighted still rides the completed result."""
+    adapter, clock, sent = _budget_adapter(tmp_path, monkeypatch)
+    transcript = tmp_path / "t.jsonl"
+    _write_claude_transcript(transcript, input_tokens=5000)
+    (adapter.tasks_dir / "b-1" / "result.json").write_text('{"ok": true}')
+
+    adapter.watcher = _ScriptedWatcher(
+        [_start_event(transcript), None, _stop_event("b-1", "sess", str(transcript))],
+        on_call=_advance_31(clock),
+    )
+    result = adapter.wait_for_completion(
+        _budget_handle(), _budget_spec(tmp_path, mode="enforce", grace_s=100.0)
+    )
+
+    assert result.status == "completed"
+    assert result.result_json == {"ok": True}
+    assert result.budget_weighted == 5000
+    assert sent == [generic.BUDGET_NUDGE_TEXT]
+
+
+def test_budget_enforce_zero_grace_is_immediate_no_nudge(tmp_path, monkeypatch):
+    adapter, clock, sent = _budget_adapter(tmp_path, monkeypatch)
+    transcript = tmp_path / "t.jsonl"
+    _write_claude_transcript(transcript, input_tokens=5000)
+
+    adapter.watcher = _ScriptedWatcher([_start_event(transcript)], on_call=_advance_31(clock))
+    result = adapter.wait_for_completion(
+        _budget_handle(), _budget_spec(tmp_path, mode="enforce", grace_s=0.0)
+    )
+
+    assert result.status == "over_budget"
+    assert result.budget_weighted == 5000
+    assert sent == []  # zero grace: terminate at trip, no wrap-up nudge
+    fired = [ln for ln in _lifecycle_lines(adapter, "b-1") if ln["event"] == "over-budget-fired"]
+    assert len(fired) == 1
+    assert fired[0]["zero_grace"] is True
+
+
+def test_budget_grace_expiry_reprobes_liveness_dead_window_is_crashed(tmp_path, monkeypatch):
+    """Window death at grace expiry is authoritative: the existing crashed path
+    (artifact honored) wins over the over_budget verdict."""
+    adapter, clock, sent = _budget_adapter(tmp_path, monkeypatch)
+    transcript = tmp_path / "t.jsonl"
+    _write_claude_transcript(transcript, input_tokens=5000)
+
+    alive_calls = {"n": 0}
+
+    def flaky_alive(handle):
+        alive_calls["n"] += 1
+        return alive_calls["n"] <= 3  # alive through the grace, dead at the expiry re-probe
+
+    adapter._window_alive = flaky_alive
+    adapter.watcher = _ScriptedWatcher([_start_event(transcript)], on_call=_advance_31(clock))
+    result = adapter.wait_for_completion(
+        _budget_handle(), _budget_spec(tmp_path, mode="enforce", grace_s=50.0)
+    )
+
+    assert result.status == "crashed"
+    assert result.budget_weighted == 5000
+
+
+def test_budget_timeout_after_trip_carries_weighted(tmp_path, monkeypatch):
+    """budget_weighted rides every post-trip exit — here the session times out
+    inside a still-open grace window."""
+    adapter, clock, sent = _budget_adapter(tmp_path, monkeypatch)
+    transcript = tmp_path / "t.jsonl"
+    _write_claude_transcript(transcript, input_tokens=5000)
+
+    adapter.watcher = _ScriptedWatcher([_start_event(transcript)], on_call=_advance_31(clock))
+    result = adapter.wait_for_completion(
+        _budget_handle(),
+        _budget_spec(tmp_path, mode="enforce", grace_s=1_000_000.0, timeout_s=100.0),
+    )
+
+    assert result.status == "timeout"
+    assert result.budget_weighted == 5000
+    assert sent == [generic.BUDGET_NUDGE_TEXT]
+
+
+def test_budget_parser_none_is_inert(tmp_path, monkeypatch):
+    """No usage signal (usage_parser \"none\") leaves the guard inert whatever
+    the mode: the session never trips and completes normally."""
+    adapter, clock, sent = _budget_adapter(tmp_path, monkeypatch, usage_parser="none")
+    transcript = tmp_path / "t.jsonl"
+    _write_claude_transcript(transcript, input_tokens=10_000_000)
+    (adapter.tasks_dir / "b-1" / "result.json").write_text('{"ok": true}')
+
+    adapter.watcher = _ScriptedWatcher(
+        [_start_event(transcript), None, None, _stop_event("b-1", "sess", str(transcript))],
+        on_call=_advance_31(clock),
+    )
+    result = adapter.wait_for_completion(_budget_handle(), _budget_spec(tmp_path, mode="enforce"))
+
+    assert result.status == "completed"
+    assert result.budget_weighted is None
+    assert sent == []
+    assert not (adapter.run_dir / "ATTENTION").exists()
+
+
+def test_budget_mode_off_never_samples(tmp_path, monkeypatch):
+    """Mode off: zero sampling — the transcript is never read despite huge
+    usage, and behavior is byte-identical to today."""
+    adapter, clock, sent = _budget_adapter(tmp_path, monkeypatch)
+    transcript = tmp_path / "t.jsonl"
+    _write_claude_transcript(transcript, input_tokens=10_000_000)
+    (adapter.tasks_dir / "b-1" / "result.json").write_text('{"ok": true}')
+
+    samples: list[str] = []
+    monkeypatch.setattr(generic, "tally_usage", lambda parser, path: samples.append(str(path)))
+
+    adapter.watcher = _ScriptedWatcher(
+        [_start_event(transcript), None, None, _stop_event("b-1", "sess", str(transcript))],
+        on_call=_advance_31(clock),
+    )
+    result = adapter.wait_for_completion(_budget_handle(), _budget_spec(tmp_path, mode="off"))
+
+    assert result.status == "completed"
+    assert result.budget_weighted is None
+    assert samples == []  # the guard never read the transcript
+    assert sent == []
+    assert not (adapter.run_dir / "ATTENTION").exists()
+
+
+def test_budget_sampling_oserror_is_inert(tmp_path, monkeypatch):
+    """A failing usage read must never break the wait loop: the sample reads as
+    None and the guard skips the tick."""
+    adapter, _, _ = _budget_adapter(tmp_path, monkeypatch)
+
+    def boom(parser, path):
+        raise OSError("unreadable transcript")
+
+    monkeypatch.setattr(generic, "tally_usage", boom)
+    assert adapter._sample_weighted_usage("/t.jsonl", _budget_spec(tmp_path)) is None
+
+
+def test_budget_sampling_survives_torn_transcript(tmp_path, monkeypatch):
+    """The transcript is a LIVE file being appended mid-turn: a flush boundary
+    can split a multibyte UTF-8 character, and the torn read raises
+    UnicodeDecodeError (a ValueError, NOT an OSError). The sample tick must go
+    inert — never crash the wait loop — and the session completes normally."""
+    adapter, clock, sent = _budget_adapter(tmp_path, monkeypatch)
+    transcript = tmp_path / "t.jsonl"
+    entry = json.dumps({"message": {"usage": {"input_tokens": 5000}}})
+    # valid entry, then a truncated multibyte sequence at the flush boundary
+    transcript.write_bytes(entry.encode("utf-8") + b"\n\xe2\x82")
+    assert adapter._sample_weighted_usage(str(transcript), _budget_spec(tmp_path)) is None
+
+    (adapter.tasks_dir / "b-1" / "result.json").write_text('{"ok": true}')
+    adapter.watcher = _ScriptedWatcher(
+        [_start_event(transcript), None, None, _stop_event("b-1", "sess", str(transcript))],
+        on_call=_advance_31(clock),
+    )
+    result = adapter.wait_for_completion(_budget_handle(), _budget_spec(tmp_path, mode="enforce"))
+
+    assert result.status == "completed"
+    assert result.budget_weighted is None  # every sample tick was inert
+    assert sent == []
+    assert not (adapter.run_dir / "ATTENTION").exists()
+
+
+def test_budget_nudge_send_failure_still_arms_grace(tmp_path, monkeypatch):
+    """A dead/hung window can reject the wrap-up nudge (tmux send-keys
+    raises); the trip must survive it and the grace still arm — the verdict
+    then follows the normal paths (here: grace expiry under a live window)."""
+    adapter, clock, sent = _budget_adapter(tmp_path, monkeypatch)
+    transcript = tmp_path / "t.jsonl"
+    _write_claude_transcript(transcript, input_tokens=5000)
+
+    def boom(handle, text):
+        raise MultiplexerError("window gone")
+
+    adapter.send_text = boom
+    adapter.watcher = _ScriptedWatcher([_start_event(transcript)], on_call=_advance_31(clock))
+    result = adapter.wait_for_completion(
+        _budget_handle(), _budget_spec(tmp_path, mode="enforce", grace_s=50.0)
+    )
+
+    assert result.status == "over_budget"
+    assert result.budget_weighted == 5000
+
+
+def test_budget_notify_failure_does_not_break_trip(tmp_path, monkeypatch):
+    """observe-degrade: an ATTENTION append failure (disk full, perms) degrades
+    to a missing notification; the trip itself and the session proceed."""
+    from bmad_loop import gates as gates_mod
+
+    adapter, clock, sent = _budget_adapter(tmp_path, monkeypatch)
+    transcript = tmp_path / "t.jsonl"
+    _write_claude_transcript(transcript, input_tokens=5000)
+    (adapter.tasks_dir / "b-1" / "result.json").write_text('{"ok": true}')
+
+    def boom(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(gates_mod, "notify", boom)
+    adapter.watcher = _ScriptedWatcher(
+        [_start_event(transcript), None, _stop_event("b-1", "sess", str(transcript))],
+        on_call=_advance_31(clock),
+    )
+    result = adapter.wait_for_completion(_budget_handle(), _budget_spec(tmp_path, mode="warn"))
+
+    assert result.status == "completed"
+    assert result.budget_weighted == 5000  # the trip proceeded past the failed notify
+    tripped = [ln for ln in _lifecycle_lines(adapter, "b-1") if ln["event"] == "budget-tripped"]
+    assert len(tripped) == 1
+
+
+def test_budget_grace_fires_on_wall_clock_when_monotonic_frozen(tmp_path, monkeypatch):
+    """The #157 suspend signature on the budget grace: a host suspend freezes
+    time.monotonic(), silently stretching the 'bounded' wrap-up window. The
+    wall-clock co-bound expires it anyway."""
+    adapter, clock, sent = _budget_adapter(tmp_path, monkeypatch)
+    transcript = tmp_path / "t.jsonl"
+    _write_claude_transcript(transcript, input_tokens=5000)
+
+    def advance(call_n):
+        if call_n in (2, 3):
+            clock["t"] += 31.0  # reach the sampling heartbeat: the trip arms the grace
+        elif call_n >= 4:
+            clock["wall"] += 31.0  # suspended host: wall counts on, monotonic frozen
+
+    adapter.watcher = _ScriptedWatcher([_start_event(transcript)], on_call=advance)
+    result = adapter.wait_for_completion(
+        _budget_handle(), _budget_spec(tmp_path, mode="enforce", grace_s=50.0)
+    )
+
+    assert result.status == "over_budget"
+    assert result.budget_weighted == 5000
+    assert sent == [generic.BUDGET_NUDGE_TEXT]
+
+
+def test_budget_zero_grace_dead_window_takes_crash_path(tmp_path, monkeypatch):
+    """A trip coinciding with window death must not discard a landed artifact
+    just because grace is 0: the zero-grace exit re-probes liveness and routes
+    a dead window through the crash path, which honors the artifact."""
+    adapter, clock, sent = _budget_adapter(tmp_path, monkeypatch)
+    transcript = tmp_path / "t.jsonl"
+    _write_claude_transcript(transcript, input_tokens=5000)
+    (adapter.tasks_dir / "b-1" / "result.json").write_text('{"ok": true}')
+
+    alive_calls = {"n": 0}
+
+    def flaky_alive(handle):
+        alive_calls["n"] += 1
+        return alive_calls["n"] == 1  # alive at the first idle-tick probe, dead at the trip
+
+    adapter._window_alive = flaky_alive
+    adapter.watcher = _ScriptedWatcher([_start_event(transcript)], on_call=_advance_31(clock))
+    result = adapter.wait_for_completion(
+        _budget_handle(), _budget_spec(tmp_path, mode="enforce", grace_s=0.0)
+    )
+
+    assert result.status == "completed"  # crash path honored the artifact
+    assert result.result_json == {"ok": True}
+    assert result.budget_weighted == 5000
+    assert sent == []
+
+
 # ----------------------------------------------- post-kill reconcile (#61)
 #
 # A session that finished its work but lost its final Stop ends "stalled"
@@ -1511,6 +1935,20 @@ def test_post_kill_reconcile_rescues_timeout(tmp_path):
     assert result.result_json["post_kill_reconciled"] is True
     assert result.timeout_fired_at == 1234.5
     assert result.timeout_expired_clock == "wall"
+
+
+def test_post_kill_reconcile_rescues_over_budget(tmp_path):
+    """over_budget joins the rescue set (#158): a terminal artifact the wrap-up
+    nudge flushed at kill-time is honored once the window is provably dead —
+    the tripped budget's sample survives the upgrade."""
+    adapter, impl = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: False
+    (impl / "spec-3-1-foo.md").write_text(_DONE_SPEC)
+    original = _unvouched("over_budget", budget_weighted=5_000_000)
+    result = adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original)
+    assert result.status == "completed"
+    assert result.result_json["post_kill_reconciled"] is True
+    assert result.budget_weighted == 5_000_000
 
 
 def test_post_kill_reconcile_leaves_other_statuses_alone(tmp_path):

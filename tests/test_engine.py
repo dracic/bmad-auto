@@ -1,5 +1,6 @@
 """Engine scenario tests against the mock adapter — no tmux, no LLM."""
 
+import dataclasses
 import os
 import re
 import signal
@@ -980,6 +981,124 @@ def test_token_budget_exceeded_journals_weighted(project):
     ]
     assert len(entries) == 1
     assert '"weighted": 160000' in entries[0]
+
+
+# ------------------------------ mid-session token-budget guard (#158)
+
+
+def _with_budget_weighted(effect, weighted):
+    """Wrap a scripted effect so its result carries a tripped budget sample —
+    the adapter sets budget_weighted on every post-trip exit, completed ones
+    (a warn-mode trip, a wrap-up inside the grace) included."""
+
+    def wrapper(spec):
+        return dataclasses.replace(effect(spec), budget_weighted=weighted)
+
+    return wrapper
+
+
+def test_dev_over_budget_retries_then_defers(project):
+    """over_budget rides the ordinary non-completed dev arm — RETRY while
+    attempts remain, plateau-DEFER once exhausted — with zero escalation.py
+    changes (#158)."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, adapter = make_engine(
+        project,
+        [
+            SessionResult(status="over_budget", budget_weighted=5_000_000),
+            SessionResult(status="over_budget", budget_weighted=6_000_000),
+        ],
+    )
+    summary = engine.run()
+
+    assert summary.deferred == 1
+    assert engine.state.tasks["1-1-a"].phase == Phase.DEFERRED
+    decisions = [e for e in engine.journal.entries() if e["kind"] == "dev-decision"]
+    assert [d["action"] for d in decisions] == ["retry", "defer"]
+    assert all("dev session over_budget" in d["reason"] for d in decisions)
+
+
+def test_review_over_budget_retries_then_defers(project):
+    """over_budget from a review session rides the same non-completed arm as
+    stalled/crashed: review-retry while cycles remain, DEFER once the review
+    budget is spent — zero escalation.py changes (#158)."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(
+        project,
+        [
+            dev_effect(project, "1-1-a"),  # finalizes spec to done, recommends follow-up
+            SessionResult(status="over_budget", budget_weighted=5_000_000),
+            SessionResult(status="over_budget", budget_weighted=5_500_000),
+            SessionResult(status="over_budget", budget_weighted=6_000_000),  # budget spent
+        ],
+    )
+    summary = engine.run()
+
+    assert summary.deferred == 1 and summary.done == 0
+    task = engine.state.tasks["1-1-a"]
+    assert task.phase == Phase.DEFERRED
+    assert "review session over_budget" in task.defer_reason
+    retries = [e for e in engine.journal.entries() if e["kind"] == "review-retry"]
+    assert len(retries) == 2
+    assert all("review session over_budget" in r["reason"] for r in retries)
+
+
+def test_session_end_journals_budget_extras_when_tripped(project):
+    """A tripped session's session-end entry carries budget_weighted plus the
+    cap and mode it was judged against (policy defaults: 4M / warn);
+    untripped sessions carry none."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, adapter = make_engine(
+        project,
+        [
+            SessionResult(status="over_budget", budget_weighted=5_000_000),
+            _with_budget_weighted(dev_effect(project, "1-1-a"), 4_100_000),
+            review_effect(project, "1-1-a", clean=True),
+        ],
+    )
+    summary = engine.run()
+    assert summary.done == 1
+
+    ends = [e for e in engine.journal.entries() if e["kind"] == "session-end"]
+    assert [e["status"] for e in ends] == ["over_budget", "completed", "completed"]
+    assert ends[0]["budget_weighted"] == 5_000_000
+    assert ends[0]["budget"] == 4_000_000
+    assert ends[0]["budget_mode"] == "warn"
+    # a tripped-but-completed session (warn mode / wrap-up in grace) carries
+    # the extras too
+    assert ends[1]["budget_weighted"] == 4_100_000
+    # the untripped review session carries none
+    assert "budget_weighted" not in ends[2]
+
+
+def test_engine_threads_budget_policy_into_session_spec(project):
+    """Every session the engine drives gets the [limits] budget knobs on its
+    SessionSpec — the stall_nudges_cap threading pattern."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),
+        limits=LimitsPolicy(
+            session_budget_mode="warn",
+            max_tokens_per_session=123_456,
+            session_budget_grace_s=7,
+            cache_read_weight=0.25,
+        ),
+    )
+    engine, adapter = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+        policy=policy,
+    )
+    engine.run()
+
+    assert [s.role for s in adapter.sessions] == ["dev", "review"]
+    for spec in adapter.sessions:
+        assert spec.token_budget == 123_456
+        assert spec.token_budget_mode == "warn"
+        assert spec.token_budget_grace_s == 7.0
+        assert spec.cache_read_weight == 0.25
 
 
 def test_happy_path(project):
