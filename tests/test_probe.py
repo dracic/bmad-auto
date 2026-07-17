@@ -103,6 +103,43 @@ def test_infer_with_parser_none_still_finds_candidates(tmp_path):
     assert "message.usage.input_tokens:int" in schema.token_field_candidates
 
 
+# Captured from a live agy 1.1.3 turn (probe-adapter antigravity --probe). Shape
+# pinned deliberately: agy's transcript carries NO usage block, which is why the
+# profile's usage_parser is "none" permanently rather than pending a parser.
+ANTIGRAVITY_ROWS = [
+    {
+        "step_index": 0,
+        "source": "USER_EXPLICIT",
+        "type": "USER_INPUT",
+        "status": "DONE",
+        "created_at": "2026-07-17T02:05:24Z",
+        "content": "<USER_REQUEST>\nReply with exactly: OK\n</USER_REQUEST>",
+    },
+    {
+        "step_index": 2,
+        "source": "MODEL",
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "created_at": "2026-07-17T02:05:24Z",
+        "content": "OK",
+        "thinking": "**Processing User Request**",
+    },
+]
+
+
+def test_infer_antigravity_transcript_has_no_token_fields(tmp_path):
+    """agy exposes no usage in its transcript — the evidence for usage_parser="none".
+
+    If this ever starts finding candidates, agy began emitting usage and the
+    profile should be revisited (see antigravity.toml).
+    """
+    path = _write_jsonl(tmp_path / "transcript_full.jsonl", ANTIGRAVITY_ROWS)
+    schema = probe.infer_token_schema("none", path)
+    assert schema.entries_scanned == 2
+    assert schema.token_field_candidates == []
+    assert "step_index:int" in schema.key_paths
+
+
 # ----------------------------------------------------------- discovery
 
 

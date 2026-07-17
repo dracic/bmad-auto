@@ -98,7 +98,7 @@ invokes inline — are present before a run starts.
 ## Choosing which CLIs to drive
 
 The supported adapters are `claude` (the default), `codex`, `gemini`, `copilot`, and
-`antigravity` (Google's `agy`, experimental — probe before unattended use). You can pick more
+`antigravity` (Google's `agy`, experimental — `isolation = "none"` only). You can pick more
 than one — register every CLI you intend to use for dev, review, or sweep triage.
 
 There are **two layers** here, and confusing them is the usual stumbling block:
@@ -196,12 +196,19 @@ them to whoever owns the machine:
   subscription). Requires the Copilot **CLI** GA (≥ 2026-02) — _not_ the VS Code extension.
   **Pin a capable model**: the free default (GPT-5 mini) silently skips steps in the
   multi-step dev/review skills; set `[adapter] model = "claude-sonnet-4-6"` (→ `--model`).
-- **antigravity** — run `agy` once in the project and authenticate + trust the workspace
-  (`settings.json` `trustedWorkspaces`). **Experimental — probe before unattended use**
-  (`bmad-loop probe-adapter antigravity --probe`): token usage isn't captured yet
-  (`usage_parser = "none"`), and worktree runs use a different path than the trusted one,
-  so verify during the probe whether that re-triggers a trust prompt. Requires Antigravity
-  CLI (`agy` ≥ 1.0.16).
+- **antigravity** — run `agy` once in the project, authenticate, and answer
+  **"Yes, I trust this folder"** before `bmad-loop run`; spawned sessions can't answer that
+  dialog, and a pending one reads as a session timeout. Requires Antigravity CLI
+  (`agy` ≥ 1.1.3). Two limitations to know, both verified against 1.1.3:
+  - **Trust is exact-path.** `settings.json` `trustedWorkspaces` matches whole paths —
+    trusting a parent does _not_ cover its subdirectories, and
+    `--dangerously-skip-permissions` does not bypass the dialog (it covers tool
+    permissions only). So antigravity needs `isolation = "none"` (the default);
+    **`isolation = "worktree"` will hang**, because each worktree is a fresh untrusted
+    path under `.bmad-loop/runs/`. See [#169](https://github.com/bmad-code-org/bmad-loop/issues/169).
+  - **Token usage is not recorded** (`usage_parser = "none"`) — and this is permanent,
+    not a gap: agy's transcript carries no usage data at all (it counts tokens only in
+    an internal SQLite/protobuf store). Runs work; the token columns stay empty.
 
 ### Skill location
 

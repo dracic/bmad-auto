@@ -167,6 +167,31 @@ for antigravity`, immediately after a successful `init --cli antigravity`). Both
   script markers rather than the bare `bmad_loop` substring, so an unrelated hook command whose
   path merely contains `bmad_loop` can't make init skip a registration that validate would then
   report missing.
+- **The antigravity hook relay now reads agy's payload keys.** agy encodes hook payloads as
+  protojson — `conversationId`, `transcriptPath`, `workspacePaths` — while the relay only tried
+  snake_case plus copilot's `sessionId`. Every agy event therefore recorded a null
+  `session_id`, and `cwd` was never populated (agy sends no `cwd`, only a `workspacePaths`
+  list). Both the relay and the probe capture hook now try agy's casing, verified against a
+  live 1.1.3 turn.
+- **`probe-adapter antigravity` finds the transcript.** The shipped convention glob had the
+  wrong filename — agy writes `transcript_full.jsonl`, not `transcript.jsonl`, under
+  `~/.gemini/antigravity-cli/brain/<conversationId>/.system_generated/logs/`. Corrected against
+  a live capture. A live `--probe` now also prefers the `transcriptPath` the CLI hands the hook
+  on stdin over the convention glob: the payload names _this_ turn's file, while a glob can
+  only take the newest match and may land on an unrelated session.
+- **antigravity: `usage_parser = "none"` is now documented as permanent, not pending.** A live
+  capture confirmed agy's transcript carries only
+  `step_index`/`source`/`type`/`status`/`created_at`/`content`/`thinking` — no usage block
+  anywhere. agy does count tokens, but only inside `conversations/<id>.db`, an undocumented
+  SQLite/protobuf store outside the `(transcript_path) -> TokenUsage` parser contract. Runs
+  work; token columns stay empty.
+- **antigravity: trust is exact-path (verified against `agy` 1.1.3).** `agy` blocks on an
+  interactive "trust this folder" dialog for any workspace not listed verbatim in
+  `settings.json` `trustedWorkspaces`; a trusted parent does not cover subdirectories, and
+  `--dangerously-skip-permissions` does not bypass it (it covers tool permissions only).
+  `isolation = "none"` (the default) works; `isolation = "worktree"` hangs on every run, since
+  each worktree is a fresh untrusted path — now called out in the profile and setup guide, and
+  tracked in #169. Replaces the profile's previous "verify during probe" placeholder.
 - **`branch_per=run` + `keep_failed` no longer poisons a multi-story run after the first kept
   failure (#138).** The first story to end deferred under `keep_failed=true` left its worktree
   checked out on the single shared run branch, so every subsequent story's `git worktree add`

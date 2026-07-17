@@ -55,6 +55,32 @@ def test_conversation_id_fallback(tmp_path):
     assert json.loads(files[0].read_text())["session_id"] == "conv-9"
 
 
+def test_antigravity_payload(tmp_path):
+    """agy payloads are protojson: conversationId, and workspacePaths for cwd."""
+    env = {"BMAD_LOOP_RUN_DIR": str(tmp_path), "BMAD_LOOP_TASK_ID": "t1"}
+    payload = {
+        "conversationId": "agy-3",
+        "transcriptPath": "/ws/.gemini/antigravity-cli/transcript.jsonl",
+        "workspacePaths": ["/ws"],
+        "terminationReason": "model_stop",
+        "fullyIdle": True,
+    }
+    proc = run_hook("Stop", env, payload)
+    assert proc.returncode == 0
+    event = json.loads(next((tmp_path / "events").glob("*.json")).read_text())
+    assert event["session_id"] == "agy-3"
+    assert event["transcript_path"].endswith("transcript.jsonl")
+    assert event["cwd"] == "/ws"
+
+
+def test_workspace_paths_ignored_when_unusable(tmp_path):
+    """An empty/odd workspacePaths must degrade to None, never IndexError."""
+    env = {"BMAD_LOOP_RUN_DIR": str(tmp_path), "BMAD_LOOP_TASK_ID": "t1"}
+    proc = run_hook("Stop", env, {"conversationId": "agy-4", "workspacePaths": []})
+    assert proc.returncode == 0
+    assert json.loads(next((tmp_path / "events").glob("*.json")).read_text())["cwd"] is None
+
+
 def test_camelcase_payload(tmp_path):
     """Copilot payloads carry camelCase sessionId / transcriptPath."""
     env = {"BMAD_LOOP_RUN_DIR": str(tmp_path), "BMAD_LOOP_TASK_ID": "t1"}

@@ -57,10 +57,15 @@ FAMILY_GLOBS = {
     "codex": "~/.codex/sessions/*/*/*/rollout-*.jsonl",
     "gemini": "~/.gemini/tmp/*/chats/session-*.jsonl",
     "copilot": "~/.copilot/session-state/*/events.jsonl",
-    # agy (Antigravity CLI) writes a per-conversation transcript.jsonl; this path
-    # is community-doc-sourced (agy 1.0.x) — confirm against your build with
-    # `probe-adapter antigravity --probe` before trusting auto-discovery.
-    "antigravity": "~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl",
+    # agy (Antigravity CLI) writes one transcript per conversation, keyed by
+    # conversationId. Verified against agy 1.1.3 by capturing a live Stop hook,
+    # whose transcriptPath is exactly this shape. Note `transcript_full.jsonl`,
+    # not `transcript.jsonl` — agy's own hooks.md shows a WORKSPACE-relative
+    # `<ws>/.gemini/antigravity/transcript.jsonl` in its payload example, but
+    # that is illustrative: the real path is home-rooted, under brain/.
+    "antigravity": (
+        "~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl"
+    ),
 }
 
 _TOKEN_KEY_RE = re.compile(
@@ -445,6 +450,26 @@ def _probe_argv(profile: CLIProfile, binary: str, hints: Hints) -> list[str]:
     return argv
 
 
+def _captured_transcript_path(capture_dir: Path) -> Path | None:
+    """The transcript path the CLI handed a hook on stdin, newest signal first.
+
+    Ground truth beats convention: a CLI that reports its own transcript (agy's
+    `transcriptPath`, Claude's `transcript_path`) names the exact file the turn
+    was recorded to, including the session id a convention glob can only wildcard.
+    """
+    import json
+
+    for signal_file in sorted(capture_dir.glob("*.signal.json"), reverse=True):
+        try:
+            raw = json.loads(signal_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        path = raw.get("transcript_path") if isinstance(raw, dict) else None
+        if isinstance(path, str) and path:
+            return Path(path).expanduser()
+    return None
+
+
 def _collect_captures(capture_dir: Path, events_map: dict[str, str]) -> list[EventCapture]:
     captures: list[EventCapture] = []
     for payload_file in sorted(capture_dir.glob("*.payload.json")):
@@ -593,8 +618,15 @@ def probe(
             if tail:
                 finding.warnings.append("log tail (scrubbed):\n" + tail)
 
-        # 5. transcript discovery + schema inference from the user's real home
-        finding.transcript = discover_transcript(profile.usage_parser, cli=cli, hints=hints)
+        # 5. transcript: prefer the exact path the CLI handed the hook on stdin
+        #    over the convention glob — the payload names this turn's file, while
+        #    the glob can only pick the newest match and may land on an unrelated
+        #    session. Falls back to the glob when the CLI reports no path.
+        live = _captured_transcript_path(capture_dir)
+        if live is not None and live.is_file():
+            finding.transcript = _describe_transcript(live, glob_pat=None, multiple=False)
+        else:
+            finding.transcript = discover_transcript(profile.usage_parser, cli=cli, hints=hints)
         if finding.transcript and finding.transcript.note:
             finding.warnings.append(finding.transcript.note)
         if finding.transcript and finding.transcript.real_path is not None:
