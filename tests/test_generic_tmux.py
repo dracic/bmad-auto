@@ -51,7 +51,7 @@ sleep 60  # stay alive like an idle interactive session
 
 
 def make_adapter(
-    tmp_path, profile_name="claude", binary=None, extra_args=None, **policy_kw
+    tmp_path, profile_name="claude", binary=None, extra_args=None, mux=None, **policy_kw
 ) -> GenericTmuxAdapter:
     # session_name derives from run_dir.name, and the live tests all share one
     # tmux server — a fixed "run" name races one test's kill-session teardown
@@ -66,6 +66,7 @@ def make_adapter(
         profile=profile,
         binary=binary,
         extra_args=extra_args,
+        mux=mux,
     )
 
 
@@ -167,6 +168,111 @@ def test_await_result_grace_expires_fast(tmp_path):
     start = time.monotonic()
     assert adapter._await_result("t1", grace_s=0.2) is None
     assert time.monotonic() - start < 5
+
+
+# ------------------------------------------- verified kill escalation (#157)
+#
+# GenericAdapter.kill was a single best-effort kill_window with no verification
+# the window died. These pin the new bounded escalation: verify within
+# teardown_grace_s, then force-kill the pane pids and re-kill — degrading
+# cleanly for a backend that doesn't offer window_pane_pids (herdr returns the
+# seam default []).
+
+
+class _TeardownMux:
+    """Only the ops kill() drives — kill_window, list_window_ids (liveness),
+    window_pane_pids — with scriptable survival: the window stays alive until
+    ``survives_kills`` kill_window calls have landed."""
+
+    def __init__(self, survives_kills=0, pids=()):
+        self.survives_kills = survives_kills
+        self.pids = list(pids)
+        self.kill_windows = 0
+        self.liveness_probes = 0
+        self.pane_pid_reads = 0
+
+    def kill_window(self, target):
+        self.kill_windows += 1
+
+    def list_window_ids(self, session):
+        self.liveness_probes += 1
+        return ["@w1"] if self.kill_windows <= self.survives_kills else []
+
+    def window_pane_pids(self, target):
+        self.pane_pid_reads += 1
+        return list(self.pids)
+
+
+class _RecordingHost:
+    def __init__(self):
+        self.force_killed: list[int] = []
+
+    def force_kill(self, pid):
+        self.force_killed.append(pid)
+
+
+def _kill_handle() -> SessionHandle:
+    return SessionHandle(task_id="3-1-dev-1", native_id="@w1")
+
+
+def _lifecycle_lines(adapter, task_id="3-1-dev-1"):
+    path = adapter.tasks_dir / task_id / "session-lifecycle.jsonl"
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_kill_returns_on_first_dead_probe_without_escalating(tmp_path, monkeypatch):
+    monkeypatch.setattr(generic, "KILL_POLL_S", 0)
+    mux = _TeardownMux(survives_kills=0)
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
+    adapter.kill(_kill_handle())
+    assert mux.kill_windows == 1
+    assert mux.liveness_probes == 1
+    assert mux.pane_pid_reads == 0
+    assert _lifecycle_lines(adapter) == []  # the normal path leaves no breadcrumbs
+
+
+def test_kill_escalates_to_pane_pid_force_kill(tmp_path, monkeypatch):
+    monkeypatch.setattr(generic, "KILL_POLL_S", 0)
+    host = _RecordingHost()
+    monkeypatch.setattr(generic, "get_process_host", lambda: host)
+    mux = _TeardownMux(survives_kills=99, pids=[4242])
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
+    adapter.kill(_kill_handle())
+    assert host.force_killed == [4242]
+    assert mux.kill_windows == 2  # first strike + post-escalation re-kill
+    events = _lifecycle_lines(adapter)
+    assert [e["event"] for e in events] == ["kill-escalated", "kill-outcome"]
+    assert events[0]["pids"] == [4242]
+    assert events[1]["alive"] is True  # honest outcome: the window survived even the escalation
+    assert events[1]["escalated"] is True
+
+
+def test_kill_degrades_when_backend_offers_no_pids(tmp_path, monkeypatch):
+    """A herdr-shaped backend inherits the seam default [] — the escalation
+    degrades to the re-kill + breadcrumb, force-killing nothing."""
+    monkeypatch.setattr(generic, "KILL_POLL_S", 0)
+    host = _RecordingHost()
+    monkeypatch.setattr(generic, "get_process_host", lambda: host)
+    mux = _TeardownMux(survives_kills=99, pids=())
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
+    adapter.kill(_kill_handle())
+    assert host.force_killed == []
+    assert mux.kill_windows == 2
+    events = _lifecycle_lines(adapter)
+    assert [e["event"] for e in events] == ["kill-escalated", "kill-outcome"]
+    assert events[0]["pids"] == []
+
+
+def test_kill_grace_zero_is_the_legacy_single_strike(tmp_path):
+    mux = _TeardownMux(survives_kills=99, pids=[4242])
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0)
+    adapter.kill(_kill_handle())
+    assert mux.kill_windows == 1
+    assert mux.liveness_probes == 0
+    assert mux.pane_pid_reads == 0
+    assert _lifecycle_lines(adapter) == []
 
 
 # ----------------------------------------------- GenericDevAdapter (B1/B7)
@@ -803,6 +909,7 @@ def test_dev_grace_result_does_not_complete_while_window_alive(tmp_path, monkeyp
 
     class _Clock:  # scoped shim so we don't mutate the real time module
         monotonic = staticmethod(lambda: clock["t"])
+        time = staticmethod(lambda: 0.0)  # frozen wall clock: the co-bound never fires
         sleep = staticmethod(lambda *_: None)
         time_ns = staticmethod(lambda: 0)
 
@@ -859,6 +966,7 @@ def test_dev_stalls_when_grace_elapses_without_reinvocation(tmp_path, monkeypatc
 
     class _Clock:  # scoped shim so we don't mutate the real time module
         monotonic = staticmethod(lambda: clock["t"])
+        time = staticmethod(lambda: 0.0)  # frozen wall clock: the co-bound never fires
         sleep = staticmethod(lambda *_: None)
         time_ns = staticmethod(lambda: 0)
 
@@ -900,6 +1008,7 @@ def test_dev_grace_expiry_rechecks_liveness_and_honors_just_dead_window(tmp_path
 
     class _Clock:  # scoped shim so we don't mutate the real time module
         monotonic = staticmethod(lambda: clock["t"])
+        time = staticmethod(lambda: 0.0)  # frozen wall clock: the co-bound never fires
         sleep = staticmethod(lambda *_: None)
         time_ns = staticmethod(lambda: 0)
 
@@ -948,6 +1057,7 @@ def test_dev_grace_expiry_stall_recheck_transport_error_still_stalls(tmp_path, m
 
     class _Clock:  # scoped shim so we don't mutate the real time module
         monotonic = staticmethod(lambda: clock["t"])
+        time = staticmethod(lambda: 0.0)  # frozen wall clock: the co-bound never fires
         sleep = staticmethod(lambda *_: None)
         time_ns = staticmethod(lambda: 0)
 
@@ -988,6 +1098,7 @@ def test_dev_log_activity_keeps_grace_window_alive(tmp_path, monkeypatch):
 
     class _Clock:
         monotonic = staticmethod(lambda: clock["t"])
+        time = staticmethod(lambda: 0.0)  # frozen wall clock: the co-bound never fires
         sleep = staticmethod(lambda *_: None)
         time_ns = staticmethod(lambda: 0)
 
@@ -1031,6 +1142,7 @@ def test_dev_grace_expiry_nudges_awake_before_stalling(tmp_path, monkeypatch):
 
     class _Clock:
         monotonic = staticmethod(lambda: clock["t"])
+        time = staticmethod(lambda: 0.0)  # frozen wall clock: the co-bound never fires
         sleep = staticmethod(lambda *_: None)
         time_ns = staticmethod(lambda: 0)
 
@@ -1066,6 +1178,7 @@ def test_dev_stall_nudge_wakes_session_that_then_completes(tmp_path, monkeypatch
 
     class _Clock:
         monotonic = staticmethod(lambda: clock["t"])
+        time = staticmethod(lambda: 0.0)  # frozen wall clock: the co-bound never fires
         sleep = staticmethod(lambda *_: None)
         time_ns = staticmethod(lambda: 0)
 
@@ -1121,6 +1234,7 @@ def _stall_loop_adapter(tmp_path, monkeypatch):
 
     class _Clock:
         monotonic = staticmethod(lambda: clock["t"])
+        time = staticmethod(lambda: 0.0)  # frozen wall clock: the co-bound never fires
         sleep = staticmethod(lambda *_: None)
         time_ns = staticmethod(lambda: 0)
 
@@ -1201,6 +1315,154 @@ def test_capped_session_still_completes_when_marker_lands_late(tmp_path, monkeyp
     assert sent == [generic.STALL_NUDGE_TEXT]  # the cap was already exhausted
 
 
+# ---------------------- timeout instrumentation + wall-clock co-bound (#157)
+#
+# The #157 timeout fired with zero record of when the adapter declared it, and
+# a host suspend (macOS sleep) freezing time.monotonic() could silently extend
+# the deadline by the nap's length. The fire moment now stamps the result and
+# a session-lifecycle.jsonl line, a wall-clock co-bound fires through a frozen
+# monotonic clock (but may never EXTEND the deadline), and each tick tops up a
+# throttled heartbeat.json whose staleness diagnoses a frozen orchestrator.
+
+
+def _timeout_clock_adapter(tmp_path, monkeypatch):
+    """Adapter + independently steerable monotonic/wall clocks for driving the
+    timeout-fire path. The window stays alive and no hook event ever arrives,
+    so only a clock crossing its deadline can end the wait."""
+    monkeypatch.setattr(generic, "RESULT_GRACE_S", 0.0)
+    monkeypatch.setattr(generic, "RESULT_POLL_S", 0.0)
+    adapter, _ = make_dev_adapter(tmp_path)
+    adapter._window_alive = lambda handle: True
+
+    clock = {"mono": 1000.0, "wall": 5000.0}
+
+    class _Clock:
+        monotonic = staticmethod(lambda: clock["mono"])
+        time = staticmethod(lambda: clock["wall"])
+        sleep = staticmethod(lambda *_: None)
+        time_ns = staticmethod(lambda: 0)
+
+    monkeypatch.setattr(generic, "time", _Clock)
+    return adapter, clock
+
+
+def _short_spec(tmp_path, timeout_s=30.0) -> SessionSpec:
+    return SessionSpec(
+        task_id="3-1-dev-1",
+        role="dev",
+        prompt="/bmad-dev-auto 3-1",
+        cwd=tmp_path,
+        env={"BMAD_LOOP_STORY_KEY": "3-1"},
+        timeout_s=timeout_s,
+    )
+
+
+def test_timeout_monotonic_expiry_is_instrumented(tmp_path, monkeypatch):
+    """A plain monotonic expiry records WHEN and BY WHICH CLOCK the deadline
+    was declared elapsed: fields on the result plus exactly one timeout-fired
+    line in session-lifecycle.jsonl."""
+    adapter, clock = _timeout_clock_adapter(tmp_path, monkeypatch)
+
+    def advance(call_n):
+        clock["mono"] += 11.0  # wall frozen: only the monotonic clock expires
+
+    adapter.watcher = _ScriptedWatcher([], on_call=advance)
+    result = adapter.wait_for_completion(_dev_handle(), _short_spec(tmp_path))
+    assert result.status == "timeout"
+    assert result.timeout_expired_clock == "monotonic"
+    assert result.timeout_fired_at == 5000.0  # the fake wall clock at fire time
+    fired = [ln for ln in _lifecycle_lines(adapter) if ln["event"] == "timeout-fired"]
+    assert len(fired) == 1
+    assert fired[0]["expired_clock"] == "monotonic"
+    assert fired[0]["timeout_s"] == 30.0
+    assert fired[0]["mono_remaining_s"] <= 0
+
+
+def test_timeout_fires_on_wall_clock_when_monotonic_frozen(tmp_path, monkeypatch):
+    """The #157 suspend signature: time.monotonic() stands still through a host
+    suspend, so the monotonic deadline alone would stretch the session by the
+    nap's length. The wall-clock co-bound fires anyway, and the wall-only
+    expiry (monotonic time still to spare) is stamped as the evidence."""
+    adapter, clock = _timeout_clock_adapter(tmp_path, monkeypatch)
+
+    def advance(call_n):
+        clock["wall"] += 11.0  # suspended host: wall counts on, monotonic frozen
+
+    adapter.watcher = _ScriptedWatcher([], on_call=advance)
+    result = adapter.wait_for_completion(_dev_handle(), _short_spec(tmp_path))
+    assert result.status == "timeout"
+    assert result.timeout_expired_clock == "wall"
+    (fired,) = [ln for ln in _lifecycle_lines(adapter) if ln["event"] == "timeout-fired"]
+    assert fired["expired_clock"] == "wall"
+    assert fired["mono_remaining_s"] == 30.0  # the frozen clock never advanced
+
+
+def test_timeout_wall_clock_step_back_cannot_extend_deadline(tmp_path, monkeypatch):
+    """The co-bound may only EXPIRE the deadline, never stretch it: a wall
+    clock stepped backward (an NTP correction) leaves the monotonic expiry on
+    its original schedule."""
+    adapter, clock = _timeout_clock_adapter(tmp_path, monkeypatch)
+
+    def advance(call_n):
+        clock["mono"] += 11.0
+        clock["wall"] -= 3600.0  # NTP step-back: must change nothing
+
+    adapter.watcher = _ScriptedWatcher([], on_call=advance)
+    result = adapter.wait_for_completion(_dev_handle(), _short_spec(tmp_path))
+    assert result.status == "timeout"
+    assert result.timeout_expired_clock == "monotonic"
+    assert adapter.watcher.calls == 3  # same tick count as an untouched wall clock
+
+
+def test_heartbeat_written_and_throttled(tmp_path, monkeypatch):
+    """Each tick tops up tasks/<id>/heartbeat.json with the loop's view of the
+    session — but at most once per HEARTBEAT_INTERVAL_S: two ticks inside one
+    interval produce one write."""
+    adapter, clock = _timeout_clock_adapter(tmp_path, monkeypatch)
+    (adapter.tasks_dir / "3-1-dev-1").mkdir()  # start_session creates it in production
+
+    writes: list[dict] = []
+    real_write = adapter._write_heartbeat
+
+    def spy(task_id, payload):
+        writes.append(payload)
+        real_write(task_id, payload)
+
+    adapter._write_heartbeat = spy
+
+    def advance(call_n):
+        if call_n == 1:
+            clock["mono"] += 1.0  # next tick lands inside the same interval
+        elif call_n == 2:
+            clock["mono"] += generic.HEARTBEAT_INTERVAL_S + 10.0  # crosses it
+        else:
+            clock["mono"] += 1000.0  # past spec.timeout_s: end the loop
+
+    adapter.watcher = _ScriptedWatcher([], on_call=advance)
+    result = adapter.wait_for_completion(_dev_handle(), _short_spec(tmp_path, timeout_s=100.0))
+    assert result.status == "timeout"
+    assert writes[0] == {
+        "ts": 5000.0,
+        "remaining_s": 100.0,
+        "stall_armed": False,
+        "stall_nudges_sent": 0,
+    }
+    assert [w["remaining_s"] for w in writes] == [100.0, 59.0]  # tick 2 was throttled
+    hb = json.loads((adapter.tasks_dir / "3-1-dev-1" / "heartbeat.json").read_text())
+    assert hb == writes[-1]  # the on-disk file is the last overwrite
+
+
+def test_lifecycle_and_heartbeat_write_failure_is_swallowed(tmp_path):
+    """Like the resultless-stop breadcrumb: pure observability, so an
+    unwritable tasks dir must never break the completion loop."""
+    adapter, _ = make_dev_adapter(tmp_path)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where the tasks dir should be")
+    adapter.tasks_dir = blocker / "tasks"  # any write under it raises OSError
+    adapter._note_lifecycle("3-1-dev-1", "timeout-fired", expired_clock="wall")  # must not raise
+    adapter._write_heartbeat("3-1-dev-1", {"ts": 0.0})  # must not raise
+
+
 # ----------------------------------------------- post-kill reconcile (#61)
 #
 # A session that finished its work but lost its final Stop ends "stalled"
@@ -1218,8 +1480,8 @@ _DONE_SPEC = (
 )
 
 
-def _unvouched(status="stalled") -> SessionResult:
-    return SessionResult(status=status, session_id="sess", transcript_path="/t.jsonl")
+def _unvouched(status="stalled", **extra) -> SessionResult:
+    return SessionResult(status=status, session_id="sess", transcript_path="/t.jsonl", **extra)
 
 
 def test_post_kill_reconcile_rescues_consistent_done_artifact(tmp_path):
@@ -1238,13 +1500,17 @@ def test_post_kill_reconcile_rescues_consistent_done_artifact(tmp_path):
 def test_post_kill_reconcile_rescues_timeout(tmp_path):
     """Total hook loss (misconfigured hooks, events-dir write failure) never arms
     the stall grace — the session exits `timeout` with no artifact check at all.
-    The same post-kill rescue must cover it."""
+    The same post-kill rescue must cover it — upgrading the outcome, not the
+    timing evidence: the fired-deadline stamps survive the rescue (#157)."""
     adapter, impl = make_dev_adapter(tmp_path)
     adapter._window_alive = lambda handle: False
     (impl / "spec-3-1-foo.md").write_text(_DONE_SPEC)
-    result = adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), _unvouched("timeout"))
+    original = _unvouched("timeout", timeout_fired_at=1234.5, timeout_expired_clock="wall")
+    result = adapter._post_kill_reconcile(_dev_handle(), _dev_spec(tmp_path), original)
     assert result.status == "completed"
     assert result.result_json["post_kill_reconciled"] is True
+    assert result.timeout_fired_at == 1234.5
+    assert result.timeout_expired_clock == "wall"
 
 
 def test_post_kill_reconcile_leaves_other_statuses_alone(tmp_path):
@@ -1546,6 +1812,7 @@ def test_wait_for_completion_persistent_probe_failure_times_out_not_crashes(tmp_
 
     class _Clock:
         monotonic = staticmethod(lambda: clock["t"])
+        time = staticmethod(lambda: 0.0)  # frozen wall clock: the co-bound never fires
         sleep = staticmethod(lambda *_: None)
         time_ns = staticmethod(lambda: 0)
 

@@ -245,6 +245,7 @@ def test_seam_methods_never_leak_raw_subprocess_error(boom_run, tmp_path):
     assert mux.unset_window_option("@1", "opt") is None
     assert mux.detach_client() is None
     assert mux.pipe_pane("@1", tmp_path / "log") is None
+    assert mux.window_pane_pids("@1") == []
 
     # Already-correct swallowers stay swallowing (lock-in).
     assert mux.kill_session("s") is None
@@ -271,6 +272,47 @@ def test_seam_honesty_holds_for_psmux_style_run_override(monkeypatch):
         mux.window_alive("s", "@1")
     # sentinel methods still degrade rather than leak the raw timeout
     assert mux.list_windows("s", ["window_id"]) == []
+
+
+# ------------------------------------- window_pane_pids capability (#157)
+#
+# Like version(), window_pane_pids is a NON-abstract capability method: an
+# out-of-tree backend implementing only the abstract set (herdr) keeps working
+# with zero edits and inherits the "capability not offered" sentinel [].
+
+
+def test_window_pane_pids_default_is_capability_not_offered():
+    # StubMux implements only the abstract contract — it instantiates without
+    # window_pane_pids and inherits the degrade sentinel from the seam base.
+    assert StubMux().window_pane_pids("@1") == []
+
+
+def test_tmux_window_pane_pids_parses_pane_pid_lines(monkeypatch):
+    mux = TmuxMultiplexer()
+    seen: dict = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="1234\n5678\n", stderr="")
+
+    monkeypatch.setattr(tmux_base.subprocess, "run", fake_run)
+    assert mux.window_pane_pids("@7") == [1234, 5678]
+    assert seen["argv"] == ["tmux", "list-panes", "-t", "@7", "-F", "#{pane_pid}"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        lambda argv: (_ for _ in ()).throw(subprocess.TimeoutExpired(argv, 30)),
+        lambda argv: subprocess.CompletedProcess(argv, 1, stdout="", stderr="no window"),
+        lambda argv: subprocess.CompletedProcess(argv, 0, stdout="not-a-pid\n", stderr=""),
+    ],
+    ids=["timeout", "dead-window", "garbage-output"],
+)
+def test_tmux_window_pane_pids_degrades_to_empty(monkeypatch, outcome):
+    mux = TmuxMultiplexer()
+    monkeypatch.setattr(tmux_base.subprocess, "run", lambda argv, **k: outcome(argv))
+    assert mux.window_pane_pids("@7") == []
 
 
 # ---------------------------------------------- _run seam: encoding + env (#40)

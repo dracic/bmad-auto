@@ -752,6 +752,18 @@ def test_active_task_id_from_journal(tmp_path):
     assert data.active_task_id(tmp_path, entries) is None  # no logs fallback either
 
 
+def test_active_task_id_clears_on_aborted_session_end(tmp_path):
+    # No logs/ here on purpose: this pins the journal-scan contract (an explicit
+    # aborted end clears the active id). With logs present the newest-log
+    # fallback would still tail the ended session — deliberate, so the operator
+    # keeps the aborted log on screen; covered by the fallback test below.
+    entries = [
+        {"kind": "session-start", "task_id": "t1"},
+        {"kind": "session-end", "task_id": "t1", "status": "aborted", "error": "RuntimeError"},
+    ]
+    assert data.active_task_id(tmp_path, entries) is None
+
+
 def test_active_task_id_falls_back_to_newest_log(tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir()

@@ -325,6 +325,7 @@ max_review_cycles = 3
 max_dev_attempts = 2
 session_timeout_min = 90
 git_timeout_s = 120              # bound on any single git subprocess; exceeding it pauses/degrades, never crashes the run
+teardown_grace_s = 20            # verified session teardown: poll a killed session up to this long, then force-kill its pane pids and re-kill; 0 = one best-effort kill
 stop_without_result_nudges = 1   # times to re-prompt a session that stopped with no result.json
 dev_stall_grace_s = 600          # idle grace before a dev session awaiting a background run (e.g. PlayMode) is nudged/stalled
 dev_stall_nudges = 2             # wake-nudges spent on grace expiry before a dev session is called stalled
@@ -486,7 +487,9 @@ For `per_worktree`, set `editor_mode = "per_worktree"` with `[scm] isolation = "
 
 ## Run state
 
-Everything about a run lives in `.bmad-loop/runs/<run-id>/` (gitignored): `state.json` (resumable engine state), `journal.jsonl` (every decision), `events/` (hook signals), `tasks/<id>/` (per-session prompt + result + escalations), `logs/` (raw pane output, debugging only), `deferred/` (stashed specs from deferred stories), `resolve/<story>/` (escalation `context.json` + the resolve agent's `resolution.json`), `ATTENTION` (human-readable alerts).
+Everything about a run lives in `.bmad-loop/runs/<run-id>/` (gitignored): `state.json` (resumable engine state), `journal.jsonl` (every decision), `events/` (hook signals), `tasks/<id>/` (per-session prompt + result + escalations, plus diagnostic breadcrumbs — `session-lifecycle.jsonl` records when a timeout fired, `heartbeat.json` is the wait loop's proof-of-life, `resultless-stops.jsonl` records give-up Stops), `logs/` (raw pane output, debugging only), `deferred/` (stashed specs from deferred stories), `resolve/<story>/` (escalation `context.json` + the resolve agent's `resolution.json`), `ATTENTION` (human-readable alerts).
+
+`journal.jsonl` records a `session-end` for every session unconditionally — even a teardown that throws still lands one (status `aborted` when the outcome is unknowable). A timed-out session's `session-end` carries `fired_at` (wall time the deadline was declared elapsed), `teardown_s` (wall seconds from that fire to this `session-end` — the teardown gap that ran 2h19 in the #157 incident), and `expired_clock` (`monotonic` / `wall` / `both`); `wall` alone fingerprints a host suspend (e.g. macOS sleep) that froze the monotonic clock the deadline was computed from.
 
 Token usage is read from each CLI's local session transcript (selected by the profile's `usage_parser`) and aggregated per story (`bmad-loop status`); the hookless `opencode` profile is the exception — its adapter pulls token usage from the OpenCode server over HTTP just before teardown (server state is sqlite; there is no local transcript).
 

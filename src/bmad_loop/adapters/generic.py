@@ -28,6 +28,7 @@ from ..bmadconfig import ProjectPaths
 from ..journal import LOGS_DIR
 from ..model import TokenUsage
 from ..policy import Policy
+from ..process_host import get_process_host
 from ..signals import SignalWatcher
 from ..tokens import read_usage as tally_usage
 from .base import CodingCLIAdapter, SessionHandle, SessionResult, SessionSpec
@@ -39,6 +40,10 @@ PANE_COLUMNS = 220
 PANE_LINES = 50
 RESULT_GRACE_S = 15.0
 RESULT_POLL_S = 0.5
+KILL_POLL_S = 0.5
+# min spacing between heartbeat.json overwrites in wait_for_completion; the
+# heartbeat's staleness is what makes a frozen orchestrator (#157) diagnosable.
+HEARTBEAT_INTERVAL_S = 30.0
 EVENT_KINDS = {"SessionStart", "Stop", "SessionEnd"}
 NUDGE_TEXT = (
     "You are running in bmad-loop automation mode. Finish the workflow now: "
@@ -102,22 +107,51 @@ class _ResultFileMixin:
     def _result_path(self, task_id: str) -> Path:
         return self.tasks_dir / task_id / "result.json"
 
+    def _append_diag_jsonl(self, task_id: str, filename: str, payload: dict) -> None:
+        """Append ``payload`` as one JSON line to ``tasks/<task_id>/<filename>``.
+        Pure observability, best-effort: an unwritable run dir must never break
+        the completion loop."""
+        try:
+            path = self.tasks_dir / task_id / filename
+            path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(payload, ensure_ascii=False)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
+
     def _note_resultless_stop(self, task_id: str, verdict: str, detail: str = "") -> None:
         """Append a diagnostic breadcrumb when a Stop's artifact read-back gives
         up empty: one JSON line ({ts, verdict, detail}) in
-        ``tasks/<task_id>/resultless-stops.jsonl``. Pure observability — the
-        #149 nudge livelock was undiagnosable because nothing recorded *why*
-        each Stop read as result-less. Best-effort: an unwritable run dir must
-        never break the completion loop."""
+        ``tasks/<task_id>/resultless-stops.jsonl`` — the #149 nudge livelock
+        was undiagnosable because nothing recorded *why* each Stop read as
+        result-less."""
+        self._append_diag_jsonl(
+            task_id,
+            "resultless-stops.jsonl",
+            {"ts": time.time_ns(), "verdict": verdict, "detail": detail},
+        )
+
+    def _note_lifecycle(self, task_id: str, event: str, **fields) -> None:
+        """Append a session-lifecycle breadcrumb ({ts, event, ...}) to
+        ``tasks/<task_id>/session-lifecycle.jsonl`` — issue #157's timeout fired
+        with zero record of *when* the adapter declared it or which clock had
+        elapsed, so a 2h19 journaling gap was unattributable."""
+        self._append_diag_jsonl(
+            task_id,
+            "session-lifecycle.jsonl",
+            {"ts": time.time_ns(), "event": event, **fields},
+        )
+
+    def _write_heartbeat(self, task_id: str, payload: dict) -> None:
+        """Best-effort overwrite of ``tasks/<task_id>/heartbeat.json``: the wait
+        loop's proof-of-life. A heartbeat much staler than HEARTBEAT_INTERVAL_S
+        under a still-running session means the orchestrator itself was frozen
+        (host starvation, macOS sleep — #157), not the CLI."""
         try:
-            path = self.tasks_dir / task_id / "resultless-stops.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            line = json.dumps(
-                {"ts": time.time_ns(), "verdict": verdict, "detail": detail},
-                ensure_ascii=False,
+            (self.tasks_dir / task_id / "heartbeat.json").write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
             )
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
         except OSError:
             pass
 
@@ -259,6 +293,12 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
 
     def wait_for_completion(self, handle: SessionHandle, spec: SessionSpec) -> SessionResult:
         deadline = time.monotonic() + spec.timeout_s
+        # Wall-clock co-bound (#157): a host suspend freezes time.monotonic(),
+        # silently extending the monotonic deadline by the nap's length. The
+        # wall clock keeps counting through a suspend, so it may EXPIRE the
+        # deadline — never extend it; all sub-waits below stay monotonic (a
+        # wall clock stepped backward must not stretch the session).
+        wall_deadline = time.time() + spec.timeout_s
         session_id: str | None = None
         transcript_path: str | None = None
         nudges_left = self._stop_nudges
@@ -289,14 +329,47 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
         # of death; spec.timeout_s already bounds a persistent failure to a
         # timeout.
         probe_failures = 0
+        # monotonic ts of the last heartbeat.json overwrite; None = not yet
+        # written, so the first tick always stamps one.
+        last_heartbeat: float | None = None
 
         while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            wall_expired = time.time() >= wall_deadline
+            if remaining <= 0 or wall_expired:
+                if remaining <= 0 and wall_expired:
+                    expired = "both"
+                elif remaining <= 0:
+                    expired = "monotonic"
+                else:
+                    # wall-only expiry with monotonic time to spare: the
+                    # monotonic clock stood still — the suspend signature.
+                    expired = "wall"
+                self._note_lifecycle(
+                    handle.task_id,
+                    "timeout-fired",
+                    expired_clock=expired,
+                    timeout_s=spec.timeout_s,
+                    mono_remaining_s=round(remaining, 3),
+                )
                 return SessionResult(
                     status="timeout",
                     session_id=session_id,
                     transcript_path=transcript_path,
+                    timeout_fired_at=time.time(),
+                    timeout_expired_clock=expired,
+                )
+            now = time.monotonic()
+            if last_heartbeat is None or now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
+                last_heartbeat = now
+                self._write_heartbeat(
+                    handle.task_id,
+                    {
+                        "ts": time.time(),
+                        "remaining_s": round(remaining, 3),
+                        "stall_armed": stall_deadline is not None,
+                        "stall_nudges_sent": stall_nudges_sent,
+                    },
                 )
             event = self.watcher.wait_for(
                 handle.task_id,
@@ -439,7 +512,40 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
         self.mux.send_text(handle.native_id, text)
 
     def kill(self, handle: SessionHandle) -> None:
+        # First strike stays the plain best-effort window kill; everything below
+        # verifies it landed. teardown_grace_s = 0 restores this line alone.
         self.mux.kill_window(handle.native_id)
+        grace = float(self.policy.limits.teardown_grace_s)
+        if grace <= 0:
+            return
+        deadline = time.monotonic() + grace
+        while True:
+            try:
+                if not self._window_alive(handle):
+                    return  # normal case: dead on the first probe
+            except MultiplexerError:
+                pass  # transport hiccup — liveness unknown this tick, keep polling
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(KILL_POLL_S)
+        # The window outlived the grace: the kill was ignored (a wedged CLI, a
+        # shell that trapped the hangup). Harvest the pane pids NOW, while the
+        # window is provably still alive, so a reused pid can never be signalled.
+        # [] = capability not offered / unknown — degrade to the re-kill alone.
+        pids = self.mux.window_pane_pids(handle.native_id)
+        self._note_lifecycle(handle.task_id, "kill-escalated", pids=pids)
+        host = get_process_host()
+        for pid in pids:
+            try:
+                host.force_kill(pid)
+            except Exception:  # noqa: BLE001  # nosec B110 - already-gone races are fine
+                pass
+        self.mux.kill_window(handle.native_id)
+        try:
+            alive: bool | None = self._window_alive(handle)
+        except MultiplexerError:
+            alive = None  # unknown is not dead — record it honestly
+        self._note_lifecycle(handle.task_id, "kill-outcome", alive=alive, escalated=True)
 
     def read_usage(self, result: SessionResult) -> TokenUsage | None:
         if not result.transcript_path:
@@ -688,6 +794,11 @@ class _DevSynthesisMixin(_ResultFileMixin):
             result_json=rj,
             session_id=result.session_id,
             transcript_path=result.transcript_path,
+            # a rescued timeout upgrades the outcome, not the timing evidence:
+            # the deadline did fire on this session, and that record must
+            # survive the rescue (#157).
+            timeout_fired_at=result.timeout_fired_at,
+            timeout_expired_clock=result.timeout_expired_clock,
         )
 
 

@@ -166,6 +166,28 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
   steps. A `rollback-dirty-check-failed` journal entry records the fault. The bound is now
   configurable as `limits.git_timeout_s` (default 120).
 
+- **Session timeouts now fire on time and leave a forensic trail (#157).** A
+  `session_timeout_min` that fired but journaled its session-end 2h19 late — with zero record
+  of _when_ the deadline was declared or why — is now timely and observable on three fronts.
+  (1) `wait_for_completion` gains a **wall-clock co-bound**: a host suspend (macOS sleep)
+  freezes `time.monotonic()`, silently extending the monotonic deadline by the nap's length;
+  the wall clock keeps counting through a suspend, so it may now EXPIRE the deadline — never
+  extend it (a stepped-back wall clock changes nothing, and all sub-waits stay monotonic).
+  (2) The fire moment stamps the result (`timeout_fired_at`, `timeout_expired_clock` —
+  `"wall"` alone is the suspend fingerprint) and appends a `timeout-fired` line to
+  `tasks/<id>/session-lifecycle.jsonl`; each wait tick tops up a throttled
+  `tasks/<id>/heartbeat.json` whose staleness under a still-live session diagnoses a frozen
+  orchestrator (the previously uninstrumented gap). The engine journals **session-end
+  unconditionally** — even a teardown that throws still records the ended session (status
+  `aborted` when the outcome is unknowable), carrying `fired_at`/`teardown_s`/`expired_clock`.
+  (3) Teardown is now a **verified kill escalation**: `terminate → wait → force_kill`, where
+  `limits.teardown_grace_s` bounds the liveness-wait before escalating (default 20; `0` = a
+  single unverified best-effort kill) and every escalation step carries its own bound, so a
+  timeout can no longer hang on an unkillable session. Covers the tmux (`generic`) and
+  `opencode-http` adapters alike. A frozen
+  process still cannot run this code while frozen, but recurrence is now diagnosable rather
+  than silent.
+
 - **`validate` and `probe-adapter` no longer report antigravity's hooks as unregistered
   (#159).** The `antigravity-hooks-json` dialect keys `.agents/hooks.json` by hook-group name
   at the top level, with no `"hooks"` wrapper — but both readers looked up `"hooks"`, got `{}`,

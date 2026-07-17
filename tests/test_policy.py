@@ -281,6 +281,23 @@ def test_git_timeout_must_be_positive(bad):
         policy.loads(f"[limits]\ngit_timeout_s = {bad}\n")
 
 
+def test_teardown_grace_default_parse_and_template():
+    import tomllib
+
+    assert policy.loads("").limits.teardown_grace_s == 20
+    assert policy.loads("[limits]\nteardown_grace_s = 45\n").limits.teardown_grace_s == 45
+    # 0 is legal: the rollback lever back to the single unverified best-effort kill
+    assert policy.loads("[limits]\nteardown_grace_s = 0\n").limits.teardown_grace_s == 0
+    # the emitted template documents the knob at its dataclass default
+    doc = tomllib.loads(policy.POLICY_TEMPLATE)
+    assert doc["limits"]["teardown_grace_s"] == policy.LimitsPolicy.teardown_grace_s
+
+
+def test_teardown_grace_must_be_nonnegative():
+    with pytest.raises(policy.PolicyError, match=r"limits\.teardown_grace_s"):
+        policy.loads("[limits]\nteardown_grace_s = -1\n")
+
+
 def test_workflow_stall_nudges_cap_default_parse_and_template():
     import tomllib
 

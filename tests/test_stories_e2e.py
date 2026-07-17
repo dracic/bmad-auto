@@ -32,10 +32,12 @@ the end-to-end CLI stack.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -180,6 +182,27 @@ events = {{ SessionStart = "SessionStart", Stop = "Stop" }}
 SPEC_FOLDER = "_bmad-output/epic-1"
 CLI = [sys.executable, "-m", "bmad_loop.cli"]
 
+# A fake CLI that writes SessionStart and then sleeps forever — it NEVER fires a
+# Stop hook, so the dev session can only end via the orchestrator's own timeout
+# fire + bounded teardown (#157). Because the session never ends a turn, the
+# result-less-Stop stall machinery never engages either, exactly the wedged-in-a-
+# tool-call shape the issue reported.
+TIMEOUT_FAKE_CLI = r"""#!/usr/bin/env bash
+set -e
+rd="$BMAD_LOOP_RUN_DIR"; tid="$BMAD_LOOP_TASK_ID"
+ts=$(date +%s%N)
+mkdir -p "$rd/events"
+printf '{"ts": %s, "event": "SessionStart", "task_id": "%s", "session_id": "fake-1"}' \
+    "$ts" "$tid" > "$rd/events/$ts-$tid-SessionStart.json"
+# Background + wait keeps the same process group as a foreground sleep, but
+# records the child's pid so the test can prove teardown reaped descendants,
+# not just this shell (whose cmdline is all the pgrep check can see).
+sleep 100000 &
+child=$!
+printf '%s\n' "$child" > "$rd/tasks/$tid/fake-child.pid"
+wait "$child"
+"""
+
 
 def _git(root: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True)
@@ -242,12 +265,16 @@ def _scaffold(root: Path, entries: list[dict]) -> None:
     _git(root, "commit", "-q", "-m", "sandbox")
 
 
-def _scaffold_sprint(root: Path, story_key: str) -> None:
+def _scaffold_sprint(
+    root: Path, story_key: str, fake_cli: str = FAKE_CLI, extra_policy: str = ""
+) -> None:
     """A committed, clean SPRINT-mode sandbox carrying the SAME new folder+id-
     capable bmad-dev-auto skill stub as `_scaffold` (with the folder+id dispatch
     probe content) — the regression point: installing that skill must not disturb
     the default sprint path. sprint-status.yaml holds one ready-for-dev story; the
-    policy has NO [stories] section, so the run is plain sprint mode."""
+    policy has NO [stories] section, so the run is plain sprint mode. ``fake_cli``
+    swaps the CLI script (e.g. a never-Stop timeout fake); ``extra_policy`` appends
+    to policy.toml (e.g. a [limits] block)."""
     root.mkdir(parents=True, exist_ok=True)
     (root / "src.txt").write_text("original\n", encoding="utf-8")
     (root / ".gitignore").write_text(".bmad-loop/runs/\n", encoding="utf-8")
@@ -281,7 +308,7 @@ def _scaffold_sprint(root: Path, story_key: str) -> None:
 
     fake = root / ".bmad-loop" / "fake-cli.sh"
     fake.parent.mkdir(parents=True, exist_ok=True)
-    fake.write_text(FAKE_CLI, encoding="utf-8")
+    fake.write_text(fake_cli, encoding="utf-8")
     os.chmod(fake, 0o755)
     profiles = root / ".bmad-loop" / "profiles"
     profiles.mkdir(parents=True)
@@ -291,7 +318,7 @@ def _scaffold_sprint(root: Path, story_key: str) -> None:
     (root / ".bmad-loop" / "policy.toml").write_text(
         '[adapter]\nname = "fakestories"\n\n'
         "[review]\nenabled = false\n\n"
-        '[gates]\nmode = "none"\n',
+        '[gates]\nmode = "none"\n' + extra_policy,
         encoding="utf-8",
     )
 
@@ -538,6 +565,83 @@ def test_e2e_sprint_intent_gap_patch_restore(tmp_path):
     run_dir = root / ".bmad-loop" / "runs" / run_id
     prompts = [p.read_text(encoding="utf-8") for p in (run_dir / "tasks").glob("*/prompt.txt")]
     assert any(str(spec) in p for p in prompts)
+
+
+def _tmux_has_session(name: str) -> bool:
+    return subprocess.run(["tmux", "has-session", "-t", name], capture_output=True).returncode == 0
+
+
+def test_e2e_session_timeout_teardown(tmp_path, monkeypatch):
+    """#157 end to end through the real binary + real tmux: a dev session wedged
+    forever (SessionStart, then sleep — never a Stop) is bounded only by the
+    session timeout, and the fix makes that firing timely and observable. The
+    1-minute policy floor is too coarse for a fast test, so the engine's
+    BMAD_LOOP_SESSION_TIMEOUT_S seam drives a 3-second budget."""
+    root = tmp_path / "sbx"
+    story = "1-1-timeout"
+    _scaffold_sprint(
+        root,
+        story,
+        fake_cli=TIMEOUT_FAKE_CLI,
+        extra_policy="\n[limits]\nmax_dev_attempts = 1\nteardown_grace_s = 5\n",
+    )
+    # inherited by the `bmad-loop run` subprocess (_run passes no env=)
+    monkeypatch.setenv("BMAD_LOOP_SESSION_TIMEOUT_S", "3")
+
+    proc = _run(root, "run", timeout=90)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+
+    run_id = _run_id(root)
+    run_dir = root / ".bmad-loop" / "runs" / run_id
+
+    # (1) session-end status=timeout, journaled promptly, with the fire forensics
+    journal = [
+        json.loads(ln)
+        for ln in (run_dir / "journal.jsonl").read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    ends = [j for j in journal if j["kind"] == "session-end" and j.get("status") == "timeout"]
+    assert ends, f"no session-end status=timeout: {[j['kind'] for j in journal]}"
+    end = ends[0]
+    assert end.get("fired_at"), end
+    assert end["teardown_s"] < 15.0, f"teardown gap not small (kill hung?): {end['teardown_s']}"
+    assert end.get("expired_clock") in ("monotonic", "wall", "both"), end
+    task_id = end["task_id"]
+
+    # (2) the fire moment left a timeout-fired breadcrumb, distinct from teardown
+    tdir = run_dir / "tasks" / task_id
+    life = [
+        json.loads(ln)
+        for ln in (tdir / "session-lifecycle.jsonl").read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    assert any(ln.get("event") == "timeout-fired" for ln in life), life
+
+    # (3) the wait loop's proof-of-life exists and is recent (not the frozen gap)
+    hb = json.loads((tdir / "heartbeat.json").read_text(encoding="utf-8"))
+    assert time.time() - hb["ts"] < 120, hb
+
+    # (4) teardown actually reaped the session — no orphan tmux session/process
+    assert not _tmux_has_session(f"bmad-loop-{run_id}")
+    if shutil.which("pgrep"):
+        pg = subprocess.run(["pgrep", "-af", "fake-cli.sh"], capture_output=True, text=True)
+        assert not [ln for ln in pg.stdout.splitlines() if str(root) in ln], pg.stdout
+    # The pgrep filter can only see the shell's cmdline; probe the recorded sleep
+    # descendant directly — the escalation force-kills pane-root pids, so a
+    # regression there would leak exactly this child while pgrep stays clean.
+    # Poll briefly: a just-killed child can linger as a zombie (kill 0 succeeds)
+    # until init reaps it after the shell died.
+    pid_file = tdir / "fake-child.pid"
+    assert pid_file.is_file(), "fake CLI never recorded its sleep child"
+    fake_pid = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.kill(fake_pid, 0)
+        except ProcessLookupError:
+            break  # dead and reaped — teardown covered the descendant
+        assert time.monotonic() < deadline, f"sleep child {fake_pid} survived teardown"
+        time.sleep(0.1)
 
 
 def test_e2e_sweep_intent_gap_patch_restore(tmp_path):

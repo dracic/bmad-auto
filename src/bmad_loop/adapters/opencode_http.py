@@ -94,7 +94,13 @@ from ..model import TokenUsage
 from ..policy import Policy
 from ..process_host import get_process_host
 from .base import CodingCLIAdapter, SessionHandle, SessionResult, SessionSpec
-from .generic import NUDGE_TEXT, STALL_NUDGE_TEXT, _DevSynthesisMixin, _ResultFileMixin
+from .generic import (
+    HEARTBEAT_INTERVAL_S,
+    NUDGE_TEXT,
+    STALL_NUDGE_TEXT,
+    _DevSynthesisMixin,
+    _ResultFileMixin,
+)
 from .profile import CLIProfile
 
 # Spawn/readiness defaults; per-instance attributes so tests shrink them.
@@ -527,6 +533,12 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
         if sess is None:
             raise OpencodeServerError(f"no live opencode server for task {handle.task_id!r}")
         deadline = time.monotonic() + spec.timeout_s
+        # Wall-clock co-bound (#157): a host suspend freezes time.monotonic(),
+        # silently extending the monotonic deadline by the nap's length. The
+        # wall clock keeps counting through a suspend, so it may EXPIRE the
+        # deadline — never extend it; all sub-waits below stay monotonic (a
+        # wall clock stepped backward must not stretch the session).
+        wall_deadline = time.time() + spec.timeout_s
         session_id = sess.session_id
         nudges_left = self._stop_nudges
         # Mirrors generic.wait_for_completion: stall-grace window armed by a
@@ -539,14 +551,49 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
         # Loop-owned silence clock: updated on every dequeue, so a dead reader
         # thread degrades to the poll fallback instead of disabling it.
         last_seen = time.monotonic()
+        # monotonic ts of the last heartbeat.json overwrite; None = not yet
+        # written, so the first tick always stamps one.
+        last_heartbeat: float | None = None
 
         while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            wall_expired = time.time() >= wall_deadline
+            if remaining <= 0 or wall_expired:
+                if remaining <= 0 and wall_expired:
+                    expired = "both"
+                elif remaining <= 0:
+                    expired = "monotonic"
+                else:
+                    # wall-only expiry with monotonic time to spare: the
+                    # monotonic clock stood still — the suspend signature.
+                    expired = "wall"
+                self._note_lifecycle(
+                    handle.task_id,
+                    "timeout-fired",
+                    expired_clock=expired,
+                    timeout_s=spec.timeout_s,
+                    mono_remaining_s=round(remaining, 3),
+                )
                 self._abort(sess)
                 transcript = self._capture_usage(handle, sess)
                 return SessionResult(
-                    status="timeout", session_id=session_id, transcript_path=transcript
+                    status="timeout",
+                    session_id=session_id,
+                    transcript_path=transcript,
+                    timeout_fired_at=time.time(),
+                    timeout_expired_clock=expired,
+                )
+            now = time.monotonic()
+            if last_heartbeat is None or now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
+                last_heartbeat = now
+                self._write_heartbeat(
+                    handle.task_id,
+                    {
+                        "ts": time.time(),
+                        "remaining_s": round(remaining, 3),
+                        "stall_armed": stall_deadline is not None,
+                        "stall_nudges_sent": stall_nudges_sent,
+                    },
                 )
             try:
                 event: str | None = sess.events.get(timeout=min(remaining, self.poll_tick_s))

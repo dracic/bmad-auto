@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import os
 import shutil
 import signal
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -2256,6 +2258,39 @@ class Engine:
 
     # ------------------------------------------------------------- helpers
 
+    @staticmethod
+    def _session_end_extras(result: SessionResult) -> dict:
+        """Timeout forensics for the session-end entry (#157). ``teardown_s``
+        is the timeout-fire → journal gap — the window the incident showed
+        could silently stretch for hours."""
+        if result.timeout_fired_at is None:
+            return {}
+        return {
+            "fired_at": result.timeout_fired_at,
+            "teardown_s": max(0.0, round(time.time() - result.timeout_fired_at, 3)),
+            "expired_clock": result.timeout_expired_clock,
+        }
+
+    @staticmethod
+    def _session_timeout_s(default_s: float) -> float:
+        """Per-session wall-clock budget in seconds. Normally
+        ``limits.session_timeout_min * 60``; ``BMAD_LOOP_SESSION_TIMEOUT_S``
+        overrides it (test / override hook, à la ``BMAD_LOOP_PROCESS_HOST``).
+        The policy floor is 1 minute — too coarse to exercise the #157
+        timeout-teardown path in a deterministic sub-minute E2E, and a real
+        binary run can't be monkeypatched. A non-positive or unparseable
+        override is ignored, so a fat-fingered value can never silently shorten
+        a real run's budget."""
+        raw = os.environ.get("BMAD_LOOP_SESSION_TIMEOUT_S")
+        if raw is not None:
+            try:
+                override = float(raw)
+            except ValueError:
+                override = 0.0
+            if override > 0:
+                return override
+        return default_s
+
     def _run_session(
         self,
         task: StoryTask,
@@ -2333,7 +2368,7 @@ class Engine:
             cwd=self.workspace.root,
             env=env,
             model=cfg.model,
-            timeout_s=self.policy.limits.session_timeout_min * 60,
+            timeout_s=self._session_timeout_s(self.policy.limits.session_timeout_min * 60),
             stall_nudges_cap=(
                 self.policy.limits.workflow_stall_nudges_cap
                 if label is not None
@@ -2342,49 +2377,84 @@ class Engine:
         )
         self.journal.set_active_log(task_id)
         self.journal.append("session-start", task_id=task_id, role=role, prompt=prompt)
-        result = adapter.run(spec)
-        # A post-kill rescue (#61) is otherwise indistinguishable from a normal
-        # completion in the journal; leave a breadcrumb for forensics.
-        if result.result_json is not None and result.result_json.get("post_kill_reconciled"):
-            self.journal.append("session-rescued-post-kill", task_id=task_id, role=role)
-        # Only dev/review sessions are resumable — `_resumable_session` matches
-        # exactly those task ids under DEV_RUNNING/REVIEW_RUNNING. For everything
-        # else (triage/sweep, labeled plugin-workflow sessions) the payload is
-        # never consumed on resume, so persisting it is pure state.json bloat.
-        # For resumable sessions, store a defensive copy: `result.result_json`
-        # is mutated in place downstream (`_reconcile_generic_terminal_status`),
-        # and the durable record must stay a stable snapshot of what the adapter
-        # returned rather than aliasing a later, half-mutated dict. Shallow is
-        # enough — reconcile only touches top-level keys.
-        resumable = label is None and role in ("dev", "review")
-        task.record_session(
-            SessionRecord(
-                task_id=task_id,
-                role=role,
-                status=result.status,
-                session_id=result.session_id,
-                transcript_path=result.transcript_path,
-                result_json=(
-                    dict(result.result_json)
-                    if resumable and result.result_json is not None
-                    else None
-                ),
+        # Every session-start must be paired with a session-end, whatever path
+        # leaves this method: on an abort (RunStopped / KeyboardInterrupt / a
+        # transport error out of adapter.run) the top-level handlers record
+        # run-stop/run-crash but know nothing of the open session, and the
+        # journal would show it running forever (#157).
+        result: SessionResult | None = None
+        ended = False
+        try:
+            result = adapter.run(spec)
+            # A post-kill rescue (#61) is otherwise indistinguishable from a normal
+            # completion in the journal; leave a breadcrumb for forensics.
+            if result.result_json is not None and result.result_json.get("post_kill_reconciled"):
+                self.journal.append("session-rescued-post-kill", task_id=task_id, role=role)
+            # Only dev/review sessions are resumable — `_resumable_session` matches
+            # exactly those task ids under DEV_RUNNING/REVIEW_RUNNING. For everything
+            # else (triage/sweep, labeled plugin-workflow sessions) the payload is
+            # never consumed on resume, so persisting it is pure state.json bloat.
+            # For resumable sessions, store a defensive copy: `result.result_json`
+            # is mutated in place downstream (`_reconcile_generic_terminal_status`),
+            # and the durable record must stay a stable snapshot of what the adapter
+            # returned rather than aliasing a later, half-mutated dict. Shallow is
+            # enough — reconcile only touches top-level keys.
+            resumable = label is None and role in ("dev", "review")
+            task.record_session(
+                SessionRecord(
+                    task_id=task_id,
+                    role=role,
+                    status=result.status,
+                    session_id=result.session_id,
+                    transcript_path=result.transcript_path,
+                    result_json=(
+                        dict(result.result_json)
+                        if resumable and result.result_json is not None
+                        else None
+                    ),
+                )
             )
-        )
-        # Make the completed session durable before the usage read, post-session
-        # hooks, and follow-up verification. If the host kills the process in
-        # that window, the resume path can see the session instead of a stale
-        # dev-running task with no evidence; usage stays best-effort metadata,
-        # not a durability gate.
-        self._save()
-        usage = adapter.read_usage(result)
-        task.attach_session_usage(task_id, usage)
-        self.journal.append(
-            "session-end",
-            task_id=task_id,
-            status=result.status,
-            tokens=usage.total if usage else None,
-        )
+            # Make the completed session durable before the usage read, post-session
+            # hooks, and follow-up verification. If the host kills the process in
+            # that window, the resume path can see the session instead of a stale
+            # dev-running task with no evidence; usage stays best-effort metadata,
+            # not a durability gate.
+            self._save()
+            usage = adapter.read_usage(result)
+            task.attach_session_usage(task_id, usage)
+            self.journal.append(
+                "session-end",
+                task_id=task_id,
+                status=result.status,
+                tokens=usage.total if usage else None,
+                **self._session_end_extras(result),
+            )
+            ended = True
+        finally:
+            if not ended:
+                # Best-effort: a journal IO error here must never mask the
+                # exception that is unwinding this frame.
+                try:
+                    if result is not None:
+                        # A post-run step raised (e.g. read_usage): the session
+                        # itself finished — journal its real status, sans usage.
+                        self.journal.append(
+                            "session-end",
+                            task_id=task_id,
+                            status=result.status,
+                            tokens=None,
+                            **self._session_end_extras(result),
+                        )
+                    else:
+                        exc = sys.exc_info()[1]
+                        self.journal.append(
+                            "session-end",
+                            task_id=task_id,
+                            status="aborted",
+                            error=type(exc).__name__ if exc is not None else None,
+                        )
+                except Exception:  # noqa: BLE001  # nosec B110
+                    pass
         self._save()
         self._emit(
             "post_session",

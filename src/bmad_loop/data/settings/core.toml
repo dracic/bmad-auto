@@ -94,6 +94,12 @@ minimum = 1
 default_ref = "LimitsPolicy.git_timeout_s"
 description = "bound on any single git subprocess the orchestrator spawns; exceeding it degrades/pauses (never crashes the run) — raise on a loaded host or a very large worktree"
 [[section.field]]
+key = "teardown_grace_s"
+kind = "int"
+minimum = 0
+default_ref = "LimitsPolicy.teardown_grace_s"
+description = "verified session teardown: poll the killed window up to this long, then force-kill its pane pids and re-kill the window · 0 = single unverified best-effort kill"
+[[section.field]]
 key = "stop_without_result_nudges"
 kind = "int"
 minimum = 0
