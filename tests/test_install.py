@@ -136,6 +136,48 @@ def test_merge_hooks_antigravity_appends_beside_existing_stop():
     assert len(settings["bmad-loop"]["Stop"]) == 2
 
 
+def test_merge_hooks_unrelated_bmad_loop_path_does_not_suppress_relay():
+    # Dedup keys on the bmad-loop script markers, not the broad "bmad_loop"
+    # substring: an unrelated handler whose command merely mentions a
+    # bmad_loop-containing path must not make init skip the relay — that would
+    # leave `validate` (which detects on the narrow marker) un-passable, the
+    # #159 failure class through the merge/detect seam.
+    profile = get_profile("claude")
+    existing = {
+        "hooks": {
+            "Stop": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": "python /home/me/bmad_loop_fork/notify.py"}
+                    ]
+                }
+            ]
+        }
+    }
+    settings, changed = merge_hooks(existing, _registrations(profile), profile.hooks.dialect)
+    assert changed
+    commands = [
+        handler["command"] for matcher in settings["hooks"]["Stop"] for handler in matcher["hooks"]
+    ]
+    assert "python /home/me/bmad_loop_fork/notify.py" in commands
+    assert any("bmad_loop_hook" in c for c in commands)
+
+
+def test_merge_hooks_antigravity_unrelated_bmad_loop_path_does_not_suppress_relay():
+    # Same guarantee for agy's flat top-level-group shape (the other dedup branch).
+    profile = get_profile("antigravity")
+    existing = {
+        "bmad-loop": {
+            "Stop": [{"type": "command", "command": "python /home/me/bmad_loop_fork/notify.py"}]
+        }
+    }
+    settings, changed = merge_hooks(existing, _registrations(profile), profile.hooks.dialect)
+    assert changed
+    commands = [h["command"] for h in settings["bmad-loop"]["Stop"]]
+    assert "python /home/me/bmad_loop_fork/notify.py" in commands
+    assert any("bmad_loop_hook" in c for c in commands)
+
+
 def test_merge_hooks_antigravity_rejects_malformed_shape():
     # a malformed pre-existing hooks.json yields a clear ProfileError, not an
     # opaque AttributeError during init.
@@ -152,7 +194,7 @@ def test_merge_hooks_antigravity_rejects_malformed_shape():
 
 def test_merge_hooks_antigravity_tolerates_non_string_command():
     # a pre-existing handler whose "command" is a non-string (e.g. None) must not
-    # crash the idempotency dedupe (guarded at both merge walks).
+    # crash the idempotency dedupe.
     profile = get_profile("antigravity")
     existing = {"bmad-loop": {"Stop": [{"type": "command", "command": None}]}}
     settings, changed = merge_hooks(existing, _registrations(profile), profile.hooks.dialect)
