@@ -11,6 +11,7 @@ Everything binds 127.0.0.1; no real opencode binary or network access anywhere.
 from __future__ import annotations
 
 import json
+import queue
 import sys
 import time
 from pathlib import Path
@@ -18,7 +19,7 @@ from pathlib import Path
 import pytest
 from conftest import write_script_launcher
 
-from bmad_loop.adapters import generic
+from bmad_loop.adapters import generic, opencode_http
 from bmad_loop.adapters.base import SessionHandle, SessionSpec
 from bmad_loop.adapters.generic import NUDGE_TEXT, STALL_NUDGE_TEXT
 from bmad_loop.adapters.opencode_http import (
@@ -28,6 +29,7 @@ from bmad_loop.adapters.opencode_http import (
     _free_port,
     _now_ms,
     _parse_sse_lines,
+    _ServerSession,
     _sum_usage,
 )
 from bmad_loop.adapters.profile import get_profile
@@ -604,6 +606,142 @@ def test_e2e_timeout_aborts(tmp_path, fake_opencode):
     aborts = read_jsonl(rec / "aborts.jsonl")
     assert aborts and "/abort" in aborts[0]["path"]
     assert_server_gone(rec)
+
+
+# ---------------- timeout instrumentation + wall-clock co-bound (#157)
+#
+# Mirrors the generic-adapter coverage on the HTTP transport: the fire moment
+# stamps the result and one timeout-fired line in session-lifecycle.jsonl, and
+# a wall-clock co-bound fires through a frozen time.monotonic() (the macOS-sleep
+# signature) but may never EXTEND the deadline. There is no watcher here — a
+# tick is one sess.events.get(), so a fake queue advances the steerable clock
+# each tick, exactly as _ScriptedWatcher.on_call does for the generic adapter.
+
+
+def _install_clock(monkeypatch, mono=1000.0, wall=5000.0):
+    clock = {"mono": mono, "wall": wall}
+
+    class _Clock:
+        monotonic = staticmethod(lambda: clock["mono"])
+        time = staticmethod(lambda: clock["wall"])
+        sleep = staticmethod(lambda *_: None)
+        time_ns = staticmethod(lambda: 0)
+
+    monkeypatch.setattr(opencode_http, "time", _Clock)
+    return clock
+
+
+def _timeout_driven_session(adapter, advance, task_id="t-1"):
+    """Register a live session whose event queue never yields a frame but runs
+    ``advance`` each tick, so only a clock crossing its deadline can end the
+    wait. client=None makes _abort/_capture_usage no-ops."""
+
+    class _AliveProc:
+        def poll(self):
+            return None
+
+    class _TickingQueue:
+        def get(self, timeout=None):
+            advance()
+            raise queue.Empty
+
+        def empty(self):
+            return True
+
+    sess = _ServerSession(process=_AliveProc(), port=0, base_url="", password="", log_fh=None)
+    sess.session_id = "ses_1"
+    sess.client = None
+    sess.events = _TickingQueue()
+    adapter._sessions[task_id] = sess
+    # There is no real server behind the fake process, so the atexit sweep must
+    # not try to signal its (absent) pid or close its (None) log handle.
+    adapter._teardown = lambda _sess: None
+    return sess
+
+
+def _lifecycle_lines(adapter, task_id="t-1"):
+    path = adapter.tasks_dir / task_id / "session-lifecycle.jsonl"
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _timeout_spec(tmp_path, timeout_s=30.0) -> SessionSpec:
+    return SessionSpec(task_id="t-1", role="dev", prompt="p", cwd=tmp_path, timeout_s=timeout_s)
+
+
+def test_timeout_monotonic_expiry_is_instrumented(tmp_path, monkeypatch):
+    """A plain monotonic expiry records WHEN and BY WHICH CLOCK the deadline was
+    declared elapsed — result stamps, one timeout-fired lifecycle line, and a
+    heartbeat.json topped up while the loop still ran."""
+    adapter = make_adapter(tmp_path)
+    clock = _install_clock(monkeypatch)
+    (adapter.tasks_dir / "t-1").mkdir(parents=True)  # start_session makes it in production
+
+    def advance():
+        clock["mono"] += 11.0  # wall frozen: only the monotonic clock expires
+
+    _timeout_driven_session(adapter, advance)
+    result = adapter.wait_for_completion(
+        SessionHandle(task_id="t-1", native_id="ses_1"), _timeout_spec(tmp_path)
+    )
+
+    assert result.status == "timeout"
+    assert result.timeout_expired_clock == "monotonic"
+    assert result.timeout_fired_at == 5000.0  # the fake wall clock at fire time
+    (fired,) = [ln for ln in _lifecycle_lines(adapter) if ln["event"] == "timeout-fired"]
+    assert fired["expired_clock"] == "monotonic"
+    assert fired["timeout_s"] == 30.0
+    assert fired["mono_remaining_s"] <= 0
+    hb = json.loads((adapter.tasks_dir / "t-1" / "heartbeat.json").read_text(encoding="utf-8"))
+    assert hb["remaining_s"] == 30.0 and hb["stall_armed"] is False
+
+
+def test_timeout_fires_on_wall_clock_when_monotonic_frozen(tmp_path, monkeypatch):
+    """The #157 suspend signature on the HTTP transport: time.monotonic() stands
+    still through a host suspend, so the monotonic deadline alone would stretch
+    the session by the nap's length. The wall-clock co-bound fires anyway, and
+    the wall-only expiry (monotonic time still to spare) is stamped as the
+    evidence."""
+    adapter = make_adapter(tmp_path)
+    clock = _install_clock(monkeypatch)
+
+    def advance():
+        clock["wall"] += 11.0  # suspended host: wall counts on, monotonic frozen
+
+    _timeout_driven_session(adapter, advance)
+    result = adapter.wait_for_completion(
+        SessionHandle(task_id="t-1", native_id="ses_1"), _timeout_spec(tmp_path)
+    )
+
+    assert result.status == "timeout"
+    assert result.timeout_expired_clock == "wall"
+    (fired,) = [ln for ln in _lifecycle_lines(adapter) if ln["event"] == "timeout-fired"]
+    assert fired["expired_clock"] == "wall"
+    assert fired["mono_remaining_s"] == 30.0  # the frozen clock never advanced
+
+
+def test_timeout_wall_clock_step_back_cannot_extend_deadline(tmp_path, monkeypatch):
+    """The co-bound may only EXPIRE the deadline, never stretch it: a wall clock
+    stepped backward (an NTP correction) leaves the monotonic expiry on its
+    original schedule."""
+    adapter = make_adapter(tmp_path)
+    clock = _install_clock(monkeypatch)
+    ticks = {"n": 0}
+
+    def advance():
+        ticks["n"] += 1
+        clock["mono"] += 11.0
+        clock["wall"] -= 3600.0  # NTP step-back: must change nothing
+
+    _timeout_driven_session(adapter, advance)
+    result = adapter.wait_for_completion(
+        SessionHandle(task_id="t-1", native_id="ses_1"), _timeout_spec(tmp_path)
+    )
+
+    assert result.status == "timeout"
+    assert result.timeout_expired_clock == "monotonic"
+    assert ticks["n"] == 3  # same tick count as an untouched wall clock
 
 
 def test_e2e_server_death_with_artifact_completes(tmp_path, fake_opencode):

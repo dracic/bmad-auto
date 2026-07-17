@@ -91,7 +91,8 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 ### Resumability & state
 
 - Every run is a resumable on-disk state machine: `bmad-loop resume <run-id>` continues from a gate, escalation, or interruption.
-- All run state in `.bmad-loop/runs/<run-id>/` (gitignored): `state.json`, `journal.jsonl` (every decision), `events/` (hook signals), `tasks/<id>/`, `logs/`, `deferred/`, `resolve/`, `ATTENTION`.
+- All run state in `.bmad-loop/runs/<run-id>/` (gitignored): `state.json`, `journal.jsonl` (every decision), `events/` (hook signals), `tasks/<id>/` (per-session prompt + `result.json` + diagnostic breadcrumbs — `session-lifecycle.jsonl` records timeout-fire, `heartbeat.json` is the wait loop's proof-of-life, `resultless-stops.jsonl` records give-up Stops), `logs/`, `deferred/`, `resolve/`, `ATTENTION`.
+- `journal.jsonl` records `session-end` for every session unconditionally — even a teardown that throws still lands one (status `aborted` when the outcome is unknowable). A timed-out session's entry carries `fired_at` (wall time the deadline was declared), `teardown_s` (wall seconds from that fire to this entry — the teardown gap), and `expired_clock` (`monotonic` / `wall` / `both` — `wall` alone fingerprints a host suspend that froze the monotonic clock).
 
 ### Hook-based transport (no pane-scraping)
 
@@ -142,7 +143,7 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 
 - Single policy file written by `init`, snapshotted at run start (applies to new runs and resumes; editable live from the TUI).
 - Sections: `[gates]`, `[limits]`, `[verify]`, `[notify]`, `[review]`, `[adapter]` (+ per-stage), `[sweep]`, `[scm]` (worktree isolation + merge-back), `[cleanup]` (run-dir retention + disk reclamation), `[plugins]` (trust allowlist + per-plugin `[plugins.<name>]` config — e.g. the opt-in game-engine layer via `[plugins.unity]`, off by default), `[tui]` (`low_frame_rate` for slow/SSH links; persisted dashboard pane sizes).
-- Tunable limits: `max_review_cycles`, `max_dev_attempts`, `max_followup_reviews`, `session_timeout_min`, `git_timeout_s`, `stop_without_result_nudges`, `dev_stall_grace_s`, `dev_stall_nudges`, `dev_stall_nudges_cap`, `workflow_stall_nudges_cap`, `max_tokens_per_story`.
+- Tunable limits: `max_review_cycles`, `max_dev_attempts`, `max_followup_reviews`, `session_timeout_min`, `git_timeout_s`, `teardown_grace_s`, `stop_without_result_nudges`, `dev_stall_grace_s`, `dev_stall_nudges`, `dev_stall_nudges_cap`, `workflow_stall_nudges_cap`, `max_tokens_per_story`.
 
 ### TUI dashboard
 
