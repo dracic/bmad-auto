@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import os
 import shutil
 import signal
 import sys
@@ -2270,6 +2271,26 @@ class Engine:
             "expired_clock": result.timeout_expired_clock,
         }
 
+    @staticmethod
+    def _session_timeout_s(default_s: float) -> float:
+        """Per-session wall-clock budget in seconds. Normally
+        ``limits.session_timeout_min * 60``; ``BMAD_LOOP_SESSION_TIMEOUT_S``
+        overrides it (test / override hook, à la ``BMAD_LOOP_PROCESS_HOST``).
+        The policy floor is 1 minute — too coarse to exercise the #157
+        timeout-teardown path in a deterministic sub-minute E2E, and a real
+        binary run can't be monkeypatched. A non-positive or unparseable
+        override is ignored, so a fat-fingered value can never silently shorten
+        a real run's budget."""
+        raw = os.environ.get("BMAD_LOOP_SESSION_TIMEOUT_S")
+        if raw is not None:
+            try:
+                override = float(raw)
+            except ValueError:
+                override = 0.0
+            if override > 0:
+                return override
+        return default_s
+
     def _run_session(
         self,
         task: StoryTask,
@@ -2347,7 +2368,7 @@ class Engine:
             cwd=self.workspace.root,
             env=env,
             model=cfg.model,
-            timeout_s=self.policy.limits.session_timeout_min * 60,
+            timeout_s=self._session_timeout_s(self.policy.limits.session_timeout_min * 60),
             stall_nudges_cap=(
                 self.policy.limits.workflow_stall_nudges_cap
                 if label is not None

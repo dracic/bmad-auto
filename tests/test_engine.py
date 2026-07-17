@@ -239,6 +239,43 @@ def test_timeout_session_end_carries_fire_forensics(project):
     assert ends[0]["expired_clock"] == "monotonic"
 
 
+def test_session_timeout_s_env_override(monkeypatch):
+    """BMAD_LOOP_SESSION_TIMEOUT_S overrides limits.session_timeout_min*60 — the
+    deterministic-E2E seam for the #157 timeout path, whose 1-minute policy floor
+    is too coarse to exercise in a fast real-binary run. Only a positive, parseable
+    value wins; anything else falls back so a fat-fingered env can never silently
+    shorten a real run's budget."""
+    monkeypatch.delenv("BMAD_LOOP_SESSION_TIMEOUT_S", raising=False)
+    assert Engine._session_timeout_s(5400.0) == 5400.0  # unset -> policy default
+    monkeypatch.setenv("BMAD_LOOP_SESSION_TIMEOUT_S", "2.5")
+    assert Engine._session_timeout_s(5400.0) == 2.5  # positive -> override wins
+    for bad in ("0", "-1", "nonsense", ""):
+        monkeypatch.setenv("BMAD_LOOP_SESSION_TIMEOUT_S", bad)
+        assert Engine._session_timeout_s(5400.0) == 5400.0  # ignored -> fall back
+
+
+def test_session_timeout_env_override_flows_into_spec(project, monkeypatch):
+    """The override reaches the SessionSpec the adapter actually receives, not
+    just the helper — so a sub-minute E2E can drive the real timeout path."""
+    monkeypatch.setenv("BMAD_LOOP_SESSION_TIMEOUT_S", "3")
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    engine, adapter = make_engine(
+        project,
+        [
+            SessionResult(
+                status="timeout", timeout_fired_at=time.time(), timeout_expired_clock="both"
+            )
+        ],
+    )
+    task = StoryTask(story_key="1-1-a", epic=1)
+    engine.state.tasks[task.story_key] = task
+    engine._save()
+
+    engine._run_session(task, role="dev", prompt="/bmad-dev-auto 1-1-a", seq=1)
+
+    assert adapter.sessions[0].timeout_s == 3.0  # not the 90-min policy default
+
+
 def test_keyboard_interrupt_records_stopped_run(project, monkeypatch):
     """A raw KeyboardInterrupt (Windows console-ctrl bypassing the signal
     handler) records a controlled stop, not a crash."""
