@@ -194,7 +194,13 @@ ts=$(date +%s%N)
 mkdir -p "$rd/events"
 printf '{"ts": %s, "event": "SessionStart", "task_id": "%s", "session_id": "fake-1"}' \
     "$ts" "$tid" > "$rd/events/$ts-$tid-SessionStart.json"
-sleep 100000
+# Background + wait keeps the same process group as a foreground sleep, but
+# records the child's pid so the test can prove teardown reaped descendants,
+# not just this shell (whose cmdline is all the pgrep check can see).
+sleep 100000 &
+child=$!
+printf '%s\n' "$child" > "$rd/tasks/$tid/fake-child.pid"
+wait "$child"
 """
 
 
@@ -620,6 +626,22 @@ def test_e2e_session_timeout_teardown(tmp_path, monkeypatch):
     if shutil.which("pgrep"):
         pg = subprocess.run(["pgrep", "-af", "fake-cli.sh"], capture_output=True, text=True)
         assert not [ln for ln in pg.stdout.splitlines() if str(root) in ln], pg.stdout
+    # The pgrep filter can only see the shell's cmdline; probe the recorded sleep
+    # descendant directly — the escalation force-kills pane-root pids, so a
+    # regression there would leak exactly this child while pgrep stays clean.
+    # Poll briefly: a just-killed child can linger as a zombie (kill 0 succeeds)
+    # until init reaps it after the shell died.
+    pid_file = tdir / "fake-child.pid"
+    assert pid_file.is_file(), "fake CLI never recorded its sleep child"
+    fake_pid = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.kill(fake_pid, 0)
+        except ProcessLookupError:
+            break  # dead and reaped — teardown covered the descendant
+        assert time.monotonic() < deadline, f"sleep child {fake_pid} survived teardown"
+        time.sleep(0.1)
 
 
 def test_e2e_sweep_intent_gap_patch_restore(tmp_path):
