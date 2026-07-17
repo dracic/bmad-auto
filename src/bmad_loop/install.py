@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from importlib import resources
 from pathlib import Path
 
@@ -28,10 +28,17 @@ from .policy import POLICY_TEMPLATE
 from .process_host import get_process_host
 
 HOOK_SCRIPT_REL = ".bmad-loop/bmad_loop_hook.py"
-# Dedup marker: matches any bmad-loop-managed hook command — both the signal
-# relay (bmad_loop_hook.py) and the probe-adapter capture hook
-# (bmad_loop_probe_hook.py) — so merge_hooks stays idempotent for either.
-HOOK_MARKER = "bmad_loop"
+# Markers for bmad-loop-managed hook commands. RELAY_MARKER is shared by
+# merge_hooks' dedup and validate/probe detection (via relay_registered) so init
+# and the preflight can never disagree about whether the relay is installed. It
+# matches the relay script name specifically: a hook command whose path merely
+# contains "bmad_loop" can't read as a registration — or suppress one.
+RELAY_MARKER = "bmad_loop_hook"
+# The probe-adapter capture hook participates in merge_hooks' dedup only (a
+# probe re-merge must stay idempotent) and never counts as a relay
+# registration. Disjoint from RELAY_MARKER: "bmad_loop_probe_hook" does not
+# contain the substring "bmad_loop_hook".
+PROBE_MARKER = "bmad_loop_probe_hook"
 # Pre-rename marker: the old relay/probe hooks lived under .automator/ and carried
 # `bmad_auto` in their command. `bmad-loop init` strips them on upgrade so a project
 # renamed from bmad-auto isn't left double-signalling. Underscore form, so it never
@@ -187,6 +194,38 @@ def _hook_entry(dialect: str, command: str) -> dict:
     return {"hooks": [handler]}
 
 
+def hook_event_container(config: dict, dialect: str) -> dict:
+    """The `native event -> handlers` map inside a parsed hook config.
+
+    Most dialects nest it under "hooks". agy instead keys the file by hook GROUP
+    name at the top level, so our relay lives under ANTIGRAVITY_HOOK_GROUP —
+    reading "hooks" there yields {} and reports a correctly-installed relay as
+    unregistered (issue #159). Every reader must go through this, or it drifts.
+    """
+    if dialect == "antigravity-hooks-json":
+        container = config.get(ANTIGRAVITY_HOOK_GROUP, {})
+    else:
+        container = config.get("hooks", {})
+    return container if isinstance(container, dict) else {}
+
+
+def _relay_in_handlers(handlers) -> bool:
+    """True if any handler in a native-event list carries the relay command."""
+    return RELAY_MARKER in json.dumps(handlers)
+
+
+def _managed_hook_in_handlers(handlers) -> bool:
+    """merge_hooks' dedup: a relay OR probe-capture command is already present."""
+    dumped = json.dumps(handlers)
+    return RELAY_MARKER in dumped or PROBE_MARKER in dumped
+
+
+def relay_registered(config: dict, dialect: str, events: Iterable[str]) -> bool:
+    """True if the bmad-loop relay is registered for any of `events`."""
+    container = hook_event_container(config, dialect)
+    return any(_relay_in_handlers(container.get(event, [])) for event in events)
+
+
 def merge_hooks(config: dict, registrations: dict[str, str], dialect: str) -> tuple[dict, bool]:
     """Add relay registrations (native event -> command) to a hook config dict."""
     changed = False
@@ -207,14 +246,7 @@ def merge_hooks(config: dict, registrations: dict[str, str], dialect: str) -> tu
                     f"hook event {native_event!r} under {ANTIGRAVITY_HOOK_GROUP!r} "
                     "is not a list; fix the hooks file before re-running init"
                 )
-            already = any(
-                isinstance(cmd := handler.get("command"), str) and HOOK_MARKER in cmd
-                for entry in handlers
-                if isinstance(entry, dict)
-                for handler in (entry, *entry.get("hooks", []))
-                if isinstance(handler, dict)
-            )
-            if not already:
+            if not _managed_hook_in_handlers(handlers):
                 handlers.append(_hook_entry(dialect, command))
                 changed = True
         return config, changed
@@ -224,16 +256,9 @@ def merge_hooks(config: dict, registrations: dict[str, str], dialect: str) -> tu
     for native_event, command in registrations.items():
         matchers = hooks.setdefault(native_event, [])
         # claude/codex/gemini nest handlers under "hooks"; copilot stores the
-        # handler dict directly in the event list — check both shapes so a re-run
-        # stays idempotent for every dialect.
-        already = any(
-            isinstance(cmd := handler.get("command"), str) and HOOK_MARKER in cmd
-            for entry in matchers
-            if isinstance(entry, dict)
-            for handler in (entry, *entry.get("hooks", []))
-            if isinstance(handler, dict)
-        )
-        if not already:
+        # handler dict directly in the event list — the serialized scan covers
+        # both shapes so a re-run stays idempotent for every dialect.
+        if not _managed_hook_in_handlers(matchers):
             matchers.append(_hook_entry(dialect, command))
             changed = True
     return config, changed

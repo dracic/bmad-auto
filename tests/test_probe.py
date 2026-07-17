@@ -174,16 +174,22 @@ def test_probe_hook_registers_under_native_events(dialect_cli):
     assert not changed2
 
 
-def test_scan_reports_registered_state(project):
+@pytest.mark.parametrize("cli", ["claude", "antigravity"])
+def test_scan_reports_registered_state(project, cli):
+    """Registration detection must follow each dialect's container shape.
+
+    agy keys .agents/hooks.json by hook-GROUP name with no "hooks" wrapper, so
+    reading "hooks" there reports a correctly-installed relay as unregistered.
+    """
     proj = project.project
-    profile = get_profile("claude")
-    finding = probe.scan(cli="claude", profile=profile, project=proj, hints=probe.Hints())
+    profile = get_profile(cli)
+    finding = probe.scan(cli=cli, profile=profile, project=proj, hints=probe.Hints())
     assert finding.registered is False  # nothing installed in the sandbox
     # now install hooks and re-scan
     from bmad_loop.install import install_into
 
-    install_into(proj, clis=("claude",))
-    finding2 = probe.scan(cli="claude", profile=profile, project=proj, hints=probe.Hints())
+    install_into(proj, clis=(cli,))
+    finding2 = probe.scan(cli=cli, profile=profile, project=proj, hints=probe.Hints())
     assert finding2.registered is True
 
 

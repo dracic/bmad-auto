@@ -242,6 +242,8 @@ def _platform_preflight() -> tuple[list[str], list[str]]:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
+    from .install import relay_registered
+
     project = _project(args)
     problems: list[str] = []
     notes: list[str] = []
@@ -335,10 +337,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
         hooks_ok = False
         if hook_config.is_file():
             try:
-                hooks = json.loads(hook_config.read_text(encoding="utf-8")).get("hooks", {})
-                hooks_ok = any(
-                    "bmad_loop_hook" in json.dumps(hooks.get(event, []))
-                    for event in profile.hooks.events
+                parsed = json.loads(hook_config.read_text(encoding="utf-8"))
+                hooks_ok = isinstance(parsed, dict) and relay_registered(
+                    parsed, profile.hooks.dialect, profile.hooks.events
                 )
             except json.JSONDecodeError:
                 problems.append(f"{hook_config} is not valid JSON")
