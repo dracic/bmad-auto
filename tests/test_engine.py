@@ -2362,6 +2362,82 @@ def test_rollback_or_pause_skips_clean_tree(project):
     assert "rollback-manual-required" not in kinds
 
 
+def test_rollback_gate_git_fault_pauses_instead_of_crashing(project, monkeypatch):
+    """#156: the dirty check timing out (now a GitError) must degrade to
+    assume-dirty, so with rollback OFF the run pauses on the manual-recovery
+    notice with the tree untouched — it must never crash the run."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=False),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    repo = project.project
+    task = StoryTask(story_key="1-1-a", epic=1)
+    task.baseline_commit = rev_parse_head(repo)
+    task.baseline_untracked = []
+    head = rev_parse_head(repo)
+
+    def timing_out(*args, **kwargs):
+        raise GitError(f"git diff timed out after 120s in {repo}")
+
+    monkeypatch.setattr(verify, "attempt_dirty", timing_out)
+
+    with pytest.raises(RunPaused):
+        engine._rollback_or_pause(task)
+
+    assert rev_parse_head(repo) == head  # tree untouched
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "rollback-dirty-check-failed" in kinds
+    assert "rollback-skipped-clean" not in kinds
+
+
+def test_rollback_gate_git_fault_still_auto_recovers_when_on(project, monkeypatch):
+    """rollback ON: an un-determinable dirty check still takes the auto-recover
+    branch (preserve + reset) — the degrade must not turn the pause-free path
+    into a pause."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),
+    )
+    engine, _ = make_engine(project, [], policy=policy)
+    repo = project.project
+    task = StoryTask(story_key="1-1-a", epic=1)
+    task.baseline_commit = rev_parse_head(repo)
+    task.baseline_untracked = []
+    (repo / "impl.txt").write_text("committed implementation\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "attempt work")
+
+    def timing_out(*args, **kwargs):
+        raise GitError(f"git diff timed out after 120s in {repo}")
+
+    monkeypatch.setattr(verify, "attempt_dirty", timing_out)
+
+    engine._rollback_or_pause(task)  # must not raise
+
+    assert rev_parse_head(repo) == task.baseline_commit  # reset happened
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "rollback-dirty-check-failed" in kinds
+    assert "rollback-auto" in kinds
+
+
+def test_engine_applies_git_timeout_from_policy(project):
+    """Engine construction pushes limits.git_timeout_s into the verify module so
+    every git helper honors the operator's bound."""
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        limits=LimitsPolicy(git_timeout_s=7),
+    )
+    try:
+        make_engine(project, [], policy=policy)
+        assert verify._git_timeout_s == 7
+    finally:
+        verify.configure_git_timeout(verify.GIT_TIMEOUT_S)
+
+
 def test_manual_recovery_wording_stopped(project):
     """Only the stopped/abandoned path reaches the manual-recovery notice now (a
     resolved escalation auto-recovers instead). The notice never claims the story

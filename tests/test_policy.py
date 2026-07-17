@@ -265,6 +265,22 @@ def test_zero_budget_rejected(tmp_path):
         policy.load(p)
 
 
+def test_git_timeout_default_parse_and_template():
+    import tomllib
+
+    assert policy.loads("").limits.git_timeout_s == 120
+    assert policy.loads("[limits]\ngit_timeout_s = 600\n").limits.git_timeout_s == 600
+    # the emitted template documents the knob at its dataclass default
+    doc = tomllib.loads(policy.POLICY_TEMPLATE)
+    assert doc["limits"]["git_timeout_s"] == 120
+
+
+@pytest.mark.parametrize("bad", [0, -5])
+def test_git_timeout_must_be_positive(bad):
+    with pytest.raises(policy.PolicyError, match=r"limits\.git_timeout_s"):
+        policy.loads(f"[limits]\ngit_timeout_s = {bad}\n")
+
+
 def test_workflow_stall_nudges_cap_default_parse_and_template():
     import tomllib
 

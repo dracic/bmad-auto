@@ -69,6 +69,12 @@ class LimitsPolicy:
     # (converge + refile on the first finalized round that still recommends one).
     max_followup_reviews: int = 1
     session_timeout_min: int = 90
+    # hard bound on any single git subprocess the orchestrator spawns (diff,
+    # reset, snapshot, …). The default is a sane normal-case ceiling, but a
+    # loaded host or a very large worktree can legitimately exceed it (#156) —
+    # exceeding it is a handled GitError, never a run crash, and raising the
+    # bound here is the fix when it fires spuriously.
+    git_timeout_s: int = 120
     stop_without_result_nudges: int = 1
     # how long a dev session may sit on a result-less Stop — i.e. it ended its
     # turn awaiting a long-running background process (a Unity PlayMode run, a
@@ -559,6 +565,7 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
         session_timeout_min=int(
             limits_d.get("session_timeout_min", LimitsPolicy.session_timeout_min)
         ),
+        git_timeout_s=int(limits_d.get("git_timeout_s", LimitsPolicy.git_timeout_s)),
         stop_without_result_nudges=int(
             limits_d.get("stop_without_result_nudges", LimitsPolicy.stop_without_result_nudges)
         ),
@@ -581,6 +588,8 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
         raise PolicyError(
             f"limits.max_followup_reviews must be >= 0: got {limits.max_followup_reviews}"
         )
+    if limits.git_timeout_s < 1:
+        raise PolicyError(f"limits.git_timeout_s must be >= 1: got {limits.git_timeout_s}")
     if not 0.0 <= limits.cache_read_weight <= 1.0:
         raise PolicyError(
             f"limits.cache_read_weight must be between 0 and 1: got {limits.cache_read_weight}"
@@ -827,6 +836,7 @@ max_review_cycles = 3
 max_dev_attempts = 2
 max_followup_reviews = 1     # additional review rounds granted solely because a finalized (status: done) round still recommended a follow-up; once spent, such a round converges + refiles the recommendation instead of burning another cycle. 0 = never honor a pass's own recommendation
 session_timeout_min = 90
+git_timeout_s = 120          # bound on any single git subprocess; exceeding it pauses/degrades (never crashes the run) — raise on a loaded host or a very large worktree
 stop_without_result_nudges = 1
 dev_stall_grace_s = 600      # grace for a dev session that ended its turn awaiting a background process (e.g. a slow PlayMode/test run) before it is called stalled; each re-invocation resets it. 0 = fail fast on the first result-less Stop
 dev_stall_nudges = 2         # times an idle dev session is nudged awake on grace expiry before it is called stalled (bmad-loop has no background-completion re-invocation); pane output re-arms the grace window and a fresh Stop restores the budget. 0 = stall on grace expiry

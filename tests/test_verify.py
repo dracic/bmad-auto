@@ -90,6 +90,48 @@ def test_attempt_dirty_excludes_tracked_artifact(project):
     assert verify.attempt_dirty(repo, baseline, [], exclude=(artifact_rel,)) is True
 
 
+def _timing_out_run(cmd, **kwargs):
+    raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 0))
+
+
+def test_git_timeout_becomes_git_error(project, monkeypatch):
+    """#156: a git call exceeding the timeout must surface as GitError — the type
+    every guard already handles — never as a raw TimeoutExpired, which bypassed
+    them all and crashed the run from the rollback path."""
+    baseline = verify.rev_parse_head(project.project)
+    monkeypatch.setattr(verify.subprocess, "run", _timing_out_run)
+    with pytest.raises(verify.GitError, match=r"git diff timed out after \d+s"):
+        verify.attempt_dirty(project.project, baseline, [])
+
+
+def test_capture_diff_timeout_becomes_git_error(project, monkeypatch):
+    """capture_diff's inline git spawns (verbatim-stdout diff) share the same
+    translation as the `_git` helpers."""
+    baseline = verify.rev_parse_head(project.project)
+    monkeypatch.setattr(verify.subprocess, "run", _timing_out_run)
+    with pytest.raises(verify.GitError, match="timed out"):
+        verify.capture_diff(project.project, baseline)
+
+
+def test_configure_git_timeout_overrides_bound(project, monkeypatch):
+    """The engine-applied `limits.git_timeout_s` value is what reaches
+    subprocess.run; the module default stays GIT_TIMEOUT_S for standalone users."""
+    seen: dict[str, object] = {}
+    real_run = subprocess.run
+
+    def spying_run(cmd, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(verify.subprocess, "run", spying_run)
+    verify.configure_git_timeout(7)
+    try:
+        verify.rev_parse_head(project.project)
+    finally:
+        verify.configure_git_timeout(verify.GIT_TIMEOUT_S)
+    assert seen["timeout"] == 7
+
+
 @pytest.mark.parametrize(
     "raw,expected",
     [

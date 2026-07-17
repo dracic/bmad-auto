@@ -324,6 +324,7 @@ spec_folder = ""           # required when source = "stories": the epic spec fol
 max_review_cycles = 3
 max_dev_attempts = 2
 session_timeout_min = 90
+git_timeout_s = 120              # bound on any single git subprocess; exceeding it pauses/degrades, never crashes the run
 stop_without_result_nudges = 1   # times to re-prompt a session that stopped with no result.json
 dev_stall_grace_s = 600          # idle grace before a dev session awaiting a background run (e.g. PlayMode) is nudged/stalled
 dev_stall_nudges = 2             # wake-nudges spent on grace expiry before a dev session is called stalled

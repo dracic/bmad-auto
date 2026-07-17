@@ -88,6 +88,12 @@ kind = "int"
 minimum = 1
 default_ref = "LimitsPolicy.session_timeout_min"
 [[section.field]]
+key = "git_timeout_s"
+kind = "int"
+minimum = 1
+default_ref = "LimitsPolicy.git_timeout_s"
+description = "bound on any single git subprocess the orchestrator spawns; exceeding it degrades/pauses (never crashes the run) — raise on a loaded host or a very large worktree"
+[[section.field]]
 key = "stop_without_result_nudges"
 kind = "int"
 minimum = 0
