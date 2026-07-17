@@ -4,6 +4,7 @@ import os
 import re
 import signal
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -160,6 +161,82 @@ def test_run_session_persists_session_when_usage_read_raises(project):
     assert saved_task.sessions[0].session_id == "sess-1"
     assert saved_task.sessions[0].transcript_path == "events.jsonl"
     assert saved_task.sessions[0].usage is None
+    # the session still ends in the journal, with its real status — only the
+    # usage total is lost with the failed read
+    ends = [e for e in engine.journal.entries() if e["kind"] == "session-end"]
+    assert len(ends) == 1
+    assert ends[0]["status"] == "completed"
+    assert ends[0]["tokens"] is None
+
+
+def test_run_session_journals_exactly_one_session_end(project):
+    """The finally-fallback must not double-journal a session that already
+    ended on the happy path."""
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(project, [SessionResult(status="completed")])
+    task = StoryTask(story_key="1-1-a", epic=1)
+    engine.state.tasks[task.story_key] = task
+    engine._save()
+
+    engine._run_session(task, role="dev", prompt="/bmad-dev-auto 1-1-a", seq=1)
+
+    ends = [e for e in engine.journal.entries() if e["kind"] == "session-end"]
+    assert len(ends) == 1
+    assert ends[0]["status"] == "completed"
+    assert "fired_at" not in ends[0]  # no timeout → no forensics fields
+
+
+def test_adapter_crash_journals_aborted_session_end(project, monkeypatch):
+    """adapter.run raising must not leave the session open forever in the
+    journal: run-crash records the run, the aborted session-end the session."""
+    monkeypatch.setattr("bmad_loop.engine.kill_session", lambda rid: None)
+
+    def explode(_spec):
+        raise RuntimeError("transport died")
+
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(project, [explode])
+
+    summary = engine.run()
+
+    assert summary.crashed
+    entries = engine.journal.entries()
+    crashes = [e for e in entries if e["kind"] == "run-crash"]
+    assert crashes and crashes[0]["error"] == "RuntimeError"
+    ends = [e for e in entries if e["kind"] == "session-end"]
+    assert len(ends) == 1
+    assert "1-1-a" in ends[0]["task_id"]
+    assert ends[0]["status"] == "aborted"
+    assert ends[0]["error"] == "RuntimeError"
+
+
+def test_timeout_session_end_carries_fire_forensics(project):
+    """A timed-out session's end entry records when the timeout fired, the
+    fire→journal teardown gap, and which clock had expired."""
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    fired = time.time() - 5.0
+    engine, _ = make_engine(
+        project,
+        [
+            SessionResult(
+                status="timeout",
+                timeout_fired_at=fired,
+                timeout_expired_clock="monotonic",
+            )
+        ],
+    )
+    task = StoryTask(story_key="1-1-a", epic=1)
+    engine.state.tasks[task.story_key] = task
+    engine._save()
+
+    engine._run_session(task, role="dev", prompt="/bmad-dev-auto 1-1-a", seq=1)
+
+    ends = [e for e in engine.journal.entries() if e["kind"] == "session-end"]
+    assert len(ends) == 1
+    assert ends[0]["status"] == "timeout"
+    assert ends[0]["fired_at"] == fired
+    assert ends[0]["teardown_s"] >= 0
+    assert ends[0]["expired_clock"] == "monotonic"
 
 
 def test_keyboard_interrupt_records_stopped_run(project, monkeypatch):
@@ -181,8 +258,15 @@ def test_keyboard_interrupt_records_stopped_run(project, monkeypatch):
     assert not summary.crashed
     assert not saved.crashed
     assert killed == ["test-run"]
-    stops = [e for e in engine.journal.entries() if e["kind"] == "run-stop"]
-    assert stops and stops[0]["reason"] == "KeyboardInterrupt"
+    entries = engine.journal.entries()
+    stops = [i for i, e in enumerate(entries) if e["kind"] == "run-stop"]
+    assert stops and entries[stops[0]]["reason"] == "KeyboardInterrupt"
+    # the interrupted session is closed out in the journal before the stop
+    ends = [i for i, e in enumerate(entries) if e["kind"] == "session-end"]
+    assert len(ends) == 1
+    assert entries[ends[0]]["status"] == "aborted"
+    assert entries[ends[0]]["error"] == "KeyboardInterrupt"
+    assert ends[0] < stops[0]
 
 
 def test_nested_engine_reraises_keyboard_interrupt(project, monkeypatch):
