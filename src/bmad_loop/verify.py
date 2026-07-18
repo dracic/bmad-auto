@@ -687,8 +687,18 @@ def worktree_remove(repo: Path, path: Path, force: bool = False) -> None:
 
 def worktree_prune(repo: Path) -> None:
     """Drop administrative entries for worktrees whose directories are gone.
-    Best-effort housekeeping — never raises."""
-    _git(repo, "worktree", "prune")
+    Best-effort housekeeping — never raises. The return code is already ignored,
+    but since #156 `_git` can *raise* GitError on a timeout, which would bypass
+    this never-raise contract (and the teardown degrade paths that lean on it —
+    close_unit_workspace / discard_worktree call prune from inside their own
+    GitError guards). `subprocess.run` can also raise OSError outright (a spawn
+    failure — EMFILE, ENOMEM — happens before any return code exists), which the
+    #156 translation doesn't cover. Swallow both here so the contract holds at
+    its source."""
+    try:
+        _git(repo, "worktree", "prune")
+    except (GitError, OSError):
+        pass
 
 
 def worktree_list(repo: Path) -> list[Path]:

@@ -170,6 +170,18 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
 
 ### Fixed
 
+- **A failed worktree teardown no longer crashes the run after the merge landed (#139).** When a
+  process the just-ended session left running (e.g. pytest recreating `.pytest_cache`) makes
+  `git worktree remove` fail with ENOTEMPTY, git still drops its admin entry, so the `force=True`
+  retry failed with "is not a working tree" and that second `GitError` crashed the run. The
+  teardown tail of `close_unit_workspace` never raises now: a failed worktree removal falls back to
+  `rmtree` + `worktree prune` (the rmtree confined to the run's own worktrees dir — the path can
+  arrive from persisted state), a failed branch delete is reported and swallowed, and both journal a
+  `worktree-teardown-degraded` event — teardown is post-merge housekeeping. A failed forensic diff
+  capture instead preserves the worktree + branch (they hold the only copy of a dropped unit's
+  changes). `discard_worktree` gains the same removal fallback so a stuck dir can't block the
+  resume re-mount.
+
 - **A git call exceeding its timeout no longer crashes the whole run (#156).** Every git
   subprocess the orchestrator spawns now translates `subprocess.TimeoutExpired` into
   `GitError`, so the existing degrade guards handle a slow git like any other git failure.

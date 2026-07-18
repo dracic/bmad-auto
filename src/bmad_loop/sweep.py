@@ -642,7 +642,9 @@ class SweepEngine(Engine):
             return True
         if isolated:
             # drop the half-built worktree; _run_story mounts a fresh one
-            discard_worktree(self.paths.repo_root, task.worktree_path, task.branch)
+            discard_worktree(
+                self.paths.repo_root, task.worktree_path, task.branch, run_dir=self.run_dir
+            )
             task.worktree_path = ""
             task.branch = ""
         elif task.baseline_commit:
