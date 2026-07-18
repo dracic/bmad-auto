@@ -10,6 +10,7 @@ Everything binds 127.0.0.1; no real opencode binary or network access anywhere.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import queue
@@ -39,7 +40,7 @@ from bmad_loop.adapters.profile import get_profile
 from bmad_loop.bmadconfig import ProjectPaths
 from bmad_loop.model import TokenUsage
 from bmad_loop.policy import LimitsPolicy, NotifyPolicy, Policy
-from bmad_loop.process_host import get_process_host
+from bmad_loop.process_host import ProcessHostError, get_process_host
 
 # A pinned example timestamp from the pins file (§4): OpenCode `time.*` values
 # are epoch MILLISECONDS. The proof-of-work floor must live in the same unit —
@@ -529,23 +530,35 @@ def test_kill_unknown_handle_is_a_noop(tmp_path):
     adapter.kill(SessionHandle(task_id="never-started", native_id="ses_x"))
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="setsid + os.kill(0) reap probe is POSIX")
+@pytest.mark.skipif(sys.platform == "win32", reason="os.kill(0) reap probe is POSIX")
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") and importlib.util.find_spec("psutil") is None,
+    reason="descendant discovery off Linux needs psutil (the non-linux extra)",
+)
 def test_kill_process_reaps_detached_descendant(tmp_path):
     """#183 mirror on the HTTP transport, deterministic without a real opencode
     binary: a focused _kill_process test with a real Popen server whose body
-    `setsid`-detaches a child (its own session — the root SIGTERM cannot reach it)
-    against the REAL process host. After _kill_process the detached child is reaped,
-    proving the pre-signal descendant harvest + reap covers a straggler the pane/pgid
-    kill would leak (a live opencode binary is not required, and the live-server
-    harness cannot easily be made to detach a child — noted in the report)."""
+    detaches a child into its own session (``start_new_session=True`` — Python's
+    portable setsid; macOS ships no setsid(1) utility, so the root SIGTERM cannot
+    reach it) against the REAL process host. After _kill_process the detached child
+    is reaped, proving the pre-signal descendant harvest + reap covers a straggler
+    the pane/pgid kill would leak (a live opencode binary is not required, and the
+    live-server harness cannot easily be made to detach a child — noted in the
+    report)."""
     adapter = make_adapter(tmp_path)
     adapter.kill_wait_s = 3.0
     child_pid_file = tmp_path / "detached.pid"
-    # The "server" backgrounds a setsid child (records its pid), then idles so it is
-    # provably alive at harvest — the server (process.pid) is the parent of the
-    # detached child, so host.descendants(server) finds it before the SIGTERM.
-    script = f"setsid sleep 300 & echo $! > {child_pid_file}; sleep 300"
-    process = subprocess.Popen(["sh", "-c", script])
+    # The "server" detaches a session-leader child (records its pid), then idles so
+    # it is provably alive at harvest — the server (process.pid) is the parent of
+    # the detached child, so host.descendants(server) finds it before the SIGTERM.
+    server_body = (
+        "import subprocess, sys, time\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],"
+        " start_new_session=True)\n"
+        f"open({str(child_pid_file)!r}, 'w', encoding='utf-8').write(str(p.pid))\n"
+        "time.sleep(300)\n"
+    )
+    process = subprocess.Popen([sys.executable, "-c", server_body])
     detached_pid = None
     try:
         deadline = time.monotonic() + 10
@@ -582,6 +595,45 @@ def test_kill_process_reaps_detached_descendant(tmp_path):
             pass
 
 
+def test_kill_process_strikes_root_before_reraising_bad_host_override(tmp_path, monkeypatch):
+    """The process-host lookup precedes the first signal; an explicit-but-bogus
+    BMAD_LOOP_PROCESS_HOST must still raise loudly (never silently mis-signal), but
+    the server must not be left alive behind the raise — one legacy Popen root
+    strike fires, then ProcessHostError propagates (the tmux adapter's
+    strike-before-reraise doctrine, mirrored)."""
+
+    class _FakePopen:
+        pid = 4242
+
+        def __init__(self):
+            self.terminated = 0
+            self.killed = 0
+
+        def poll(self):
+            return None  # alive → _kill_process must not early-return
+
+        def terminate(self):
+            self.terminated += 1
+
+        def kill(self):
+            self.killed += 1
+
+    adapter = make_adapter(tmp_path)
+    process = _FakePopen()
+    sess = _ServerSession(process=process, port=0, base_url="", password="", log_fh=None)
+    monkeypatch.setenv("BMAD_LOOP_PROCESS_HOST", "bogus-host-name")
+    get_process_host.cache_clear()
+    try:
+        with pytest.raises(ProcessHostError):
+            adapter._kill_process(sess)
+        if sys.platform == "win32":
+            assert process.killed == 1  # the win32 legacy strike is Popen.kill()
+        else:
+            assert process.terminated == 1  # struck once before the raise
+    finally:
+        get_process_host.cache_clear()
+
+
 class _ReapRecordingHost:
     """Minimal host for the reap-gate unit test: nobody dies on SIGTERM, so the
     force-kill loop is what settles survivors — proving the identity gate, not
@@ -609,17 +661,18 @@ class _ReapRecordingHost:
         self.alive.discard(pid)
 
 
-def test_reap_descendants_refuses_to_force_kill_none_identity(tmp_path):
-    """_reap_descendants terminates every surviving straggler but force-kills only
-    the identity-confirmed one; a None-identity survivor (a possible pid reuse) is
-    polled via the bare-liveness degrade and NEVER force-killed — the ProcessHost
-    contract, mirrored on the HTTP teardown (opencode_http.py:_reap_descendants)."""
+def test_reap_descendants_never_signals_none_identity(tmp_path):
+    """_reap_descendants signals only identity-confirmed stragglers; a
+    None-identity survivor (a possible pid reuse) is never signalled AT ALL — no
+    terminate, no force-kill, no poll burn (even a SIGTERM to a recycled pid kills
+    an innocent process) — the ProcessHost contract, mirrored on the HTTP teardown
+    (opencode_http.py:_reap_descendants)."""
     adapter = make_adapter(tmp_path)
     adapter.kill_wait_s = 0.1  # bound the poll: nobody dies on terminate here
     host = _ReapRecordingHost(alive={200, 400}, no_identity={400})
     tree = {200: 200.0, 400: None}  # 200 identity-confirmed at harvest, 400 unconfirmable
     adapter._reap_descendants(host, tree)
-    assert host.terminated == [200, 400]  # both asked to stop
+    assert host.terminated == [200]  # the unconfirmable 400 is never asked to stop
     assert host.force_killed == [200]  # only the confirmed pid escalated
     assert 400 not in host.force_killed
 

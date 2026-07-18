@@ -226,10 +226,18 @@ class _RecordingHost:
         self.terminated: list[int] = []
 
     def descendants(self, pid):
-        return list(self.descendants_map.get(pid, ()))
+        # The real seam stamps identity during enumeration; the fake mirrors that,
+        # still emitting None for no_identity pids so the adapter's unconfirmable
+        # guard stays exercised (the contract allows None where no stamp exists).
+        return {child: self.identity(child) for child in self.descendants_map.get(pid, ())}
 
     def identity(self, pid):
         return None if pid in self.no_identity else float(pid)
+
+    def is_alive(self, pid):
+        # Bare existence — a recycled pid still reads alive here (that's the point:
+        # the reap must not treat this as licence to signal an unconfirmable pid).
+        return pid in self.alive
 
     def alive_and_ours(self, pid, identity):
         if pid in self.reused or pid not in self.alive:
@@ -311,10 +319,13 @@ def test_kill_clean_end_no_stragglers_leaves_no_breadcrumb(tmp_path, monkeypatch
     assert _lifecycle_lines(adapter) == []
 
 
-def test_kill_never_force_kills_identity_none_straggler(tmp_path, monkeypatch):
-    """A harvested straggler whose identity could not be read (None) is polled via
-    the bare-liveness degrade and terminated, but NEVER force-killed — a None
-    identity can't rule out pid reuse. It rides out the grace still alive."""
+def test_kill_never_signals_identity_none_straggler(tmp_path, monkeypatch):
+    """A harvested straggler whose identity could not be read (None) is
+    unconfirmable — a possible pid reuse — so it is never signalled AT ALL: no
+    terminate, no force-kill, and no poll burning the grace deadline (even a
+    SIGTERM to a recycled pid kills an innocent process). It rides out the grace
+    untouched, recorded honestly as unreaped; with nothing actually signalled
+    there is no straggler-reap breadcrumb, only the kill-outcome."""
     monkeypatch.setattr(generic, "KILL_POLL_S", 0)
     host = _RecordingHost(
         alive={200}, descendants_map={100: [200]}, ignore_terminate={200}, no_identity={200}
@@ -323,12 +334,12 @@ def test_kill_never_force_kills_identity_none_straggler(tmp_path, monkeypatch):
     mux = _TeardownMux(survives_kills=0, pids=[100])
     adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
     adapter.kill(_kill_handle())
-    assert host.terminated == [200]
-    assert host.force_killed == []  # identity None → refuse to force-kill a possible reuse
+    assert host.terminated == []  # identity None → never signalled (possible reuse)
+    assert host.force_killed == []
     events = _lifecycle_lines(adapter)
-    assert [e["event"] for e in events] == ["straggler-reap", "kill-outcome"]
-    assert events[1]["forced"] == []
-    assert events[1]["unreaped"] == [200]  # unconfirmable → left alive, recorded honestly
+    assert [e["event"] for e in events] == ["kill-outcome"]
+    assert events[0]["forced"] == []
+    assert events[0]["unreaped"] == [200]  # unconfirmable → left alive, recorded honestly
 
 
 def test_kill_reap_skips_reused_harvested_pid(tmp_path, monkeypatch):

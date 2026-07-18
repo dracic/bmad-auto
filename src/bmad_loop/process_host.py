@@ -103,19 +103,26 @@ class ProcessHost(ABC):
             return "unknown"
         return "dead"
 
-    def descendants(self, pid: int) -> list[int]:
-        """Transitive descendant pids of ``pid`` (children, grandchildren, …), for
-        the teardown reap that must chase a session's whole process tree, not just
-        the pane root — a detached straggler (setsid, a double-fork survivor)
-        escapes the pane pgid the window kill signals.
+    def descendants(self, pid: int) -> dict[int, float | None]:
+        """Transitive descendants of ``pid`` (children, grandchildren, …) as a
+        pid → :meth:`identity` snapshot, for the teardown reap that must chase a
+        session's whole process tree, not just the pane root — a detached straggler
+        (setsid, a double-fork survivor) escapes the pane pgid the window kill
+        signals. The identity is captured DURING enumeration — from the same
+        ``/proc`` read (Linux) or the same enumerated psutil ``Process`` object —
+        so a pid reaped-and-reused after enumeration can never be authenticated by
+        a later lookup; a member whose identity can't be captured is OMITTED, never
+        returned unstamped. ``None`` values are reserved for platforms that
+        genuinely can't stamp one — consumers must treat ``None`` as unconfirmable
+        (never signal it).
 
-        NEVER raises: ``[]`` on an unsupported platform, a missing psutil, a gone
+        NEVER raises: ``{}`` on an unsupported platform, a missing psutil, a gone
         pid, or any read error — this feeds the kill escalation, which must never be
         the thing that raises. The default enumerates via psutil (macOS/Windows);
         the Linux host overrides it with a psutil-free ``/proc`` scan so the core
         stays dep-free there."""
         if pid <= 0:
-            return []
+            return {}
         return _psutil_descendants(pid)
 
     def shell_quote(self, arg: str) -> str:
@@ -167,9 +174,9 @@ class PosixProcessHost(ProcessHost):
         except Exception:
             return None
 
-    def descendants(self, pid: int) -> list[int]:
+    def descendants(self, pid: int) -> dict[int, float | None]:
         if pid <= 0:
-            return []
+            return {}
         if sys.platform.startswith("linux"):
             return _linux_descendants(pid)  # psutil-free: keeps the Linux core dep-free
         return super().descendants(pid)  # macOS: psutil, guarded by the seam's never-raise
@@ -240,28 +247,37 @@ def _proc_starttime(pid: int) -> float | None:
         return None
 
 
-def _linux_descendants(pid: int) -> list[int]:
-    """Transitive descendants of ``pid`` from a single pass over ``/proc/*/stat``
-    (Linux only, psutil-free). Build the ppid→children map from field 4 (ppid) —
-    index 1 after the comm token, split on the last ``)`` exactly as
-    :func:`_proc_starttime` does — then BFS out from ``pid``. Best-effort: a process
-    that exits mid-scan simply drops out of the map, and any error yields ``[]`` so
-    the kill seam never raises. A ``seen`` set guards against a pid-reuse race
-    fabricating a cycle."""
+def _linux_descendants(pid: int) -> dict[int, float | None]:
+    """Transitive descendants of ``pid``, with their pid-reuse identities, from a
+    single pass over ``/proc/*/stat`` (Linux only, psutil-free). Each entry's ppid
+    (field 4, index 1 after the comm token) AND starttime identity (field 22,
+    index 19 — the very value :func:`_proc_starttime` reads) come from ONE read of
+    the same ``stat`` line, split on the last ``)`` exactly as
+    :func:`_proc_starttime` does — so ancestry and identity are captured atomically
+    per process and a pid reused after the scan can never be authenticated by a
+    later lookup. BFS out from ``pid``. Best-effort: a process that exits mid-scan
+    simply drops out of the map, an unparsable line is omitted (never
+    authenticated), and any error yields ``{}`` so the kill seam never raises. A
+    ``seen`` set guards against a pid-reuse race fabricating a cycle."""
     try:
         children: dict[int, list[int]] = {}
+        identities: dict[int, float] = {}
         for entry in Path("/proc").iterdir():  # portability: Linux-only, guarded by caller
             if not entry.name.isdigit():
                 continue
             try:
                 stat = (entry / "stat").read_text(encoding="utf-8")
-                ppid = int(stat[stat.rindex(")") + 1 :].split()[1])  # field 4 = ppid
+                after_comm = stat[stat.rindex(")") + 1 :].split()
+                ppid = int(after_comm[1])  # field 4 = ppid
+                starttime = float(after_comm[19])  # field 22 = starttime, the identity
             except (OSError, ValueError, IndexError):
                 continue  # vanished mid-scan / unparsable line — just skip it
-            children.setdefault(ppid, []).append(int(entry.name))
+            child = int(entry.name)
+            children.setdefault(ppid, []).append(child)
+            identities[child] = starttime
     except OSError:
-        return []
-    out: list[int] = []
+        return {}
+    out: dict[int, float | None] = {}
     seen: set[int] = set()
     stack = list(children.get(pid, ()))
     while stack:
@@ -269,19 +285,28 @@ def _linux_descendants(pid: int) -> list[int]:
         if child in seen:
             continue
         seen.add(child)
-        out.append(child)
+        out[child] = identities[child]
         stack.extend(children.get(child, ()))
     return out
 
 
-def _psutil_descendants(pid: int) -> list[int]:
-    """Transitive descendants via psutil (non-Linux POSIX + Windows). Blanket-except
-    → ``[]`` so a missing psutil or an already-gone pid degrades silently — the
-    never-raise contract the kill escalation depends on."""
+def _psutil_descendants(pid: int) -> dict[int, float | None]:
+    """Transitive descendants via psutil (non-Linux POSIX + Windows), each stamped
+    with the ``create_time()`` of the SAME enumerated ``Process`` object — psutil
+    binds identity at construction, so a pid reaped-and-reused mid-walk raises a
+    ``NoSuchProcess`` instead of authenticating the newcomer, and that member is
+    omitted. Blanket-except → ``{}`` so a missing psutil or an already-gone pid
+    degrades silently — the never-raise contract the kill escalation depends on."""
+    out: dict[int, float | None] = {}
     try:
-        return [child.pid for child in _psutil().Process(pid).children(recursive=True)]
+        for child in _psutil().Process(pid).children(recursive=True):
+            try:
+                out[child.pid] = child.create_time()
+            except Exception:  # noqa: BLE001  # nosec B112 - gone/reused mid-walk: omit it
+                continue
     except Exception:  # noqa: BLE001 - the kill-path seam must never raise
-        return []
+        return {}
+    return out
 
 
 def _psutil():

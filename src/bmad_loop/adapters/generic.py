@@ -721,11 +721,15 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
         # by, so it is out of reach by construction (accepted, documented #183 limit).
         # An empty list = the backend offers no pids (herdr) → degrade to the window
         # kill alone.
+        # Descendant identities ride along from the enumeration itself (the same
+        # /proc read / psutil Process object — no post-hoc stamp to race a reuse);
+        # only the pane ROOT is stamped separately, which is safe: the live window
+        # pins the root pid until kill_window below, so it cannot be recycled here.
         tree: dict[int, float | None] = {}
         for pid in self.mux.window_pane_pids(handle.native_id):
             tree.setdefault(pid, host.identity(pid))
-            for child in host.descendants(pid):
-                tree.setdefault(child, host.identity(child))
+            for child, identity in host.descendants(pid).items():
+                tree.setdefault(child, identity)
         # First strike stays the plain best-effort window kill; everything below
         # verifies it landed and chases the harvested tree.
         self.mux.kill_window(handle.native_id)
@@ -780,37 +784,48 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
     ) -> None:
         """Reap harvested straggler pids the window death left behind — a
         setsid/double-fork survivor escapes the pane pgid, so the window's death is
-        not the tree's. Filter to still-alive-and-ours members, then terminate →
-        poll → force-kill within the SAME grace ``deadline`` (one budget, two
-        phases): terminate first so a mid-write process can flush before SIGKILL. A
-        member whose recorded identity is None is unconfirmable (a possible reuse),
-        so it is polled via the bare-liveness degrade but NEVER force-killed. No
-        survivors → silent return: the clean-end path leaves no breadcrumb."""
-        survivors = [pid for pid, identity in tree.items() if host.alive_and_ours(pid, identity)]
-        if not survivors:
-            return
-        self._note_lifecycle(handle.task_id, "straggler-reap", pids=survivors)
-        for pid in survivors:
-            try:
-                host.terminate(pid)
-            except OSError:
-                pass  # already-gone race — the poll below settles it
-        while True:
-            survivors = [
-                pid for pid, identity in tree.items() if host.alive_and_ours(pid, identity)
+        not the tree's. Filter to still-alive-and-ours identity-CONFIRMED members,
+        then terminate → poll → force-kill within the SAME grace ``deadline`` (one
+        budget, two phases): terminate first so a mid-write process can flush
+        before SIGKILL. A member whose recorded identity is None is unconfirmable
+        (a possible reuse), so it is never signalled AT ALL — not terminated, not
+        polled against the deadline, not force-killed; even a SIGTERM to a recycled
+        pid kills an innocent process. It only surfaces in the ``unreaped`` field
+        via the bare-liveness degrade. Nothing alive at all → silent return: the
+        clean-end path leaves no breadcrumb."""
+
+        def _confirmed_survivors() -> list[int]:
+            return [
+                pid
+                for pid, identity in tree.items()
+                if identity is not None and host.alive_and_ours(pid, identity)
             ]
-            if not survivors or time.monotonic() >= deadline:
-                break
-            time.sleep(KILL_POLL_S)
+
+        survivors = _confirmed_survivors()
+        unconfirmed = [
+            pid for pid, identity in tree.items() if identity is None and host.is_alive(pid)
+        ]
+        if not survivors and not unconfirmed:
+            return
         forced: list[int] = []
-        for pid in survivors:
-            if tree[pid] is None:
-                continue  # unconfirmable identity: refuse to force-kill a possible reuse
-            try:
-                host.force_kill(pid)
-                forced.append(pid)
-            except Exception:  # noqa: BLE001  # nosec B110 - already-gone races are fine
-                pass
+        if survivors:
+            self._note_lifecycle(handle.task_id, "straggler-reap", pids=survivors)
+            for pid in survivors:
+                try:
+                    host.terminate(pid)
+                except OSError:
+                    pass  # already-gone race — the poll below settles it
+            while True:
+                survivors = _confirmed_survivors()
+                if not survivors or time.monotonic() >= deadline:
+                    break
+                time.sleep(KILL_POLL_S)
+            for pid in survivors:
+                try:
+                    host.force_kill(pid)
+                    forced.append(pid)
+                except Exception:  # noqa: BLE001  # nosec B110 - already-gone races are fine
+                    pass
         unreaped = [pid for pid, identity in tree.items() if host.alive_and_ours(pid, identity)]
         # Distinct field name (`unreaped`, a pid list) from the wedged branch's
         # `alive` (bool|None): reusing `alive` for both would give one key an

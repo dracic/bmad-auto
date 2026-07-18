@@ -163,6 +163,9 @@ def test_descendants_enumerates_transitively(host, tmp_path):
         gc_pid = int(gc_file.read_text(encoding="utf-8").strip())
         kids = host.descendants(proc.pid)
         assert gc_pid in kids, f"grandchild {gc_pid} not in transitive descendants {kids}"
+        # The identity rides along from the SAME /proc read the ancestry came from
+        # and must equal the canonical per-pid stamp (the /proc starttime).
+        assert kids[gc_pid] == process_host._proc_starttime(gc_pid)
     finally:
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -179,24 +182,29 @@ def test_descendants_enumerates_transitively(host, tmp_path):
 )
 def test_descendants_dead_or_unknown_pid_is_empty(host):
     """The seam contract: a reaped pid, a never-allocated high pid, and a
-    non-positive pid all enumerate to [] rather than raising."""
+    non-positive pid all enumerate to {} rather than raising."""
     proc = subprocess.Popen(["true"])
     proc.wait(timeout=10)  # reap it — its pid is now gone
-    assert host.descendants(proc.pid) == []
-    assert host.descendants(2**31 - 1) == []  # never allocated
-    assert host.descendants(0) == []
-    assert host.descendants(-1) == []
+    assert host.descendants(proc.pid) == {}
+    assert host.descendants(2**31 - 1) == {}  # never allocated
+    assert host.descendants(0) == {}
+    assert host.descendants(-1) == {}
 
 
 def test_psutil_descendants_maps_children_and_never_raises(monkeypatch):
     """The non-Linux/Windows descendant path maps ``Process.children(recursive=True)``
-    to pids, and any failure (a raising Process, or a missing-psutil ProcessHostError
-    from ``_psutil()`` itself) degrades to [] — the never-raise seam contract that the
-    Linux ``/proc`` walk cannot exercise on Linux CI."""
+    to a pid → create_time identity snapshot stamped from the SAME enumerated
+    ``Process`` objects, and any failure (a raising Process, or a missing-psutil
+    ProcessHostError from ``_psutil()`` itself) degrades to {} — the never-raise
+    seam contract that the Linux ``/proc`` walk cannot exercise on Linux CI."""
 
     class _FakeChild:
-        def __init__(self, pid):
+        def __init__(self, pid, created):
             self.pid = pid
+            self._created = created
+
+        def create_time(self):
+            return self._created
 
     class _FakeProc:
         def __init__(self, pid):
@@ -204,13 +212,13 @@ def test_psutil_descendants_maps_children_and_never_raises(monkeypatch):
 
         def children(self, recursive=False):
             assert recursive is True  # transitive tree, not just direct children
-            return [_FakeChild(11), _FakeChild(22)]
+            return [_FakeChild(11, 111.0), _FakeChild(22, 222.0)]
 
     class _FakePsutil:
         Process = _FakeProc
 
     monkeypatch.setattr(process_host, "_psutil", lambda: _FakePsutil)
-    assert process_host._psutil_descendants(123) == [11, 22]
+    assert process_host._psutil_descendants(123) == {11: 111.0, 22: 222.0}
 
     class _BoomProc:
         def __init__(self, pid):
@@ -220,13 +228,48 @@ def test_psutil_descendants_maps_children_and_never_raises(monkeypatch):
         Process = _BoomProc
 
     monkeypatch.setattr(process_host, "_psutil", lambda: _BoomPsutil)
-    assert process_host._psutil_descendants(123) == []
+    assert process_host._psutil_descendants(123) == {}
 
     def _missing():
         raise process_host.ProcessHostError("psutil missing")
 
     monkeypatch.setattr(process_host, "_psutil", _missing)
-    assert process_host._psutil_descendants(123) == []
+    assert process_host._psutil_descendants(123) == {}
+
+
+def test_psutil_descendants_omits_pid_reused_before_identity_capture(monkeypatch):
+    """PID-generation rollover between enumeration and the identity stamp: the
+    child enumerates as generation A, but by the time its identity is read the
+    pid is gone (or reused as generation B) and psutil raises — its ``Process``
+    objects bind identity at construction, so ``create_time()`` on a recycled pid
+    is a ``NoSuchProcess`` analogue, never generation B's stamp. The snapshot must
+    OMIT that pid — a member it cannot authenticate — while keeping confirmable
+    siblings, and still never raise."""
+
+    class _GoneChild:
+        pid = 11
+
+        def create_time(self):
+            raise RuntimeError("process no longer exists")  # NoSuchProcess analogue
+
+    class _OkChild:
+        pid = 22
+
+        def create_time(self):
+            return 222.0
+
+    class _FakeProc:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def children(self, recursive=False):
+            return [_GoneChild(), _OkChild()]
+
+    class _FakePsutil:
+        Process = _FakeProc
+
+    monkeypatch.setattr(process_host, "_psutil", lambda: _FakePsutil)
+    assert process_host._psutil_descendants(123) == {22: 222.0}
 
 
 def test_default_host_matches_platform(monkeypatch):

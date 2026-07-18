@@ -45,8 +45,11 @@ import pytest
 import yaml
 from conftest import install_dev_base_skills
 
-HAVE_TMUX = sys.platform != "win32" and shutil.which("tmux") is not None
-pytestmark = pytest.mark.skipif(not HAVE_TMUX, reason="stories E2E needs real tmux")
+# Linux-only, not merely non-win32: every fake CLI below is bash + GNU coreutils
+# (`date +%s%N`; the detached-writer fake also needs setsid(1)) — BSD/macOS date
+# has no %N and macOS ships no setsid utility, so skipping honestly beats failing.
+HAVE_TMUX = sys.platform.startswith("linux") and shutil.which("tmux") is not None
+pytestmark = pytest.mark.skipif(not HAVE_TMUX, reason="stories E2E needs real tmux on Linux")
 
 # The fake CLI: reads the story id + spec folder from the session env (as the real
 # folder+id adapter does), writes the id-keyed story spec BEFORE the Stop event so
