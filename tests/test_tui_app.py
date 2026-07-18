@@ -123,9 +123,9 @@ async def until(pilot, condition, timeout: float = 10.0) -> None:
     The dashboard polls on a 1.0s interval and each tick hops through a thread
     worker and a UI callback, so several sequential waits can each need a few
     ticks; the timeout is generous and returns the instant the predicate holds.
-    Genuine stalls (an exclusive poll worker repeatedly superseded under heavy
-    CI IO before it applies a log jump) are handled by @pytest.mark.flaky on the
-    affected smoke tests, which re-rolls the race — see the journal-jump tests."""
+    A pending log jump survives skipped/starved ticks (each tick's _apply
+    re-attempts it until it lands), so waiting on its effect is deterministic —
+    no rerun markers needed on the journal-jump tests."""
     waited = 0.0
     while not condition():
         if waited >= timeout:
@@ -473,7 +473,6 @@ def write_numbered_log(run_dir: Path, task_id: str, count: int = 200) -> list[in
     return offsets
 
 
-@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_journal_enter_jumps_to_log_position(project):
     root = project.project
     run_dir = make_run(root, "20260611-100000-aaaa", alive=True)
@@ -500,6 +499,42 @@ async def test_journal_enter_jumps_to_log_position(project):
         assert "row 100" in log_text(screen)
 
 
+async def test_journal_jump_survives_exhausted_scroll_retry_chain(project):
+    # Regression for #178: the hidden #log pane defers its writes, and on a
+    # starved runner the flush can outlive _scroll_log_to's whole retry chain.
+    # The old code gave up silently and lost the jump forever; now the pending
+    # jump survives exhaustion and the next poll tick re-attempts it. Exhaust
+    # the chain deterministically (attempts=0 against the unflushed pane)
+    # instead of relying on a contended runner to starve it for real.
+    root = project.project
+    run_dir = make_run(root, "20260611-100000-aaaa", alive=True)
+    offsets = write_numbered_log(run_dir, "story-1")
+    journal = Journal(run_dir)
+    journal.set_active_log("story-1")
+    journal.append("session-start", task_id="story-1")
+    app = BmadLoopApp(root)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        await until(pilot, lambda: screen.selected_run_id == "20260611-100000-aaaa")
+        # the poll renders the active log while #log is still hidden behind
+        # tab-journal, so its RichLog writes stay deferred (virtual_size 0)
+        await until(
+            pilot,
+            lambda: screen._displayed_log_task == "story-1" and screen._log_index is not None,
+        )
+        screen._pending_jump = ("story-1", offsets[100])
+        screen._log_follow_tail = False
+        screen._scroll_log_to(screen._log_index.line_for_offset(offsets[100]), attempts=0)
+        # chain exhausted against the unflushed pane: the jump must survive
+        assert screen._pending_jump is not None
+        screen.query_one("#tabs", TabbedContent).active = "tab-log"
+        await until(pilot, lambda: screen._pending_jump is None)  # a tick rescued it
+        log = screen.query_one("#log", RichLog)
+        assert 0 < log.scroll_y < log.max_scroll_y
+        assert "row 100" in log_text(screen)
+
+
 async def test_journal_enter_without_position_notifies(project):
     root = project.project
     run_dir = make_run(root, "20260611-100000-aaaa", alive=True)
@@ -517,7 +552,6 @@ async def test_journal_enter_without_position_notifies(project):
         assert screen.query_one("#tabs", TabbedContent).active == "tab-journal"
 
 
-@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_journal_jump_pins_other_sessions_log(project):
     root = project.project
     run_dir = make_run(root, "20260611-100000-aaaa", alive=True)
@@ -546,7 +580,6 @@ async def test_journal_jump_pins_other_sessions_log(project):
         assert "(pinned" not in log_text(screen)
 
 
-@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_journal_jump_near_tail_does_not_chase_growing_log(project):
     # Regression for "pressing enter keeps sending me to the bottom": jumping to
     # an entry near the end lands the view at the tail, and the old code then
@@ -574,12 +607,11 @@ async def test_journal_jump_near_tail_does_not_chase_growing_log(project):
         # scroll end" with scroll_y == max == 0, which would sample anchored=0 before
         # the deferred _scroll_log_to timer runs, then fail when the jump lands late).
         await until(pilot, lambda: log.max_scroll_y > 0 and log.is_vertical_scroll_end)
-        # The flush's own scroll_end can satisfy the wait while one deferred
-        # _scroll_log_to retry is still armed; post-flush that fire clamps to the
-        # tail and ends the chain, but landing after the growth-render below would
-        # re-scroll against the grown content. Drain it before sampling the anchor.
-        await pilot.pause(0.12)
-        assert log.is_vertical_scroll_end  # chain drained at the tail, not mid-log
+        # Wait for the jump to land (landing releases _pending_jump); after that
+        # the jump machinery is inert — armed retries abort on the cleared jump —
+        # so sampling the anchor is race-free even against the growth below.
+        await until(pilot, lambda: screen._pending_jump is None)
+        assert log.is_vertical_scroll_end  # landed at the tail, not mid-log
         anchored, base_max = log.scroll_y, log.max_scroll_y
         # the live session keeps writing; a poll repaints the pane
         with (run_dir / "logs" / "story-1.log").open("ab") as f:
