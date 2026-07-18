@@ -206,6 +206,9 @@ def test_psutil_descendants_maps_children_and_never_raises(monkeypatch):
         def create_time(self):
             return self._created
 
+        def is_running(self):
+            return True  # same generation we enumerated — identity confirmed
+
     class _FakeProc:
         def __init__(self, pid):
             self.pid = pid
@@ -238,13 +241,22 @@ def test_psutil_descendants_maps_children_and_never_raises(monkeypatch):
 
 
 def test_psutil_descendants_omits_pid_reused_before_identity_capture(monkeypatch):
-    """PID-generation rollover between enumeration and the identity stamp: the
-    child enumerates as generation A, but by the time its identity is read the
-    pid is gone (or reused as generation B) and psutil raises — its ``Process``
-    objects bind identity at construction, so ``create_time()`` on a recycled pid
-    is a ``NoSuchProcess`` analogue, never generation B's stamp. The snapshot must
-    OMIT that pid — a member it cannot authenticate — while keeping confirmable
-    siblings, and still never raise."""
+    """PID-generation rollover between enumeration and the identity stamp, in BOTH
+    shapes psutil actually produces — the snapshot must OMIT any member it cannot
+    authenticate, keep confirmable siblings, and never raise.
+
+    ``_GoneChild`` is the easy shape: the pid vanished and was not reused, so
+    ``create_time()`` raises a ``NoSuchProcess`` analogue.
+
+    ``_ReusedChild`` is the shape that actually bites on macOS and the reason the
+    ``is_running()`` revalidation exists (#184 review). Per
+    ``psutil.Process._get_ident``, the ``LINUX or NETBSD or OSX`` branch binds a
+    *monotonic* ident and leaves ``self._create_time`` unset, so ``create_time()``
+    is a raw call-time read that happily returns the RECYCLED process's stamp — no
+    exception at all. Stamping that would let teardown authenticate and signal an
+    unrelated process. Only ``is_running()`` (construction-bound ident vs. a fresh
+    ``Process``) reports the generation change. An exception-only fake would pass
+    against the buggy code, so this case is what makes the test a regression test."""
 
     class _GoneChild:
         pid = 11
@@ -252,24 +264,46 @@ def test_psutil_descendants_omits_pid_reused_before_identity_capture(monkeypatch
         def create_time(self):
             raise RuntimeError("process no longer exists")  # NoSuchProcess analogue
 
+        def is_running(self):  # pragma: no cover - create_time raises first
+            raise AssertionError("must not be reached: identity read comes first")
+
+    class _ReusedChild:
+        """Enumerated as generation A; the pid was recycled before the stamp, so
+        ``create_time()`` returns generation B's identity WITHOUT raising."""
+
+        pid = 33
+
+        def create_time(self):
+            return 999.0  # generation B's stamp — plausible, and utterly wrong
+
+        def is_running(self):
+            return False  # construction-bound ident no longer matches this pid
+
     class _OkChild:
         pid = 22
 
         def create_time(self):
             return 222.0
 
+        def is_running(self):
+            return True
+
     class _FakeProc:
         def __init__(self, pid):
             self.pid = pid
 
         def children(self, recursive=False):
-            return [_GoneChild(), _OkChild()]
+            return [_GoneChild(), _ReusedChild(), _OkChild()]
 
     class _FakePsutil:
         Process = _FakeProc
 
     monkeypatch.setattr(process_host, "_psutil", lambda: _FakePsutil)
-    assert process_host._psutil_descendants(123) == {22: 222.0}
+    snapshot = process_host._psutil_descendants(123)
+    assert snapshot == {22: 222.0}
+    # The recycled pid must be absent outright, not stamped with the newcomer's
+    # identity — a stamped entry authenticates at teardown and gets signalled.
+    assert 33 not in snapshot
 
 
 def test_default_host_matches_platform(monkeypatch):

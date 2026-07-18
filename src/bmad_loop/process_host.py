@@ -292,16 +292,36 @@ def _linux_descendants(pid: int) -> dict[int, float | None]:
 
 def _psutil_descendants(pid: int) -> dict[int, float | None]:
     """Transitive descendants via psutil (non-Linux POSIX + Windows), each stamped
-    with the ``create_time()`` of the SAME enumerated ``Process`` object — psutil
-    binds identity at construction, so a pid reaped-and-reused mid-walk raises a
-    ``NoSuchProcess`` instead of authenticating the newcomer, and that member is
-    omitted. Blanket-except → ``{}`` so a missing psutil or an already-gone pid
-    degrades silently — the never-raise contract the kill escalation depends on."""
+    with the ``create_time()`` of the SAME enumerated ``Process`` object and then
+    REVALIDATED against that object's construction-bound identity before it is
+    recorded.
+
+    The revalidation is load-bearing, not belt-and-braces — ``create_time()`` alone
+    is NOT reuse-safe here. Per ``psutil.Process._get_ident`` (7.2.2), only the
+    ``WINDOWS`` branch pre-populates the epoch cache (``self._create_time =
+    create_time(fast_only=True)``); the ``LINUX or NETBSD or OSX`` branch binds a
+    *monotonic* starttime and leaves ``self._create_time`` unset. So on macOS our
+    ``create_time()`` is the FIRST call — a raw call-time kernel read, and
+    ``create_time()`` does not consult ``_raise_if_pid_reused()``. A pid reaped and
+    reused between ``children()`` and the stamp would therefore hand back the
+    NEWCOMER's identity, which teardown would then authenticate successfully and
+    signal (#184 review). ``is_running()`` closes that window: it compares the
+    ident captured at construction against a freshly built ``Process``, so a
+    generation change reads as not-running and the member is omitted.
+
+    Order matters — read the identity, THEN validate, THEN record; validating first
+    would reopen the same TOCTOU gap. A member whose identity can't be confirmed is
+    OMITTED, never returned unstamped. Blanket-except → ``{}`` so a missing psutil
+    or an already-gone pid degrades silently — the never-raise contract the kill
+    escalation depends on."""
     out: dict[int, float | None] = {}
     try:
         for child in _psutil().Process(pid).children(recursive=True):
             try:
-                out[child.pid] = child.create_time()
+                identity = child.create_time()
+                if not child.is_running():  # generation changed under us — don't stamp it
+                    continue
+                out[child.pid] = identity
             except Exception:  # noqa: BLE001  # nosec B112 - gone/reused mid-walk: omit it
                 continue
     except Exception:  # noqa: BLE001 - the kill-path seam must never raise

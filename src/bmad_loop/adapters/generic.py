@@ -721,8 +721,10 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
         # by, so it is out of reach by construction (accepted, documented #183 limit).
         # An empty list = the backend offers no pids (herdr) → degrade to the window
         # kill alone.
-        # Descendant identities ride along from the enumeration itself (the same
-        # /proc read / psutil Process object — no post-hoc stamp to race a reuse);
+        # Descendant identities ride along from the enumeration itself — the same
+        # /proc read (Linux) or the same psutil Process object, revalidated against
+        # its construction-bound ident (macOS/win32), so no post-hoc stamp can race
+        # a reuse;
         # only the pane ROOT is stamped separately, which is safe: the live window
         # pins the root pid until kill_window below, so it cannot be recycled here.
         tree: dict[int, float | None] = {}
