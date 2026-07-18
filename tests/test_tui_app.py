@@ -7,6 +7,7 @@ bindings drive modals into tui.launch calls (monkeypatched — no real tmux)."""
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import tomllib
 from pathlib import Path
@@ -16,7 +17,7 @@ from conftest import install_bmad_config, write_sprint
 from rich.console import Console
 from rich.text import Text
 from textual.events import MouseMove
-from textual.geometry import Offset
+from textual.geometry import Offset, Size
 from textual.selection import Selection
 from textual.widgets import (
     Button,
@@ -525,7 +526,7 @@ async def test_journal_jump_survives_exhausted_scroll_retry_chain(project):
         )
         screen._pending_jump = ("story-1", offsets[100])
         screen._log_follow_tail = False
-        screen._scroll_log_to(screen._log_index.line_for_offset(offsets[100]), attempts=0)
+        screen._scroll_log_to(attempts=0)
         # chain exhausted against the unflushed pane: the jump must survive
         assert screen._pending_jump is not None
         screen.query_one("#tabs", TabbedContent).active = "tab-log"
@@ -533,6 +534,60 @@ async def test_journal_jump_survives_exhausted_scroll_retry_chain(project):
         log = screen.query_one("#log", RichLog)
         assert 0 < log.scroll_y < log.max_scroll_y
         assert "row 100" in log_text(screen)
+
+
+async def test_journal_jump_retry_recomputes_line_after_same_task_repaint(project):
+    # A delayed retry must not reuse the line captured when the chain was
+    # armed: a poll can repaint the same task's log mid-chain (history
+    # eviction advances LogIndex.render_base), shifting the line a byte
+    # offset maps to. The old code scrolled the stale line and cleared
+    # _pending_jump, silencing the fresher chain. Each fire now recomputes
+    # the line from the live index. Fully deterministic: the armed timer
+    # callback is captured and invoked by hand — no reveal, no tick race.
+    root = project.project
+    run_dir = make_run(root, "20260611-100000-aaaa", alive=True)
+    offsets = write_numbered_log(run_dir, "story-1")
+    journal = Journal(run_dir)
+    journal.set_active_log("story-1")
+    journal.append("session-start", task_id="story-1")
+    app = BmadLoopApp(root)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        await until(pilot, lambda: screen.selected_run_id == "20260611-100000-aaaa")
+        await until(
+            pilot,
+            lambda: screen._displayed_log_task == "story-1" and screen._log_index is not None,
+        )
+        log = screen.query_one("#log", RichLog)
+        # arm one retry against the unflushed hidden pane, capturing its callback
+        captured = []
+        screen.set_timer = lambda delay, cb: captured.append(cb)
+        screen._pending_jump = ("story-1", offsets[100])
+        screen._log_follow_tail = False
+        screen._scroll_log_to(attempts=1)
+        del screen.set_timer
+        assert len(captured) == 1 and screen._pending_jump is not None
+        stale_line = screen._log_index.line_for_offset(offsets[100])
+        # same-task repaint mid-chain: history eviction shifts render_base,
+        # so the same offset now maps 7 lines earlier
+        screen._log_index = dataclasses.replace(
+            screen._log_index, render_base=screen._log_index.render_base + 7
+        )
+        fresh_line = screen._log_index.line_for_offset(offsets[100])
+        assert fresh_line == stale_line - 7
+        # open the height gate without a real Textual flush, record the scroll
+        log.virtual_size = Size(80, 500)
+        scrolls = []
+        log.scroll_to = lambda *a, **kw: scrolls.append((a, kw))
+        captured[0]()  # the delayed retry fires
+        del log.scroll_to
+        viewport = max(1, log.scrollable_content_region.height)
+        expected = max(0, (fresh_line + 1) - viewport // 2)
+        stale = max(0, (stale_line + 1) - viewport // 2)
+        assert scrolls == [((), {"y": expected, "animate": False})]
+        assert expected != stale  # the recompute is what moved the target
+        assert screen._pending_jump is None  # landed: the jump is released
 
 
 async def test_journal_enter_without_position_notifies(project):

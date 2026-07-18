@@ -370,7 +370,7 @@ class DashboardScreen(Screen[None]):
         # retry chain delays the jump instead of losing it.
         self._pending_jump = (task, pos)
         if task == self._displayed_log_task and self._log_index is not None:
-            self._scroll_log_to(self._log_index.line_for_offset(pos))
+            self._scroll_log_to()
             return
         # another session's log (or this one not rendered yet): pin it and
         # finish the jump once a poll has fed and rendered that file
@@ -378,12 +378,17 @@ class DashboardScreen(Screen[None]):
             self._pin_task = task
         self._tick(force_rescan=False)
 
-    def _scroll_log_to(self, line: int | None, attempts: int = 20) -> None:
+    def _scroll_log_to(self, attempts: int = 20) -> None:
         jump = self._pending_jump
         if jump is None or jump[0] != self._displayed_log_task:
             # jump cancelled or superseded, or the pane re-rendered another
             # task's log while a retry was armed — a stale fire must not scroll
             return
+        if self._log_index is None:
+            # not rendered yet (or a log reset mid-chain): the pending jump
+            # survives and the next ≤1s poll tick re-attempts it
+            return
+        line = self._log_index.line_for_offset(jump[1])
         if line is None:
             self._pending_jump = None  # give up for good: a retry would re-notify
             self.notify("log is empty or not loaded yet", severity="warning")
@@ -397,14 +402,14 @@ class DashboardScreen(Screen[None]):
             # so our scroll lands after it instead of being stomped. The chain
             # only covers sub-second snappiness: when it exhausts, the pending
             # jump stays set and the next ≤1s poll tick re-attempts it. Each
-            # fire re-checks the jump identity so a superseded chain dies.
+            # fire re-checks the jump identity so a superseded chain dies, and
+            # recomputes the line from the live index so a same-task repaint
+            # mid-chain (render_base drift) can't scroll to stale coordinates.
             if attempts > 0:
                 self.set_timer(
                     0.05,
                     lambda: (
-                        self._scroll_log_to(line, attempts - 1)
-                        if self._pending_jump is jump
-                        else None
+                        self._scroll_log_to(attempts - 1) if self._pending_jump is jump else None
                     ),
                 )
             return
@@ -859,16 +864,13 @@ class DashboardScreen(Screen[None]):
                 log.write(Text(note, style="yellow"), scroll_end=False)
             if snap.log_lines is not None and snap.log_lines.plain:
                 log.write(snap.log_lines, scroll_end=at_end)
-        if (
-            self._pending_jump is not None
-            and snap.log_task == self._pending_jump[0]
-            and self._log_index is not None
-        ):
+        if self._pending_jump is not None:
             # _scroll_log_to owns clearing the pending jump when the scroll
             # lands (or the log is provably empty) — until then this block
             # re-attempts on every tick, so a flush that outlives the retry
-            # chain delays the jump by ≤1s instead of losing it.
-            self._scroll_log_to(self._log_index.line_for_offset(self._pending_jump[1]))
+            # chain delays the jump by ≤1s instead of losing it. Task-match
+            # and index guards live inside _scroll_log_to.
+            self._scroll_log_to()
 
         attention = self.query_one("#attention", RichLog)
         if snap.attention_reset:
