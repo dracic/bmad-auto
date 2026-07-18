@@ -365,18 +365,32 @@ class DashboardScreen(Screen[None]):
         task, pos = str(task), int(pos)
         self.query_one("#tabs", TabbedContent).active = "tab-log"
         self._log_follow_tail = False  # anchor on the jump target, stop chasing the tail
+        # _scroll_log_to owns clearing this once the scroll lands; until then
+        # every poll tick's _apply re-attempts it, so a flush that outlives the
+        # retry chain delays the jump instead of losing it.
+        self._pending_jump = (task, pos)
         if task == self._displayed_log_task and self._log_index is not None:
-            self._scroll_log_to(self._log_index.line_for_offset(pos))
+            self._scroll_log_to()
             return
         # another session's log (or this one not rendered yet): pin it and
         # finish the jump once a poll has fed and rendered that file
-        self._pending_jump = (task, pos)
         if task != self._displayed_log_task:
             self._pin_task = task
         self._tick(force_rescan=False)
 
-    def _scroll_log_to(self, line: int | None, attempts: int = 60) -> None:
+    def _scroll_log_to(self, attempts: int = 20, finalize: bool = False) -> None:
+        jump = self._pending_jump
+        if jump is None or jump[0] != self._displayed_log_task:
+            # jump cancelled or superseded, or the pane re-rendered another
+            # task's log while a retry was armed — a stale fire must not scroll
+            return
+        if self._log_index is None:
+            # not rendered yet (or a log reset mid-chain): the pending jump
+            # survives and the next ≤1s poll tick re-attempts it
+            return
+        line = self._log_index.line_for_offset(jump[1])
         if line is None:
+            self._pending_jump = None  # give up for good: a retry would re-notify
             self.notify("log is empty or not loaded yet", severity="warning")
             return
         log = self.query_one("#log", RichLog)
@@ -385,19 +399,45 @@ class DashboardScreen(Screen[None]):
             # A previously hidden RichLog defers writes until the tab switch
             # gives it a size, and that flush applies its own scroll_end.
             # Wait for the flush (content taller than the target proves it)
-            # so our scroll lands after it instead of being stomped.
+            # so our scroll lands after it instead of being stomped. The chain
+            # only covers sub-second snappiness: when it exhausts, the pending
+            # jump stays set and the next ≤1s poll tick re-attempts it. Each
+            # fire re-checks the jump identity so a superseded chain dies, and
+            # recomputes the line from the live index so a same-task repaint
+            # mid-chain (render_base drift) can't scroll to stale coordinates.
             if attempts > 0:
-                self.set_timer(0.05, lambda: self._scroll_log_to(line, attempts - 1))
+                self.set_timer(
+                    0.05,
+                    lambda: (
+                        self._scroll_log_to(attempts - 1) if self._pending_jump is jump else None
+                    ),
+                )
             return
         viewport = max(1, log.scrollable_content_region.height)
         log.scroll_to(y=max(0, target - viewport // 2), animate=False)
+        if finalize:
+            self._pending_jump = None  # landed: release so later renders don't re-jump
+            return
+        # The open height gate proves the reveal flush *wrote* — not that its
+        # scroll drained: RichLog.on_resize replays the deferred writes, whose
+        # scroll_end goes through call_after_refresh, so a tail-scroll can
+        # still be queued on the log's pump while scroll_to (immediate on a
+        # ScrollView) already landed. Releasing here would let that queued
+        # scroll stomp the jump with nothing left to re-attempt it. Route the
+        # release through the same queue instead: FIFO puts the finalize fire
+        # after any queued stomp, and it re-scrolls to the recomputed target
+        # before letting go. If its guards bail (log reset mid-window), the
+        # jump stays pending for the next ≤1s tick.
+        log.call_after_refresh(
+            lambda: (self._scroll_log_to(finalize=True) if self._pending_jump is jump else None)
+        )
 
     def action_unpin_log(self) -> None:
         if self._resize_mode:  # Escape leaves resize mode before it unpins the log
             self._exit_resize_mode()
             return
-        if self._pin_task is None and self._pending_jump is None:
-            return
+        if self._pin_task is None and self._pending_jump is None and self._log_follow_tail:
+            return  # nothing to unpin and already following the tail
         self._pin_task = None
         self._pending_jump = None
         self._log_follow_tail = True
@@ -839,14 +879,13 @@ class DashboardScreen(Screen[None]):
                 log.write(Text(note, style="yellow"), scroll_end=False)
             if snap.log_lines is not None and snap.log_lines.plain:
                 log.write(snap.log_lines, scroll_end=at_end)
-        if (
-            self._pending_jump is not None
-            and snap.log_task == self._pending_jump[0]
-            and self._log_index is not None
-        ):
-            _, pos = self._pending_jump
-            self._pending_jump = None
-            self._scroll_log_to(self._log_index.line_for_offset(pos))
+        if self._pending_jump is not None:
+            # _scroll_log_to owns clearing the pending jump when the scroll
+            # lands (or the log is provably empty) — until then this block
+            # re-attempts on every tick, so a flush that outlives the retry
+            # chain delays the jump by ≤1s instead of losing it. Task-match
+            # and index guards live inside _scroll_log_to.
+            self._scroll_log_to()
 
         attention = self.query_one("#attention", RichLog)
         if snap.attention_reset:
