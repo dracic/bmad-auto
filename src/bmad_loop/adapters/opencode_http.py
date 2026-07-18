@@ -88,6 +88,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .. import gates
 from ..bmadconfig import ProjectPaths
 from ..journal import LOGS_DIR
 from ..model import TokenUsage
@@ -95,6 +96,7 @@ from ..policy import Policy
 from ..process_host import get_process_host
 from .base import CodingCLIAdapter, SessionHandle, SessionResult, SessionSpec
 from .generic import (
+    BUDGET_NUDGE_TEXT,
     HEARTBEAT_INTERVAL_S,
     NUDGE_TEXT,
     STALL_NUDGE_TEXT,
@@ -554,6 +556,17 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
         # monotonic ts of the last heartbeat.json overwrite; None = not yet
         # written, so the first tick always stamps one.
         last_heartbeat: float | None = None
+        # Session-budget guard (#158), mirroring generic.wait_for_completion:
+        # latched on the first cap crossing; budget_deadline is the enforce-mode
+        # monotonic grace expiry, checked every tick (sampling itself rides the
+        # heartbeat cadence).
+        budget_tripped = False
+        budget_weighted: int | None = None
+        budget_deadline: float | None = None
+        # wall-clock co-bound for the grace (#157 pattern): a host suspend
+        # freezes time.monotonic(), silently stretching the "bounded" wrap-up
+        # window; the wall clock may EXPIRE the grace — never extend it.
+        budget_wall_deadline: float | None = None
 
         while True:
             remaining = deadline - time.monotonic()
@@ -582,6 +595,7 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
                     transcript_path=transcript,
                     timeout_fired_at=time.time(),
                     timeout_expired_clock=expired,
+                    budget_weighted=budget_weighted,
                 )
             now = time.monotonic()
             if last_heartbeat is None or now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
@@ -594,6 +608,117 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
                         "stall_armed": stall_deadline is not None,
                         "stall_nudges_sent": stall_nudges_sent,
                     },
+                )
+                # Budget sampling rides the heartbeat cadence — no extra knob.
+                # Usage comes over HTTP (server state is sqlite, not a file).
+                if (
+                    not budget_tripped
+                    and spec.token_budget is not None
+                    and spec.token_budget_mode in ("warn", "enforce")
+                ):
+                    weighted = self._sample_weighted_usage(sess, spec)
+                    if weighted is not None and weighted > spec.token_budget:
+                        budget_tripped = True
+                        budget_weighted = weighted
+                        self._note_lifecycle(
+                            handle.task_id,
+                            "budget-tripped",
+                            weighted=weighted,
+                            budget=spec.token_budget,
+                            mode=spec.token_budget_mode,
+                        )
+                        try:
+                            gates.notify(
+                                self.policy,
+                                self.run_dir,
+                                "bmad-loop session over token budget",
+                                f"{handle.task_id}: weighted spend {weighted} crossed the "
+                                f"{spec.token_budget} per-session cap "
+                                f"(mode={spec.token_budget_mode})",
+                            )
+                        except OSError:
+                            # observe-degrade: an unwritable ATTENTION file is
+                            # observability, never a reason to break the loop
+                            # (the _write_heartbeat doctrine).
+                            pass
+                        # nosec below: bandit B105 pattern-matches the "token"
+                        # in token_budget_mode as a hardcoded-password compare;
+                        # it is a mode enum, not a credential.
+                        if spec.token_budget_mode == "enforce":  # nosec B105
+                            if spec.token_budget_grace_s <= 0:
+                                # zero grace = terminate at trip, no nudge — but
+                                # server death still wins (artifact honored via
+                                # the crash path), exactly like grace expiry.
+                                if sess.process.poll() is not None:
+                                    transcript = self._capture_usage(handle, sess)
+                                    return self._final(
+                                        handle,
+                                        spec,
+                                        "crashed",
+                                        session_id,
+                                        transcript,
+                                        budget_weighted=weighted,
+                                    )
+                                self._note_lifecycle(
+                                    handle.task_id,
+                                    "over-budget-fired",
+                                    weighted=weighted,
+                                    budget=spec.token_budget,
+                                    grace_s=spec.token_budget_grace_s,
+                                    zero_grace=True,
+                                )
+                                self._abort(sess)
+                                transcript = self._capture_usage(handle, sess)
+                                return SessionResult(
+                                    status="over_budget",
+                                    session_id=session_id,
+                                    transcript_path=transcript,
+                                    budget_weighted=weighted,
+                                )
+                            try:
+                                self.send_text(handle, BUDGET_NUDGE_TEXT)
+                            except Exception:  # noqa: BLE001  # nosec B110 - best-effort nudge
+                                # a dead/hung server can't take the nudge; the
+                                # grace still arms — the next tick's process
+                                # poll scores a dead server crashed.
+                                pass
+                            budget_deadline = time.monotonic() + spec.token_budget_grace_s
+                            budget_wall_deadline = time.time() + spec.token_budget_grace_s
+            if budget_deadline is not None and (
+                time.monotonic() >= budget_deadline
+                or (budget_wall_deadline is not None and time.time() >= budget_wall_deadline)
+            ):
+                # Grace expired with no completion (wall co-bound included: a
+                # suspend-frozen monotonic clock must not stretch the window,
+                # #157). Server death ≙ window death (the crash path honors a
+                # landed artifact); a live server ends over_budget WITHOUT
+                # reading the result file — an artifact under a live session is
+                # never trusted (#48/#53).
+                if sess.process.poll() is not None:
+                    transcript = self._capture_usage(handle, sess)
+                    return self._final(
+                        handle,
+                        spec,
+                        "crashed",
+                        session_id,
+                        transcript,
+                        budget_weighted=budget_weighted,
+                    )
+                self._note_lifecycle(
+                    handle.task_id,
+                    "over-budget-fired",
+                    weighted=budget_weighted,
+                    budget=spec.token_budget,
+                    grace_s=spec.token_budget_grace_s,
+                    zero_grace=False,
+                )
+                self._abort(sess)
+                transcript = self._capture_usage(handle, sess)
+                return SessionResult(
+                    status="over_budget",
+                    session_id=session_id,
+                    transcript_path=transcript,
+                    budget_weighted=budget_weighted,
                 )
             try:
                 event: str | None = sess.events.get(timeout=min(remaining, self.poll_tick_s))
@@ -613,7 +738,14 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
                 # bounds a persistently unreadable one.
                 if sess.process.poll() is not None:
                     transcript = self._capture_usage(handle, sess)
-                    return self._final(handle, spec, "crashed", session_id, transcript)
+                    return self._final(
+                        handle,
+                        spec,
+                        "crashed",
+                        session_id,
+                        transcript,
+                        budget_weighted=budget_weighted,
+                    )
                 if self._session_status(sess) is not False:
                     continue
                 event = "idle"
@@ -623,7 +755,14 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
                     # Server death ≙ window death: the crash path vouches for a
                     # landed artifact (accept_result=True), same as generic.
                     transcript = self._capture_usage(handle, sess)
-                    return self._final(handle, spec, "crashed", session_id, transcript)
+                    return self._final(
+                        handle,
+                        spec,
+                        "crashed",
+                        session_id,
+                        transcript,
+                        budget_weighted=budget_weighted,
+                    )
                 silent = (
                     time.monotonic() - max(last_seen, sess.last_frame_monotonic)
                     > self.silence_threshold_s
@@ -668,7 +807,14 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
                             # of a stall that discards a just-flushed result.
                             if sess.process.poll() is not None:
                                 transcript = self._capture_usage(handle, sess)
-                                return self._final(handle, spec, "crashed", session_id, transcript)
+                                return self._final(
+                                    handle,
+                                    spec,
+                                    "crashed",
+                                    session_id,
+                                    transcript,
+                                    budget_weighted=budget_weighted,
+                                )
                             transcript = self._capture_usage(handle, sess)
                             return self._final(
                                 handle,
@@ -677,6 +823,7 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
                                 session_id,
                                 transcript,
                                 accept_result=False,
+                                budget_weighted=budget_weighted,
                             )
                     continue
 
@@ -689,6 +836,7 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
                         result_json=result_json,
                         session_id=session_id,
                         transcript_path=transcript,
+                        budget_weighted=budget_weighted,
                     )
                 if nudges_left > 0:
                     nudges_left -= 1
@@ -696,7 +844,14 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
                     continue
                 if self._stall_grace_s <= 0:
                     transcript = self._capture_usage(handle, sess)
-                    return self._final(handle, spec, "stalled", session_id, transcript)
+                    return self._final(
+                        handle,
+                        spec,
+                        "stalled",
+                        session_id,
+                        transcript,
+                        budget_weighted=budget_weighted,
+                    )
                 # A result-less Stop, but the session may have ended its turn
                 # awaiting a background process: open/re-arm the idle-grace
                 # window; a fresh Stop lands here again and resets it.
@@ -758,6 +913,22 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
             pass
 
     # ----------------------------------------------------------------- usage
+
+    def _sample_weighted_usage(self, sess: _ServerSession, spec: SessionSpec) -> int | None:
+        """Mid-session cumulative weighted spend over HTTP, or None when the
+        guard must stay inert this tick (no live session yet, non-200, a
+        transport error). Never raises — sampling must not break the wait
+        loop."""
+        if sess.client is None or not sess.session_id:
+            return None
+        try:
+            resp = sess.client.get(f"/session/{sess.session_id}/message")
+            if resp.status_code != 200:
+                return None
+            usage = _sum_usage(resp.json())
+        except Exception:  # noqa: BLE001 - sampling is advisory
+            return None
+        return usage.weighted_total(spec.cache_read_weight)
 
     def _capture_usage(self, handle: SessionHandle, sess: _ServerSession) -> str | None:
         """Read usage over HTTP before teardown (state is server-side sqlite):

@@ -23,7 +23,7 @@ import shlex
 import time
 from pathlib import Path
 
-from .. import devcontract, runs
+from .. import devcontract, gates, runs
 from ..bmadconfig import ProjectPaths
 from ..journal import LOGS_DIR
 from ..model import TokenUsage
@@ -64,6 +64,17 @@ STALL_NUDGE_TEXT = (
     "artifact (the spec's terminal status / result file) does; if the work is "
     "already complete, write it before ending your turn."
 )
+# Wrap-up demand for a session that crossed its token budget (#158, enforce
+# mode): the guard arms a bounded grace window right after sending this, so the
+# session must converge now — it will be terminated over_budget otherwise.
+BUDGET_NUDGE_TEXT = (
+    "You have exceeded this session's token budget in bmad-loop automation mode. "
+    "Stop exploring and wrap up now: commit whatever is finished, write your "
+    "workflow's completion artifact (the spec's terminal status / result file), "
+    "and end your turn. Note: a prose reply cannot end this session — only the "
+    "completion artifact does; if you cannot finish, mark the work blocked in it "
+    "and end your turn."
+)
 
 
 class _ResultFileMixin:
@@ -90,11 +101,14 @@ class _ResultFileMixin:
         transcript: str | None,
         *,
         accept_result: bool = True,
+        budget_weighted: int | None = None,
     ) -> SessionResult:
         """Session is gone or done responding: completed if the result file
         landed anyway, otherwise the fallback status. ``accept_result=False``
         (a stall verdict reached under a live window) pins the fallback: an
-        artifact that appeared without a Stop or window death is not trusted."""
+        artifact that appeared without a Stop or window death is not trusted.
+        ``budget_weighted`` (a tripped session-budget guard's sample) rides
+        every exit so the engine can journal it whatever the verdict."""
         result_json = self._result_json(handle, spec, wait=False) if accept_result else None
         status = "completed" if result_json is not None else fallback
         return SessionResult(
@@ -102,6 +116,7 @@ class _ResultFileMixin:
             result_json=result_json,
             session_id=session_id,
             transcript_path=transcript,
+            budget_weighted=budget_weighted,
         )
 
     def _result_path(self, task_id: str) -> Path:
@@ -332,6 +347,17 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
         # monotonic ts of the last heartbeat.json overwrite; None = not yet
         # written, so the first tick always stamps one.
         last_heartbeat: float | None = None
+        # Session-budget guard (#158): latched on the first cap crossing — the
+        # warn/nudge fires at most once per session. budget_deadline is the
+        # enforce-mode monotonic grace expiry (None = not armed); checked every
+        # tick, unlike the heartbeat-throttled sampling that arms it. The wall
+        # deadline is the #157 co-bound: a host suspend freezes
+        # time.monotonic(), silently stretching the "bounded" wrap-up window,
+        # so the wall clock may EXPIRE the grace — never extend it.
+        budget_tripped = False
+        budget_weighted: int | None = None
+        budget_deadline: float | None = None
+        budget_wall_deadline: float | None = None
 
         while True:
             remaining = deadline - time.monotonic()
@@ -358,6 +384,7 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
                     transcript_path=transcript_path,
                     timeout_fired_at=time.time(),
                     timeout_expired_clock=expired,
+                    budget_weighted=budget_weighted,
                 )
             now = time.monotonic()
             if last_heartbeat is None or now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
@@ -370,6 +397,122 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
                         "stall_armed": stall_deadline is not None,
                         "stall_nudges_sent": stall_nudges_sent,
                     },
+                )
+                # Budget sampling rides the heartbeat cadence — no extra knob.
+                # transcript_path is unknown until the first hook event carries
+                # it (SessionStart for claude); until then the guard is inert.
+                if (
+                    not budget_tripped
+                    and spec.token_budget is not None
+                    and spec.token_budget_mode in ("warn", "enforce")
+                    and transcript_path
+                ):
+                    weighted = self._sample_weighted_usage(transcript_path, spec)
+                    if weighted is not None and weighted > spec.token_budget:
+                        budget_tripped = True
+                        budget_weighted = weighted
+                        self._note_lifecycle(
+                            handle.task_id,
+                            "budget-tripped",
+                            weighted=weighted,
+                            budget=spec.token_budget,
+                            mode=spec.token_budget_mode,
+                        )
+                        try:
+                            gates.notify(
+                                self.policy,
+                                self.run_dir,
+                                "bmad-loop session over token budget",
+                                f"{handle.task_id}: weighted spend {weighted} crossed the "
+                                f"{spec.token_budget} per-session cap "
+                                f"(mode={spec.token_budget_mode})",
+                            )
+                        except OSError:
+                            # observe-degrade: an unwritable ATTENTION file is
+                            # observability, never a reason to break the loop
+                            # (the _write_heartbeat doctrine).
+                            pass
+                        # nosec below: bandit B105 pattern-matches the "token"
+                        # in token_budget_mode as a hardcoded-password compare;
+                        # it is a mode enum, not a credential.
+                        if spec.token_budget_mode == "enforce":  # nosec B105
+                            if spec.token_budget_grace_s <= 0:
+                                # zero grace = terminate at trip, no nudge — but
+                                # window death still wins (artifact honored via
+                                # the crash path), exactly like grace expiry; a
+                                # transport error is not proof of death.
+                                try:
+                                    if not self._window_alive(handle):
+                                        return self._final(
+                                            handle,
+                                            spec,
+                                            "crashed",
+                                            session_id,
+                                            transcript_path,
+                                            budget_weighted=weighted,
+                                        )
+                                except MultiplexerError:
+                                    pass
+                                self._note_lifecycle(
+                                    handle.task_id,
+                                    "over-budget-fired",
+                                    weighted=weighted,
+                                    budget=spec.token_budget,
+                                    grace_s=spec.token_budget_grace_s,
+                                    zero_grace=True,
+                                )
+                                return SessionResult(
+                                    status="over_budget",
+                                    session_id=session_id,
+                                    transcript_path=transcript_path,
+                                    budget_weighted=weighted,
+                                )
+                            try:
+                                self.send_text(handle, BUDGET_NUDGE_TEXT)
+                            except MultiplexerError:
+                                # a dead/hung window can't take the nudge; the
+                                # grace still arms — the next tick's liveness
+                                # probe scores a dead window crashed.
+                                pass
+                            budget_deadline = time.monotonic() + spec.token_budget_grace_s
+                            budget_wall_deadline = time.time() + spec.token_budget_grace_s
+            if budget_deadline is not None and (
+                time.monotonic() >= budget_deadline
+                or (budget_wall_deadline is not None and time.time() >= budget_wall_deadline)
+            ):
+                # Grace expired with no completion (wall co-bound included: a
+                # suspend-frozen monotonic clock must not stretch the window,
+                # #157). Window death is authoritative (its artifact is honored
+                # via the crash path); under a live window the session ends
+                # over_budget WITHOUT reading the result file — an artifact
+                # under a live window is never trusted (#48/#53). A transport
+                # error is not proof of death, so it falls through to the
+                # over_budget verdict.
+                try:
+                    if not self._window_alive(handle):
+                        return self._final(
+                            handle,
+                            spec,
+                            "crashed",
+                            session_id,
+                            transcript_path,
+                            budget_weighted=budget_weighted,
+                        )
+                except MultiplexerError:
+                    pass
+                self._note_lifecycle(
+                    handle.task_id,
+                    "over-budget-fired",
+                    weighted=budget_weighted,
+                    budget=spec.token_budget,
+                    grace_s=spec.token_budget_grace_s,
+                    zero_grace=False,
+                )
+                return SessionResult(
+                    status="over_budget",
+                    session_id=session_id,
+                    transcript_path=transcript_path,
+                    budget_weighted=budget_weighted,
                 )
             event = self.watcher.wait_for(
                 handle.task_id,
@@ -391,7 +534,14 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
                 probe_failures = 0
                 if not alive:
                     # died without a SessionEnd hook (killed, crashed hard)
-                    return self._final(handle, spec, "crashed", session_id, transcript_path)
+                    return self._final(
+                        handle,
+                        spec,
+                        "crashed",
+                        session_id,
+                        transcript_path,
+                        budget_weighted=budget_weighted,
+                    )
                 if stall_deadline is not None:
                     # No artifact shortcut here: the window is alive on this tick
                     # (a dead one returned "crashed" above), and a terminal
@@ -436,14 +586,27 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
                     # persistent failure.
                     try:
                         if not self._window_alive(handle):
-                            return self._final(handle, spec, "crashed", session_id, transcript_path)
+                            return self._final(
+                                handle,
+                                spec,
+                                "crashed",
+                                session_id,
+                                transcript_path,
+                                budget_weighted=budget_weighted,
+                            )
                     except MultiplexerError:
                         pass
                     # Still alive: an artifact on disk cannot upgrade the stall to
                     # completed — it may be stale or mid-write; only a Stop or
                     # window death vouches for it.
                     return self._final(
-                        handle, spec, "stalled", session_id, transcript_path, accept_result=False
+                        handle,
+                        spec,
+                        "stalled",
+                        session_id,
+                        transcript_path,
+                        accept_result=False,
+                        budget_weighted=budget_weighted,
                     )
                 continue
             if (
@@ -471,13 +634,21 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
                         result_json=result_json,
                         session_id=session_id,
                         transcript_path=transcript_path,
+                        budget_weighted=budget_weighted,
                     )
                 if nudges_left > 0:
                     nudges_left -= 1
                     self.send_text(handle, NUDGE_TEXT)
                     continue
                 if self._stall_grace_s <= 0:
-                    return self._final(handle, spec, "stalled", session_id, transcript_path)
+                    return self._final(
+                        handle,
+                        spec,
+                        "stalled",
+                        session_id,
+                        transcript_path,
+                        budget_weighted=budget_weighted,
+                    )
                 # A result-less Stop, but the session may have ended its turn to
                 # await a background process (a Unity PlayMode run, a slow test)
                 # and expects to be re-invoked on completion. Open/re-arm an idle-
@@ -492,7 +663,14 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
                 stall_nudges_left = self._stall_nudges
                 continue
             if event.event == "SessionEnd":
-                return self._final(handle, spec, "crashed", session_id, transcript_path)
+                return self._final(
+                    handle,
+                    spec,
+                    "crashed",
+                    session_id,
+                    transcript_path,
+                    budget_weighted=budget_weighted,
+                )
 
     def _log_activity_key(self, task_id: str) -> tuple[int, int] | None:
         """Activity signature of the tee'd pane log: (mtime_ns, size), or None if
@@ -546,6 +724,22 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
         except MultiplexerError:
             alive = None  # unknown is not dead — record it honestly
         self._note_lifecycle(handle.task_id, "kill-outcome", alive=alive, escalated=True)
+
+    def _sample_weighted_usage(self, transcript_path: str, spec: SessionSpec) -> int | None:
+        """Cumulative weighted spend of the live session's transcript, or None
+        when the guard must stay inert this tick (parser "none", nothing
+        tallied yet, an unreadable file). Sampling must never break the wait
+        loop — the liveness-probe tolerance model, for the usage read. The
+        transcript is a LIVE file being appended mid-turn: a flush boundary
+        can split a multibyte UTF-8 character, so the torn read raises
+        UnicodeDecodeError (a ValueError) — as tolerated as an OSError."""
+        try:
+            usage = tally_usage(self.profile.usage_parser, Path(transcript_path))
+        except (OSError, ValueError):
+            return None
+        if usage is None:
+            return None
+        return usage.weighted_total(spec.cache_read_weight)
 
     def read_usage(self, result: SessionResult) -> TokenUsage | None:
         if not result.transcript_path:
@@ -759,8 +953,13 @@ class _DevSynthesisMixin(_ResultFileMixin):
         rescue still runs the engine's full deterministic verify downstream,
         so a bogus upgrade degrades into an ordinary verify-failed retry. A
         cap-exhausted injected-workflow stall whose marker landed before the
-        kill is rescued by the same trust model."""
-        if result.status not in ("stalled", "timeout") or result.result_json is not None:
+        kill is rescued by the same trust model. ``over_budget`` joins the set
+        (#158): an artifact the wrap-up nudge flushed at kill-time is honored
+        the same way."""
+        if (
+            result.status not in ("stalled", "timeout", "over_budget")
+            or result.result_json is not None
+        ):
             return result
         alive = self._probe_alive(handle)
         if alive:
@@ -796,9 +995,10 @@ class _DevSynthesisMixin(_ResultFileMixin):
             transcript_path=result.transcript_path,
             # a rescued timeout upgrades the outcome, not the timing evidence:
             # the deadline did fire on this session, and that record must
-            # survive the rescue (#157).
+            # survive the rescue (#157). Same for a tripped budget's sample.
             timeout_fired_at=result.timeout_fired_at,
             timeout_expired_clock=result.timeout_expired_clock,
+            budget_weighted=result.budget_weighted,
         )
 
 

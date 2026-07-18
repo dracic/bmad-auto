@@ -326,6 +326,72 @@ def test_dev_stall_nudges_cap_default_parse_and_template():
         policy.loads("[limits]\ndev_stall_nudges_cap = -1\n")
 
 
+def test_session_budget_mode_default_parse_and_template():
+    import tomllib
+
+    assert policy.loads("").limits.session_budget_mode == "warn"
+    for mode in sorted(policy.SESSION_BUDGET_MODES):
+        loaded = policy.loads(f'[limits]\nsession_budget_mode = "{mode}"\n')
+        assert loaded.limits.session_budget_mode == mode
+    # the emitted template documents the knob at its dataclass default
+    doc = tomllib.loads(policy.POLICY_TEMPLATE)
+    assert doc["limits"]["session_budget_mode"] == policy.LimitsPolicy.session_budget_mode
+
+
+def test_invalid_session_budget_mode():
+    with pytest.raises(policy.PolicyError, match=r"limits\.session_budget_mode"):
+        policy.loads('[limits]\nsession_budget_mode = "sometimes"\n')
+
+
+def test_max_tokens_per_session_default_parse_and_template():
+    import tomllib
+
+    assert policy.loads("").limits.max_tokens_per_session == 4_000_000
+    loaded = policy.loads("[limits]\nmax_tokens_per_session = 123\n")
+    assert loaded.limits.max_tokens_per_session == 123
+    # the emitted template documents the knob at its dataclass default
+    doc = tomllib.loads(policy.POLICY_TEMPLATE)
+    assert doc["limits"]["max_tokens_per_session"] == policy.LimitsPolicy.max_tokens_per_session
+
+
+@pytest.mark.parametrize("bad", [0, -5])
+def test_max_tokens_per_session_must_be_positive(bad):
+    with pytest.raises(policy.PolicyError, match=r"limits\.max_tokens_per_session"):
+        policy.loads(f"[limits]\nmax_tokens_per_session = {bad}\n")
+
+
+@pytest.mark.parametrize("bad", ["true", "2.5", '"4M"'])
+def test_max_tokens_per_session_rejects_non_integers(bad):
+    """Bools/floats/strings raise PolicyError, never coerce (true would become
+    1 token and terminate every enforce-mode session at its first sample)."""
+    with pytest.raises(policy.PolicyError, match=r"limits\.max_tokens_per_session"):
+        policy.loads(f"[limits]\nmax_tokens_per_session = {bad}\n")
+
+
+@pytest.mark.parametrize("bad", ["true", "2.5", '"30s"'])
+def test_session_budget_grace_rejects_non_integers(bad):
+    with pytest.raises(policy.PolicyError, match=r"limits\.session_budget_grace_s"):
+        policy.loads(f"[limits]\nsession_budget_grace_s = {bad}\n")
+
+
+def test_session_budget_grace_default_parse_and_template():
+    import tomllib
+
+    assert policy.loads("").limits.session_budget_grace_s == 240
+    loaded = policy.loads("[limits]\nsession_budget_grace_s = 30\n")
+    assert loaded.limits.session_budget_grace_s == 30
+    # 0 is legal: terminate at trip, no wrap-up nudge
+    assert policy.loads("[limits]\nsession_budget_grace_s = 0\n").limits.session_budget_grace_s == 0
+    # the emitted template documents the knob at its dataclass default
+    doc = tomllib.loads(policy.POLICY_TEMPLATE)
+    assert doc["limits"]["session_budget_grace_s"] == policy.LimitsPolicy.session_budget_grace_s
+
+
+def test_session_budget_grace_must_be_nonnegative():
+    with pytest.raises(policy.PolicyError, match=r"limits\.session_budget_grace_s"):
+        policy.loads("[limits]\nsession_budget_grace_s = -1\n")
+
+
 def test_max_followup_reviews_default_parse_and_template():
     import tomllib
 

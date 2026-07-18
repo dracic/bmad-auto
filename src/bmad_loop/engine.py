@@ -2258,18 +2258,25 @@ class Engine:
 
     # ------------------------------------------------------------- helpers
 
-    @staticmethod
-    def _session_end_extras(result: SessionResult) -> dict:
+    def _session_end_extras(self, result: SessionResult) -> dict:
         """Timeout forensics for the session-end entry (#157). ``teardown_s``
         is the timeout-fire → journal gap — the window the incident showed
-        could silently stretch for hours."""
-        if result.timeout_fired_at is None:
-            return {}
-        return {
-            "fired_at": result.timeout_fired_at,
-            "teardown_s": max(0.0, round(time.time() - result.timeout_fired_at, 3)),
-            "expired_clock": result.timeout_expired_clock,
-        }
+        could silently stretch for hours. A tripped session-budget guard
+        (#158) adds its sample plus the cap/mode it was judged against."""
+        extras: dict = {}
+        if result.timeout_fired_at is not None:
+            extras.update(
+                fired_at=result.timeout_fired_at,
+                teardown_s=max(0.0, round(time.time() - result.timeout_fired_at, 3)),
+                expired_clock=result.timeout_expired_clock,
+            )
+        if result.budget_weighted is not None:
+            extras.update(
+                budget_weighted=result.budget_weighted,
+                budget=self.policy.limits.max_tokens_per_session,
+                budget_mode=self.policy.limits.session_budget_mode,
+            )
+        return extras
 
     @staticmethod
     def _session_timeout_s(default_s: float) -> float:
@@ -2374,6 +2381,12 @@ class Engine:
                 if label is not None
                 else self.policy.limits.dev_stall_nudges_cap
             ),
+            # mid-session token-budget guard (#158): every session the engine
+            # drives (dev/review/labeled workflow) gets the same policy caps.
+            token_budget=self.policy.limits.max_tokens_per_session,
+            token_budget_mode=self.policy.limits.session_budget_mode,
+            token_budget_grace_s=float(self.policy.limits.session_budget_grace_s),
+            cache_read_weight=self.policy.limits.cache_read_weight,
         )
         self.journal.set_active_log(task_id)
         self.journal.append("session-start", task_id=task_id, role=role, prompt=prompt)

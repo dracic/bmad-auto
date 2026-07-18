@@ -9,6 +9,19 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **Mid-session token-budget guard (#158).** Both adapter wait loops now sample cumulative
+  weighted usage every ~30s and act on crossing the new per-session cap
+  (`limits.max_tokens_per_session`, default 4M weighted) per `limits.session_budget_mode`:
+  `warn` = one ATTENTION + lifecycle breadcrumb; `enforce` = wrap-up nudge +
+  `limits.session_budget_grace_s` (default 240s) to finish, then termination with the new
+  `over_budget` session status, which rides the ordinary retry→defer routing. Defaults to
+  `warn`: on upgrade, existing installs gain visibility (one ATTENTION line per over-cap
+  session) but no terminations — set `session_budget_mode = "enforce"` to opt into the
+  hard bound, or `"off"` to silence the guard entirely. Session-end
+  journal entries carry `budget_weighted`/`budget`/`budget_mode` for tripped sessions.
+  Live-verified on `claude`; other transcript-reading profiles sample best-effort, and
+  adapters with no mid-session usage signal (`usage_parser = "none"`, Copilot) stay inert.
+
 - **OpenCode adapter (`opencode-http` profile, alias `opencode`).** Drives
   [OpenCode](https://opencode.ai) ≥ 1.18 entirely over HTTP/SSE — one headless
   `opencode serve` per session (no tmux window), SSE `session.idle` as the completion
