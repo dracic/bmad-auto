@@ -18,6 +18,7 @@ from conftest import (
     generic_dev_effect,
     git,
     review_effect,
+    set_sprint,
     spec_path,
     write_spec,
     write_sprint,
@@ -2073,6 +2074,78 @@ def test_review_loop_converges_within_budget(project):
     assert "review-followup-damped" not in kinds
 
 
+def test_review_strips_stale_auto_run_result_before_each_launch(project):
+    """The review leg strips the prior pass's `## Auto Run Result` before every
+    launch (issue #160). The dev pass leaves a real terminal marker on the done
+    spec; left in place, the review's own entry write lifts it past the adapter's
+    launch-mtime floor and the first result-less Stop reads it as this session's
+    result — killing the review mid-flight. Each review effect asserts the on-disk
+    spec carries no marker at ENTRY; both passes finalize with their own marker, so
+    the cycle-2 entry assertion proves the strip runs per launch (not just once)
+    while the final pass's marker legitimately survives on the committed spec (no
+    later launch strips it)."""
+    from bmad_loop import devcontract
+
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+
+    def review_cycle1(spec):
+        sp = spec_path(project, "1-1-a")
+        # the dev pass's marker must be gone by the time this session runs
+        assert not devcontract.parse_auto_run_result(sp.read_text()).present
+        baseline = _spec_baseline(sp)
+        # finalize like review_effect, but leave our OWN terminal marker behind so
+        # cycle 2 can prove it too is stripped before the next launch
+        write_spec(sp, "done", baseline, prose_status="done")
+        set_sprint(project, "1-1-a", "done")
+        return SessionResult(
+            status="completed",
+            result_json={
+                "workflow": "auto-dev",
+                "story_key": "1-1-a",
+                "spec_file": str(sp),
+                "baseline_commit": baseline,
+                "status": "done",
+                "followup_review_recommended": True,  # non-clean -> a cycle 2 runs
+                "escalations": [],
+            },
+        )
+
+    def review_cycle2(spec):
+        sp = spec_path(project, "1-1-a")
+        # cycle 1's own marker must be stripped too — proves per-launch stripping
+        assert not devcontract.parse_auto_run_result(sp.read_text()).present
+        baseline = _spec_baseline(sp)
+        # this converging pass finalizes with its OWN marker, exactly as a real
+        # bmad-dev-auto finalize does — nothing strips it after the last launch
+        write_spec(sp, "done", baseline, prose_status="done")
+        set_sprint(project, "1-1-a", "done")
+        return SessionResult(
+            status="completed",
+            result_json={
+                "workflow": "auto-dev",
+                "story_key": "1-1-a",
+                "spec_file": str(sp),
+                "baseline_commit": baseline,
+                "status": "done",
+                "followup_review_recommended": False,  # converges
+                "escalations": [],
+            },
+        )
+
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a", prose_status="done"), review_cycle1, review_cycle2],
+    )
+    summary = engine.run()
+
+    assert summary.done == 1
+    task = engine.state.tasks["1-1-a"]
+    assert task.review_cycle == 2
+    # the FINAL pass's own marker legitimately survives — nothing launches after it,
+    # so no strip runs; the strip is a before-launch guard, not a scrub-on-commit
+    assert devcontract.parse_auto_run_result(spec_path(project, "1-1-a").read_text()).present
+
+
 def test_budget_exhausted_finalized_work_commits(project):
     """A finalized story (status: done, sprint done, verify green) whose review
     pass keeps recommending an independent follow-up is COMMITTED when the review
@@ -2142,6 +2215,149 @@ def test_budget_exhausted_unfinalized_defers(project):
     assert not spec_path(project, "1-1-a").exists()
     stashed = engine.run_dir / "deferred" / "1-1-a" / "spec-1-1-a.md"
     assert stashed.is_file() and "status: 'in-progress'" in stashed.read_text()
+
+
+def test_budget_exhausted_defer_reason_names_last_status(project):
+    """The exhaustion defer reason reflects the last completed pass's real status
+    (issue #160). Every review pass leaves the spec non-terminal (in-progress), so
+    it never finalizes: the reason must name that status, not the fixed
+    'still recommending a follow-up pass' text (which is only true of a finalized
+    pass that keeps recommending one)."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a")]
+        + [
+            review_effect(project, "1-1-a", clean=False, patched=1, finalized=False)
+            for _ in range(3)
+        ],
+    )
+    summary = engine.run()
+
+    assert summary.deferred == 1
+    task = engine.state.tasks["1-1-a"]
+    assert "did not converge" in task.defer_reason
+    assert "in-progress" in task.defer_reason
+    assert "recommending a follow-up" not in task.defer_reason
+
+
+def test_budget_exhausted_refileable_followup_keeps_followup_wording(project):
+    """Exhaustion with a refileable follow-up whose rescue verify FAILS still uses
+    the 'still recommending a follow-up pass' wording (issue #160). Every pass
+    finalizes done + recommends a follow-up (refileable_followup), but the last
+    pass's tree breaks the verify gate, so the exhaustion rescue's _verify_review
+    fails and the commit-instead-of-rollback is skipped → defer. Because the last
+    completed pass really did leave a lingering recommendation, the reason keeps the
+    follow-up wording (the in-loop verify never runs for a followup-recommending
+    pass, so the broken gate only surfaces in the rescue)."""
+    marker = project.project / "review-budget.marker"
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+
+    def dev_with_marker(spec):
+        marker.write_text("ok\n")
+        return dev_effect(project, "1-1-a")(spec)
+
+    def breaking_final_review(spec):
+        marker.unlink()  # the last pass's tree no longer passes the verify gate
+        return review_effect(project, "1-1-a", clean=False, patched=1)(spec)
+
+    engine, _ = make_engine(
+        project,
+        [
+            dev_with_marker,
+            review_effect(project, "1-1-a", clean=False, patched=1),
+            review_effect(project, "1-1-a", clean=False, patched=1),
+            breaking_final_review,
+        ],
+        policy=Policy(
+            gates=GatesPolicy(mode="none"),
+            notify=QUIET,
+            scm=ScmPolicy(rollback_on_failure=True),
+            limits=LimitsPolicy(max_followup_reviews=99),
+            verify=VerifyPolicy(commands=(_file_exists_cmd(marker),)),
+        ),
+    )
+    summary = engine.run()
+
+    assert summary.deferred == 1
+    task = engine.state.tasks["1-1-a"]
+    assert "did not converge" in task.defer_reason
+    assert "still recommending a follow-up pass" in task.defer_reason
+
+
+def test_budget_exhausted_finalized_but_verify_failed_wording(project):
+    """Exhaustion where the last pass finalized (status: done, no follow-up) but its
+    verify gate fails names the finalized-but-verification-failed mode (issue #160).
+    The single review pass converges (done, no follow-up), so the in-loop verify
+    runs and fails; with max_review_cycles == 1 there is no cycle left to run a fix
+    session, so the loop exits and the exhaustion reason reflects last_status 'done'
+    with no follow-up claim (refileable_followup is False here)."""
+    marker = project.project / "review-verify.marker"
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+
+    def dev_with_marker(spec):
+        marker.write_text("ok\n")
+        return dev_effect(project, "1-1-a")(spec)
+
+    def converged_but_broken_review(spec):
+        marker.unlink()  # converges done, but the tree fails the verify gate
+        return review_effect(project, "1-1-a", clean=True)(spec)
+
+    engine, _ = make_engine(
+        project,
+        [dev_with_marker, converged_but_broken_review],
+        policy=Policy(
+            gates=GatesPolicy(mode="none"),
+            notify=QUIET,
+            scm=ScmPolicy(rollback_on_failure=True),
+            limits=LimitsPolicy(max_review_cycles=1),
+            verify=VerifyPolicy(commands=(_file_exists_cmd(marker),)),
+        ),
+    )
+    summary = engine.run()
+
+    assert summary.deferred == 1
+    task = engine.state.tasks["1-1-a"]
+    assert "did not converge" in task.defer_reason
+    assert "finalized but its verification failed" in task.defer_reason
+    assert "recommending a follow-up" not in task.defer_reason
+
+
+def test_budget_exhausted_unreconciled_status_reads_as_unknown(project):
+    """A completed pass whose status could not be resolved defers as 'unknown', not
+    'no review pass completed' (issue #160). When a review result.json carries no
+    `spec_file`, `_reconcile_generic_terminal_status` bails and leaves `rj` with no
+    `status`, so `last_status` parses as "" — an empty-but-not-None value that means
+    'a pass ran, its status was unreadable'. The defer reason must render that
+    honestly (`''` != None), distinguishing it from the no-pass-ran case."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+
+    def statusless_review(spec):
+        sp = spec_path(project, "1-1-a")
+        # deliberately NO "status" and NO "spec_file": the reconcile returns early,
+        # so `rj` never gains a status and the loop parses "" (a completed pass with
+        # an unreadable/unreconciled status), not None (no pass ran)
+        return SessionResult(
+            status="completed",
+            result_json={
+                "workflow": "auto-dev",
+                "story_key": "1-1-a",
+                "baseline_commit": _spec_baseline(sp),
+                "escalations": [],
+            },
+        )
+
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), statusless_review, statusless_review, statusless_review],
+    )
+    summary = engine.run()
+
+    assert summary.deferred == 1
+    task = engine.state.tasks["1-1-a"]
+    assert "did not converge" in task.defer_reason
+    assert "'unknown'" in task.defer_reason
+    assert "no review pass completed" not in task.defer_reason
 
 
 def test_budget_exhausted_failed_review_sessions_defer_not_commit(project):
