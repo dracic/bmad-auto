@@ -360,6 +360,20 @@ def test_max_tokens_per_session_must_be_positive(bad):
         policy.loads(f"[limits]\nmax_tokens_per_session = {bad}\n")
 
 
+@pytest.mark.parametrize("bad", ["true", "2.5", '"4M"'])
+def test_max_tokens_per_session_rejects_non_integers(bad):
+    """Bools/floats/strings raise PolicyError, never coerce (true would become
+    1 token and terminate every enforce-mode session at its first sample)."""
+    with pytest.raises(policy.PolicyError, match=r"limits\.max_tokens_per_session"):
+        policy.loads(f"[limits]\nmax_tokens_per_session = {bad}\n")
+
+
+@pytest.mark.parametrize("bad", ["true", "2.5", '"30s"'])
+def test_session_budget_grace_rejects_non_integers(bad):
+    with pytest.raises(policy.PolicyError, match=r"limits\.session_budget_grace_s"):
+        policy.loads(f"[limits]\nsession_budget_grace_s = {bad}\n")
+
+
 def test_session_budget_grace_default_parse_and_template():
     import tomllib
 

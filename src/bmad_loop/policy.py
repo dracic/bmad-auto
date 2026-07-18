@@ -577,6 +577,24 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
             f"gates.retrospective must be one of {sorted(RETRO_MODES)}: got {gates.retrospective!r}"
         )
 
+    # the budget knobs gate enforce-mode termination, so a coerced bool/float
+    # (true -> 1 token) must be rejected, not silently accepted (same rule as
+    # scm.preserve_keep below)
+    max_tokens_per_session = limits_d.get(
+        "max_tokens_per_session", LimitsPolicy.max_tokens_per_session
+    )
+    if isinstance(max_tokens_per_session, bool) or not isinstance(max_tokens_per_session, int):
+        raise PolicyError(
+            f"limits.max_tokens_per_session must be an integer: got {max_tokens_per_session!r}"
+        )
+    session_budget_grace_s = limits_d.get(
+        "session_budget_grace_s", LimitsPolicy.session_budget_grace_s
+    )
+    if isinstance(session_budget_grace_s, bool) or not isinstance(session_budget_grace_s, int):
+        raise PolicyError(
+            f"limits.session_budget_grace_s must be an integer: got {session_budget_grace_s!r}"
+        )
+
     limits = LimitsPolicy(
         max_review_cycles=int(limits_d.get("max_review_cycles", LimitsPolicy.max_review_cycles)),
         max_dev_attempts=int(limits_d.get("max_dev_attempts", LimitsPolicy.max_dev_attempts)),
@@ -606,12 +624,8 @@ def loads(text: str, plugin_schemas: dict[str, Any] | None = None) -> Policy:
         session_budget_mode=str(
             limits_d.get("session_budget_mode", LimitsPolicy.session_budget_mode)
         ),
-        max_tokens_per_session=int(
-            limits_d.get("max_tokens_per_session", LimitsPolicy.max_tokens_per_session)
-        ),
-        session_budget_grace_s=int(
-            limits_d.get("session_budget_grace_s", LimitsPolicy.session_budget_grace_s)
-        ),
+        max_tokens_per_session=max_tokens_per_session,
+        session_budget_grace_s=session_budget_grace_s,
     )
     if limits.max_review_cycles < 1 or limits.max_dev_attempts < 1:
         raise PolicyError("limits.max_review_cycles and limits.max_dev_attempts must be >= 1")

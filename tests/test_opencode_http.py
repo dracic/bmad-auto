@@ -734,15 +734,20 @@ def test_e2e_budget_zero_grace_terminates_at_trip_without_nudge(tmp_path, fake_o
     assert_server_gone(rec)
 
 
-def test_e2e_budget_inert_under_cap(tmp_path, fake_opencode):
-    """A session under its cap never trips: no ATTENTION, no breadcrumb, no
-    budget_weighted on the completed result."""
+def test_e2e_budget_inert_under_cap(tmp_path, fake_opencode, monkeypatch):
+    """A session whose weighted usage stays under its cap never trips: no
+    ATTENTION, no breadcrumb, no budget_weighted on the completed result.
+    The shrunk heartbeat guarantees samples actually observe the 5M weighted
+    spend (the `completed` scenario would finish before ever reporting usage,
+    leaving the comparison untested)."""
+    monkeypatch.setattr(opencode_http, "HEARTBEAT_INTERVAL_S", 0.05)
     launcher, rec = fake_opencode
     adapter = make_adapter(tmp_path, binary=str(launcher), policy=_budget_policy())
     spec = make_spec(
         tmp_path,
         rec,
-        "completed",
+        "big-usage-then-complete",
+        timeout_s=30.0,
         token_budget=10**9,
         token_budget_mode="enforce",
         token_budget_grace_s=240.0,
@@ -753,6 +758,10 @@ def test_e2e_budget_inert_under_cap(tmp_path, fake_opencode):
     assert result.status == "completed"
     assert result.budget_weighted is None
     assert not (tmp_path / "run" / "ATTENTION").exists()
+    lifecycle_path = tmp_path / "run" / "tasks" / "t-1" / "session-lifecycle.jsonl"
+    if lifecycle_path.exists():
+        lifecycle = read_jsonl(lifecycle_path)
+        assert not [ln for ln in lifecycle if ln["event"] == "budget-tripped"]
     assert_server_gone(rec)
 
 
