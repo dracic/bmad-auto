@@ -83,7 +83,13 @@ DEV_BASE_SKILLS = {
     "bmad-review-verification-gap": (),
 }
 # Every non-bundled skill that might need copying into an isolated worktree.
-BASE_SKILLS = dict(DEV_BASE_SKILLS)
+# bmad-review is the merged lens-based reviewer (BMAD-METHOD core-streamline):
+# on new bmm installs the three hunter IDs above are thin forwarders to it, so a
+# worktree must carry the real skill for those forwards to resolve. It is NOT in
+# DEV_BASE_SKILLS (preflight) so pre-merge bmm installs — which have the three
+# real hunters and no bmad-review — keep validating; provision_worktree skips
+# skills the main repo lacks, so copy-if-present is safe in both directions.
+BASE_SKILLS = {**DEV_BASE_SKILLS, "bmad-review": ()}
 
 # Stories mode (folder+id dispatch, BMAD-METHOD #2549) needs a *newer* bmad-dev-auto
 # than sprint mode: one whose step-01 routes a spec-folder + story-id invocation.
