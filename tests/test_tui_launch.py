@@ -200,10 +200,25 @@ def test_launch_without_mux_raises(monkeypatch, tmp_path: Path):
         launch.start_run_detached(tmp_path, "RID")
 
 
-def test_forced_launch_bypasses_availability(fake_run, monkeypatch, tmp_path: Path):
+def test_forced_launch_bypasses_availability(fake_run, monkeypatch, capsys, tmp_path: Path):
+    from bmad_loop.adapters import multiplexer as mux_mod
+
+    monkeypatch.setattr(mux_mod, "_FORCED_UNUSABLE_WARNED", False)
     monkeypatch.setattr(tmux_base.shutil, "which", lambda name: None)
     launch.start_run_detached(tmp_path, "RID")
     assert fake_run.by_verb("new-window")
+    # trusted, but not silently: the bypass names itself once on stderr
+    assert "forced multiplexer backend" in capsys.readouterr().err
+
+
+def test_observers_follow_forced_backend(fake_run, monkeypatch):
+    """The observer gates (mux_available feeds attach/ctl-window/prune) must
+    share the launch preflight's forced-aware rule — launch working while
+    attach reports "nothing to attach to" would be a silent split."""
+    from bmad_loop.adapters import multiplexer as mux_mod
+
+    monkeypatch.setattr(mux_mod, "_usable", lambda mux: False)
+    assert launch.mux_available() is True  # fake_run's fixture forces tmux by env
 
 
 def test_new_window_failure_raises(monkeypatch, tmp_path: Path):

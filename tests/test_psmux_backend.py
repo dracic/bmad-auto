@@ -19,10 +19,11 @@ from bmad_loop.adapters.psmux_backend import PsmuxMultiplexer
 class _RecordRun:
     """Stand-in for subprocess.run that records every spawn's argv and kwargs."""
 
-    def __init__(self, returncode: int = 0, stderr: str = ""):
+    def __init__(self, returncode: int = 0, stderr: str = "", stdout: str = ""):
         self.calls: list[tuple[list, dict]] = []
         self.returncode = returncode
         self.stderr = stderr
+        self.stdout = stdout
 
     @property
     def argv(self):
@@ -34,7 +35,9 @@ class _RecordRun:
 
     def __call__(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
-        return subprocess.CompletedProcess(argv, self.returncode, stdout="", stderr=self.stderr)
+        return subprocess.CompletedProcess(
+            argv, self.returncode, stdout=self.stdout, stderr=self.stderr
+        )
 
 
 @pytest.fixture
@@ -165,7 +168,8 @@ def test_new_session_bypasses_nesting_guard(rec, monkeypatch, tmp_path):
     before = dict(os.environ)
     PsmuxMultiplexer().new_session("s", tmp_path, cols=80, lines=24)
 
-    assert rec.argv == [
+    create_argv, create_kwargs = rec.calls[0]
+    assert create_argv == [
         "psmux",
         "new-session",
         "-d",
@@ -178,15 +182,36 @@ def test_new_session_bypasses_nesting_guard(rec, monkeypatch, tmp_path):
         "-y",
         "24",
     ]
-    assert rec.kwargs["env"]["PSMUX_ALLOW_NESTING"] == "1"
+    # the no-op belt: create is verified by a has-session probe afterwards
+    assert rec.argv == ["psmux", "has-session", "-t", "=s"]
+    assert create_kwargs["env"]["PSMUX_ALLOW_NESTING"] == "1"
     # the claude session vars are scrubbed from the create env (the psmux server
     # this call may cold-start would otherwise hand them to every window)
-    assert "CLAUDE_CODE_SSE_PORT" not in rec.kwargs["env"]
-    assert "CLAUDECODE" not in rec.kwargs["env"]
-    assert "PSMUX_CLAUDE_TEAMMATE_MODE" not in rec.kwargs["env"]
-    assert "Claude_Code_Mixed" not in rec.kwargs["env"]
+    assert "CLAUDE_CODE_SSE_PORT" not in create_kwargs["env"]
+    assert "CLAUDECODE" not in create_kwargs["env"]
+    assert "PSMUX_CLAUDE_TEAMMATE_MODE" not in create_kwargs["env"]
+    assert "Claude_Code_Mixed" not in create_kwargs["env"]
     # the bypass var and the scrub are confined to the child spawn
     assert dict(os.environ) == before
+
+
+def test_new_session_omits_geometry_when_unset(rec, tmp_path):
+    PsmuxMultiplexer().new_session("s", tmp_path)
+    create_argv = rec.calls[0][0]
+    assert "-x" not in create_argv
+    assert "-y" not in create_argv
+
+
+def test_new_session_exit_zero_noop_raises(monkeypatch, tmp_path):
+    # The nesting guard's historical failure mode: new-session exits 0 having
+    # created nothing. The belt verifies and blames session creation directly.
+    def fake(argv, **kwargs):
+        rc = 1 if argv[1] == "has-session" else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="")
+
+    monkeypatch.setattr(tmux_base.subprocess, "run", fake)
+    with pytest.raises(MultiplexerError, match="was not created"):
+        PsmuxMultiplexer().new_session("s", tmp_path)
 
 
 def test_new_session_failure_raises_multiplexer_error(monkeypatch, tmp_path):
@@ -206,9 +231,21 @@ def test_new_session_failure_raises_multiplexer_error(monkeypatch, tmp_path):
 
 
 def test_kill_session_uses_plain_target(rec, monkeypatch):
-    monkeypatch.setattr(psmux_backend.shutil, "which", lambda _name: "C:\\bin\\psmux.exe")
+    # strict which-stub: the guard must probe the psmux binary, not a
+    # copy-pasted "tmux"
+    monkeypatch.setattr(
+        psmux_backend.shutil,
+        "which",
+        lambda name: "C:\\bin\\psmux.exe" if name == "psmux" else None,
+    )
     PsmuxMultiplexer().kill_session("s")
     assert rec.argv == ["psmux", "kill-session", "-t", "s"]  # no `=` — psmux ignores it
+
+
+def test_kill_session_no_binary_no_spawn(rec, monkeypatch):
+    monkeypatch.setattr(psmux_backend.shutil, "which", lambda _name: None)
+    PsmuxMultiplexer().kill_session("s")
+    assert rec.calls == []
 
 
 # ------------------------------------------------------------- parked window
@@ -246,12 +283,16 @@ def test_pipe_pane_ships_pwsh_sink(rec, tmp_path):
     launch = rec.argv[5].split(" ")
     assert launch[:3] == ["pwsh", "-NoProfile", "-EncodedCommand"]
     sink = _decode(launch[3])
-    assert sink == f"$input | Add-Content -LiteralPath '{str(log).replace(chr(39), chr(39) * 2)}'"
+    # byte-exact raw stream copy (no console decode / re-encode / CRLF mangling)
+    quoted = str(log).replace(chr(39), chr(39) * 2)
+    assert f"[System.IO.File]::Open('{quoted}', 'Append', 'Write', 'Read')" in sink
+    assert "OpenStandardInput().CopyTo($out)" in sink
 
 
-def test_pipe_pane_swallows_failure(monkeypatch, tmp_path):
+def test_pipe_pane_swallows_failure_with_warning(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(tmux_base.subprocess, "run", _RecordRun(returncode=1, stderr="gone"))
     assert PsmuxMultiplexer().pipe_pane("@1", tmp_path / "log") is None
+    assert "pipe-pane log capture failed" in capsys.readouterr().err
 
 
 # ------------------------------------------------------------------ selection
@@ -296,6 +337,21 @@ def test_available_requires_psmux_pwsh_and_supported_version(monkeypatch):
     for garbled in (None, "", "tmux next-3.4", "psmux 9.9.9"):
         monkeypatch.setattr(PsmuxMultiplexer, "version", lambda self, v=garbled: v)
         assert PsmuxMultiplexer().available() is False
+
+
+def test_available_composes_real_version_probe(monkeypatch):
+    # End-to-end through the real version() seam (no version() stub): the gate
+    # must survive `psmux -V` composition, including trailing-newline stripping.
+    monkeypatch.setattr(
+        psmux_backend.shutil,
+        "which",
+        lambda name: f"C:\\bin\\{name}.exe" if name in ("psmux", "pwsh") else None,
+    )
+    monkeypatch.setattr(tmux_base.shutil, "which", lambda name: f"C:\\bin\\{name}.exe")
+    rec = _RecordRun(stdout="tmux 3.3.7\n")
+    monkeypatch.setattr(tmux_base.subprocess, "run", rec)
+    assert PsmuxMultiplexer().available() is True
+    assert rec.argv == ["psmux", "-V"]
 
 
 def test_available_caches_version_gate_per_instance(monkeypatch):

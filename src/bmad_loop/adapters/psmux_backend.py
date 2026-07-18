@@ -24,6 +24,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from .tmux_base import PARKED_RETURN_DETACH, BaseTmuxBackend, TmuxError
@@ -57,8 +58,8 @@ class PsmuxMultiplexer(BaseTmuxBackend):
     # ------------------------------------------- shell dialect (PowerShell)
 
     # A command pwsh could not even start (not recognized) still runs the rest of
-    # the source but leaves $LASTEXITCODE unset — coalesce without requiring
-    # PowerShell 7 syntax, since availability accepts any `pwsh`.
+    # the source but leaves $LASTEXITCODE unset — coalesce with a plain `if`
+    # (works on any PowerShell version) rather than the PS7-only `??` syntax.
     _EXIT_CAPTURE = "$ec = if ($null -eq $LASTEXITCODE) { 1 } else { $LASTEXITCODE }"
     _ECHO = "Write-Host"
     _PARK = "Read-Host"
@@ -104,7 +105,7 @@ class PsmuxMultiplexer(BaseTmuxBackend):
     def _window_launch(self, env: dict[str, str], command: str) -> list[str]:
         # psmux accepts `new-window -e` but silently drops it, so the env rides
         # an in-source prelude instead. `command` arrives POSIX-quoted (callers
-        # build it with shlex.join), so split it here and re-quote for pwsh.
+        # shlex-quote each arg), so split it here and re-quote for pwsh.
         for key in env:
             if not _ENV_NAME.fullmatch(key):
                 raise TmuxError(f"invalid environment variable name: {key!r}")
@@ -149,6 +150,14 @@ class PsmuxMultiplexer(BaseTmuxBackend):
             raise TmuxError(f"{self._BINARY} new-session failed: {exc}") from exc
         if proc.returncode != 0:
             raise TmuxError(f"{self._BINARY} new-session failed: {proc.stderr.strip()}")
+        # Belt for the nesting guard's historical no-op mode (exit 0, nothing
+        # created): verify the session exists so the failure blames session
+        # creation, not the next verb's "can't find session".
+        if not self.has_session(name):
+            raise TmuxError(
+                f"{self._BINARY} new-session exited 0 but session {name!r} was not "
+                "created (nesting guard no-op?)"
+            )
 
     def kill_session(self, name: str) -> None:
         # psmux ignores the `=name` exact-match form for kill-session; plain-name
@@ -162,30 +171,47 @@ class PsmuxMultiplexer(BaseTmuxBackend):
 
     def pipe_pane(self, window_id: str, log_file: Path) -> None:
         # The base's POSIX `cat >>` sink assumes a POSIX host shell; psmux runs
-        # the pipe command on the host shell, so ship a pwsh append sink instead
-        # (base64 has no quoting to lose, so a plain join survives psmux's
-        # re-parse). Best-effort, as the base: a window that died on launch is
-        # not a setup failure.
-        sink = f"$input | Add-Content -LiteralPath {_pwsh_quote(str(log_file))}"
+        # the pipe command on the host shell, so ship a pwsh append sink instead.
+        # A raw stream copy is byte-exact like `cat >>`: no console decode of the
+        # pane bytes, no Add-Content re-encode, no CRLF normalization.
+        sink = (
+            f"$out = [System.IO.File]::Open({_pwsh_quote(str(log_file))}, "
+            "'Append', 'Write', 'Read'); "
+            "[System.Console]::OpenStandardInput().CopyTo($out); $out.Dispose()"
+        )
+        wrapped = self._shell_wrap(sink)
+        # base64 has no quoting to lose, so a plain join survives psmux's re-parse
+        # — valid only while no wrapped arg contains a space.
+        assert all(" " not in part for part in wrapped)
         try:
-            self._tmux("pipe-pane", "-t", window_id, "-o", " ".join(self._shell_wrap(sink)))
-        except TmuxError:
-            pass
+            self._tmux("pipe-pane", "-t", window_id, "-o", " ".join(wrapped))
+        except TmuxError as exc:
+            # Best-effort, as the base: a window that died on launch is not a
+            # setup failure — but say so, or an empty run log is unexplainable.
+            print(
+                f"warning: pipe-pane log capture failed for {window_id}: {exc}",
+                file=sys.stderr,
+            )
 
     # Releases up to this version can force-kill a recycled PID during pane
     # teardown and let orphaned servers accumulate — engine-fatal, so they
     # must never be selected.
     _LAST_UNSUPPORTED = (3, 3, 6)
+    # Class-level default; instances shadow it on first probe. Never assign on
+    # the class outside tests — that would poison every future instance.
     _version_ok: bool | None = None
 
     def available(self) -> bool:
         # Every window launch needs pwsh alongside the psmux binary itself.
         # The version gate fails closed: psmux prints `tmux X.Y.Z` (the tmux
         # prefix is kept deliberately for tmux-version parsers), and an old or
-        # unidentifiable install reads as unusable. A forced backend name in
-        # settings still bypasses this probe. The gate verdict is cached on the
-        # instance so repeated availability polls don't each spawn a version
-        # query; an install swapped mid-process is picked up on restart.
+        # unidentifiable install reads as unusable. A forced backend name (env
+        # var or policy) still bypasses this probe, with a warning at the
+        # launch gates (see multiplexer.mux_usable). The gate verdict is cached
+        # on the instance so repeated availability polls don't each spawn a
+        # version query; the lru-cached selected instance re-probes a swapped
+        # install only on restart (detect_multiplexers' fresh instances
+        # re-probe every call).
         if not all(shutil.which(exe) for exe in (self._BINARY, "pwsh")):
             return False
         if self._version_ok is None:

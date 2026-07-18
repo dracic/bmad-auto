@@ -27,7 +27,7 @@ from rich.style import Style
 from rich.text import Text
 
 from .. import bmadconfig, deferredwork, sprintstatus, stories
-from ..adapters.multiplexer import MultiplexerError, get_multiplexer
+from ..adapters.multiplexer import MultiplexerError, get_multiplexer, mux_usable
 from ..gates import ATTENTION_FILE
 from ..journal import JOURNAL_FILE, LOGS_DIR, STATE_FILE, load_state
 from ..model import RunState
@@ -90,7 +90,7 @@ def _session_liveness(run_id: str) -> str:
     # An absent multiplexer / dead query proves nothing about a legacy run, so the
     # only positive signal is a live session; everything else is 'unknown'.
     mux = get_multiplexer()
-    if not mux.available():
+    if not mux_usable(mux):  # forced-aware, like every other observer gate
         return "unknown"
     try:
         return "alive" if mux.has_session(session_name(run_id)) else "unknown"

@@ -67,7 +67,9 @@ register_multiplexer("psmux", lambda platform: platform == "win32", PsmuxMultipl
 
 A forced name (1–2) bypasses both the platform predicate and `available()` — an
 explicit choice is trusted — and fails loudly when it matches no registered
-backend. `bmad-loop mux` lists every registered backend with its availability,
+backend. Launch preflights and TUI observers share one forced-aware gate
+(`mux_usable()`), which warns once on stderr when a forced backend probes
+unavailable instead of silently proceeding or refusing. `bmad-loop mux` lists every registered backend with its availability,
 version, and the current selection. (The result is cached — see
 [Testing a port](#testing-a-port).)
 

@@ -5,7 +5,8 @@ invocation and POSIX-shell trailer lives here (and in its POSIX leaf
 :mod:`.tmux_backend`). The point of the split is that a tmux-*family* backend —
 the native-Windows :mod:`.psmux_backend` leaf — can subclass :class:`BaseTmuxBackend` and
 swap only class attributes (:attr:`BaseTmuxBackend._BINARY` for the spawned
-binary, :attr:`BaseTmuxBackend._ENCODING` for output decoding — a scrubbed
+binary, :attr:`BaseTmuxBackend._ENCODING` / :attr:`BaseTmuxBackend._ERRORS`
+for output decoding — a scrubbed
 per-call ``env`` is a ``_run`` parameter, and an :meth:`BaseTmuxBackend._run`
 override is left for timeout tweaks) plus the shell-dialect hooks (``_shell_wrap``, ``_join_argv``,
 ``_parked_trailer``, ``_source_prefix``, ``_window_launch`` and the
@@ -26,6 +27,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -308,11 +310,15 @@ class BaseTmuxBackend(TerminalMultiplexer):
     def pipe_pane(self, window_id: str, log_file: Path) -> None:
         # A CLI that crashes on launch (bad args, instant auth failure) can take
         # its window down before pipe-pane attaches, which races as "can't find
-        # window". That is not a setup failure, so tolerate it instead of raising.
+        # window". That is not a setup failure, so tolerate it instead of raising
+        # — but say so, or an empty run log is unexplainable.
         try:
             self._tmux("pipe-pane", "-t", window_id, "-o", f"cat >> {shlex.quote(str(log_file))}")
-        except TmuxError:
-            pass
+        except TmuxError as exc:
+            print(
+                f"warning: pipe-pane log capture failed for {window_id}: {exc}",
+                file=sys.stderr,
+            )
 
     def send_text(self, window_id: str, text: str) -> None:
         self._tmux("send-keys", "-t", window_id, "-l", text)

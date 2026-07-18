@@ -685,6 +685,10 @@ def test_make_adapters_refuses_unusable_mux(project, monkeypatch):
     is unusable; the run bootstrap must refuse it so a run never drives a
     missing or version-gated multiplexer."""
     install_bmad_config(project)
+    # isolate the forced legs: a developer-shell env var or a leaked policy pin
+    # would flip backend_forced() and let this preflight stand down
+    monkeypatch.delenv("BMAD_LOOP_MUX_BACKEND", raising=False)
+    monkeypatch.setattr(mux_mod, "_CONFIGURED", None)
     monkeypatch.setattr(mux_mod, "_usable", lambda mux: False)
     with pytest.raises(SystemExit, match="not usable"):
         cli._make_adapters(
@@ -692,14 +696,15 @@ def test_make_adapters_refuses_unusable_mux(project, monkeypatch):
         )
 
 
-def test_make_adapters_trusts_forced_backend(project, monkeypatch):
+def test_make_adapters_trusts_forced_backend(project, monkeypatch, capsys):
     """A forced name bypasses available() in selection; the run-bootstrap
-    preflight must stand down for it the same way (the backend fails loudly
-    at first use instead)."""
+    preflight must stand down for it the same way — but loudly (a version-gated
+    binary works right up until the gated defect fires)."""
     from bmad_loop.adapters.multiplexer import get_multiplexer
 
     install_bmad_config(project)
     monkeypatch.setattr(mux_mod, "_usable", lambda mux: False)
+    monkeypatch.setattr(mux_mod, "_FORCED_UNUSABLE_WARNED", False)
     monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "tmux")
     get_multiplexer.cache_clear()
     try:
@@ -709,6 +714,28 @@ def test_make_adapters_trusts_forced_backend(project, monkeypatch):
     finally:
         get_multiplexer.cache_clear()  # don't leak the forced pick to other tests
     assert set(adapters) == set(cli.ROLES)
+    assert "forced multiplexer backend" in capsys.readouterr().err
+
+
+def test_make_adapters_trusts_settings_pinned_backend(project, monkeypatch, capsys):
+    """The policy pin (`bmad-loop mux set`) is the second forced leg: the
+    preflight stands down for it exactly like the env var, with the same
+    warning."""
+    from bmad_loop.adapters.multiplexer import configure_multiplexer
+
+    install_bmad_config(project)
+    monkeypatch.delenv("BMAD_LOOP_MUX_BACKEND", raising=False)
+    monkeypatch.setattr(mux_mod, "_usable", lambda mux: False)
+    monkeypatch.setattr(mux_mod, "_FORCED_UNUSABLE_WARNED", False)
+    configure_multiplexer("tmux")
+    try:
+        adapters = cli._make_adapters(
+            project.project, project.project / ".bmad-loop" / "runs" / "r", policy_mod.load(None)
+        )
+    finally:
+        configure_multiplexer(None)  # also clears the selection cache
+    assert set(adapters) == set(cli.ROLES)
+    assert "forced multiplexer backend" in capsys.readouterr().err
 
 
 class _StubEngine:
@@ -1001,7 +1028,7 @@ def _write_bmad_config(project, impl="{project-root}/artifacts"):
     cfg = project / "_bmad" / "bmm"
     cfg.mkdir(parents=True, exist_ok=True)
     (cfg / "config.yaml").write_text(
-        f"implementation_artifacts: '{impl}'\n" "planning_artifacts: '{project-root}/planning'\n",
+        f"implementation_artifacts: '{impl}'\nplanning_artifacts: '{{project-root}}/planning'\n",
         encoding="utf-8",
     )
 

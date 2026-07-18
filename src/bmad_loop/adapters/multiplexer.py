@@ -400,8 +400,45 @@ def backend_forced() -> bool:
 
     A forced name bypasses ``available()`` throughout (an explicit choice is
     trusted; the backend fails loudly if it can't run), so launch preflights
-    that refuse an unusable backend must stand down for it too."""
+    that refuse an unusable backend must stand down for it too — via
+    :func:`mux_usable`, which stands down loudly."""
     return bool(os.environ.get("BMAD_LOOP_MUX_BACKEND")) or _CONFIGURED is not None
+
+
+_FORCED_UNUSABLE_WARNED = False
+
+
+def mux_usable(backend: TerminalMultiplexer | None = None) -> bool:
+    """The one usability gate for launch preflights and TUI observers
+    (attach, liveness, prune): the backend probes available, or its selection
+    is forced. Every gate must share this rule — if launch trusts a forced
+    backend but observers don't, a launched run becomes invisible to the rest
+    of the TUI with no error anywhere.
+
+    A forced backend that probes unavailable is still trusted, but says so
+    once per process on stderr: a missing binary fails loudly on first use
+    anyway, while a version-gated binary works right up until the gated defect
+    fires — proceeding must not be silent."""
+    global _FORCED_UNUSABLE_WARNED
+    if backend is None:
+        backend = get_multiplexer()
+    if _usable(backend):
+        return True
+    if not backend_forced():
+        return False
+    if not _FORCED_UNUSABLE_WARNED:
+        _FORCED_UNUSABLE_WARNED = True
+        try:
+            version = backend.version()
+        except Exception:  # noqa: BLE001 — a broken probe must not break the warning
+            version = None
+        print(
+            f"warning: forced multiplexer backend {type(backend).__name__} reports "
+            f"unavailable (version: {version!r}); proceeding because the choice is "
+            "pinned — a version-gated backend can misbehave mid-run",
+            file=sys.stderr,
+        )
+    return True
 
 
 def _select() -> tuple[TerminalMultiplexer, str, str]:
@@ -429,8 +466,7 @@ def _select() -> tuple[TerminalMultiplexer, str, str]:
         factory = _factory_by_name(forced)
         if factory is None:
             raise MultiplexerError(
-                f"BMAD_LOOP_MUX_BACKEND={forced!r} matches no registered backend; "
-                f"known: {_known()}"
+                f"BMAD_LOOP_MUX_BACKEND={forced!r} matches no registered backend; known: {_known()}"
             )
         return factory(), forced, "env"
     if _CONFIGURED is not None:
