@@ -205,11 +205,45 @@ class _TeardownMux:
 
 
 class _RecordingHost:
-    def __init__(self):
+    """A tiny process-tree model for the reap path. ``alive`` is the set of live
+    pids; ``descendants_map`` gives each pid's transitive children (the pre-kill
+    harvest reads it); ``ignore_terminate`` pids survive SIGTERM so a force_kill is
+    required (the terminate-precedes-force-kill case); ``no_identity`` pids report
+    identity ``None`` (the unconfirmable case). terminate/force_kill record the call
+    and — unless ignored — drop the pid from ``alive``, so the reap's poll converges."""
+
+    def __init__(
+        self, alive=(), descendants_map=None, ignore_terminate=(), no_identity=(), reused=()
+    ):
+        self.alive = set(alive)
+        self.descendants_map = dict(descendants_map or {})
+        self.ignore_terminate = set(ignore_terminate)
+        self.no_identity = set(no_identity)
+        # pids recycled to a different process since harvest: still alive, but the
+        # recorded identity no longer matches — alive_and_ours must read them not-ours.
+        self.reused = set(reused)
         self.force_killed: list[int] = []
+        self.terminated: list[int] = []
+
+    def descendants(self, pid):
+        return list(self.descendants_map.get(pid, ()))
+
+    def identity(self, pid):
+        return None if pid in self.no_identity else float(pid)
+
+    def alive_and_ours(self, pid, identity):
+        if pid in self.reused or pid not in self.alive:
+            return False  # recycled pid or gone → not ours
+        return identity is None or identity == self.identity(pid)  # None → bare-liveness degrade
+
+    def terminate(self, pid):
+        self.terminated.append(pid)
+        if pid not in self.ignore_terminate:
+            self.alive.discard(pid)
 
     def force_kill(self, pid):
         self.force_killed.append(pid)
+        self.alive.discard(pid)
 
 
 def _kill_handle() -> SessionHandle:
@@ -230,8 +264,153 @@ def test_kill_returns_on_first_dead_probe_without_escalating(tmp_path, monkeypat
     adapter.kill(_kill_handle())
     assert mux.kill_windows == 1
     assert mux.liveness_probes == 1
-    assert mux.pane_pid_reads == 0
-    assert _lifecycle_lines(adapter) == []  # the normal path leaves no breadcrumbs
+    # #183: the clean end now reads the pane pids exactly ONCE (the pre-harvest
+    # snapshot), yet — no straggler and the window dead on probe 1 — it still
+    # performs no window re-kill and no escalation, leaving no breadcrumb.
+    assert mux.pane_pid_reads == 1
+    assert _lifecycle_lines(adapter) == []
+
+
+def test_kill_reaps_clean_end_straggler(tmp_path, monkeypatch):
+    """Clean end (window dead on probe 1) with a detached straggler harvested
+    pre-kill: it is terminated, then force-killed (it ignored SIGTERM), all within
+    the grace. terminate must precede force_kill so a mid-write process can flush."""
+    monkeypatch.setattr(generic, "KILL_POLL_S", 0)
+    # pane root 100 dies with the window; the setsid child 200 (a harvested child of
+    # 100, its own session at runtime) survives the pane-pgid kill and must be reaped.
+    host = _RecordingHost(alive={200}, descendants_map={100: [200]}, ignore_terminate={200})
+    monkeypatch.setattr(generic, "get_process_host", lambda: host)
+    mux = _TeardownMux(survives_kills=0, pids=[100])
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
+    adapter.kill(_kill_handle())
+    assert mux.pane_pid_reads == 1  # harvested once, pre-kill
+    assert mux.kill_windows == 1  # window died on the first strike — no re-kill
+    assert host.terminated == [200]
+    assert host.force_killed == [200]  # ignored SIGTERM → force-killed within grace
+    events = _lifecycle_lines(adapter)
+    assert [e["event"] for e in events] == ["straggler-reap", "kill-outcome"]
+    assert events[0]["pids"] == [200]
+    assert events[1]["forced"] == [200]
+    assert events[1]["unreaped"] == []  # reaped clean (distinct key from the wedged `alive`)
+
+
+def test_kill_clean_end_no_stragglers_leaves_no_breadcrumb(tmp_path, monkeypatch):
+    """Clean end, harvested tree already dead: the pane pids are read once and the
+    window killed once, but the reap finds nothing — no terminate, no force_kill, no
+    breadcrumb (the #157 clean path, now with a one-time pre-harvest read)."""
+    monkeypatch.setattr(generic, "KILL_POLL_S", 0)
+    host = _RecordingHost(alive=set(), descendants_map={100: [200]})
+    monkeypatch.setattr(generic, "get_process_host", lambda: host)
+    mux = _TeardownMux(survives_kills=0, pids=[100])
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
+    adapter.kill(_kill_handle())
+    assert mux.pane_pid_reads == 1
+    assert mux.kill_windows == 1
+    assert host.terminated == []
+    assert host.force_killed == []
+    assert _lifecycle_lines(adapter) == []
+
+
+def test_kill_never_force_kills_identity_none_straggler(tmp_path, monkeypatch):
+    """A harvested straggler whose identity could not be read (None) is polled via
+    the bare-liveness degrade and terminated, but NEVER force-killed — a None
+    identity can't rule out pid reuse. It rides out the grace still alive."""
+    monkeypatch.setattr(generic, "KILL_POLL_S", 0)
+    host = _RecordingHost(
+        alive={200}, descendants_map={100: [200]}, ignore_terminate={200}, no_identity={200}
+    )
+    monkeypatch.setattr(generic, "get_process_host", lambda: host)
+    mux = _TeardownMux(survives_kills=0, pids=[100])
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
+    adapter.kill(_kill_handle())
+    assert host.terminated == [200]
+    assert host.force_killed == []  # identity None → refuse to force-kill a possible reuse
+    events = _lifecycle_lines(adapter)
+    assert [e["event"] for e in events] == ["straggler-reap", "kill-outcome"]
+    assert events[1]["forced"] == []
+    assert events[1]["unreaped"] == [200]  # unconfirmable → left alive, recorded honestly
+
+
+def test_kill_reap_skips_reused_harvested_pid(tmp_path, monkeypatch):
+    """A harvested pid recycled to an unrelated process since the pre-kill snapshot
+    reads not-alive-and-ours at reap (identity mismatch) and is never signalled —
+    only the genuinely-ours straggler is reaped."""
+    monkeypatch.setattr(generic, "KILL_POLL_S", 0)
+    # 200 is still ours (reaped); 300 was reused by the OS for an unrelated process.
+    host = _RecordingHost(
+        alive={200, 300}, descendants_map={100: [200, 300]}, ignore_terminate={200}, reused={300}
+    )
+    monkeypatch.setattr(generic, "get_process_host", lambda: host)
+    mux = _TeardownMux(survives_kills=0, pids=[100])
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
+    adapter.kill(_kill_handle())
+    assert host.terminated == [200]  # 300 never touched — its identity no longer matches
+    assert host.force_killed == [200]
+    events = _lifecycle_lines(adapter)
+    assert events[0]["event"] == "straggler-reap"
+    assert events[0]["pids"] == [200]
+
+
+def test_kill_wedged_escalation_also_force_kills_harvested_descendants(tmp_path, monkeypatch):
+    """A wedged window (outlives grace) force-kills the re-read pane pids AND every
+    harvested descendant still alive-and-ours — the setsid child the pane-pid
+    escalation alone would miss. A descendant that no longer reads alive-and-ours (a
+    reused/gone pid) is skipped."""
+    monkeypatch.setattr(generic, "KILL_POLL_S", 0)
+    # pane root 100 (re-read at escalation) + harvested descendants 200 (still
+    # alive-and-ours) and 300 (gone → not alive_and_ours, must be skipped).
+    host = _RecordingHost(alive={100, 200}, descendants_map={100: [200, 300]})
+    monkeypatch.setattr(generic, "get_process_host", lambda: host)
+    mux = _TeardownMux(survives_kills=99, pids=[100])
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
+    adapter.kill(_kill_handle())
+    assert host.force_killed == [100, 200]  # 300 skipped: not alive_and_ours
+    assert mux.kill_windows == 2
+    events = _lifecycle_lines(adapter)
+    assert [e["event"] for e in events] == ["kill-escalated", "kill-outcome"]
+    assert events[0]["pids"] == [100]
+    assert events[1]["alive"] is True
+    assert events[1]["escalated"] is True
+
+
+def test_kill_wedged_escalation_never_force_kills_identity_none_descendant(tmp_path, monkeypatch):
+    """A wedged window must NOT force-kill a harvested descendant whose recorded
+    identity is None: alive_and_ours(pid, None) degrades to bare is_alive, so a
+    reused pid would pass — the ProcessHost contract forbids force-killing it. Only
+    the pane pid (pinned by the live window) and the identity-confirmed descendant
+    are struck."""
+    monkeypatch.setattr(generic, "KILL_POLL_S", 0)
+    # 200 is identity-confirmed (force-killed); 400 is alive but unconfirmable
+    # (identity None) → must be left untouched even under the wedged escalation.
+    host = _RecordingHost(
+        alive={100, 200, 400}, descendants_map={100: [200, 400]}, no_identity={400}
+    )
+    monkeypatch.setattr(generic, "get_process_host", lambda: host)
+    mux = _TeardownMux(survives_kills=99, pids=[100])
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
+    adapter.kill(_kill_handle())
+    assert host.force_killed == [100, 200]  # 400 refused: None identity
+    assert 400 not in host.force_killed
+
+
+def test_kill_strikes_window_before_reraising_bad_host_override(tmp_path, monkeypatch):
+    """The process-host lookup now precedes the first strike; an explicit-but-bogus
+    BMAD_LOOP_PROCESS_HOST must still raise loudly (never silently mis-signal), but
+    the window must not be left alive behind the raise — kill_window fires once, then
+    ProcessHostError propagates and the harvest is never reached."""
+    from bmad_loop.process_host import ProcessHostError, get_process_host
+
+    monkeypatch.setenv("BMAD_LOOP_PROCESS_HOST", "bogus-host-name")
+    get_process_host.cache_clear()
+    mux = _TeardownMux(survives_kills=0)
+    adapter = make_adapter(tmp_path, mux=mux, teardown_grace_s=0.05)
+    try:
+        with pytest.raises(ProcessHostError):
+            adapter.kill(_kill_handle())
+        assert mux.kill_windows == 1  # struck once before the raise
+        assert mux.pane_pid_reads == 0  # never reached the harvest
+    finally:
+        get_process_host.cache_clear()
 
 
 def test_kill_escalates_to_pane_pid_force_kill(tmp_path, monkeypatch):

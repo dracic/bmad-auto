@@ -22,18 +22,22 @@ import json
 import shlex
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .. import devcontract, gates, runs
 from ..bmadconfig import ProjectPaths
 from ..journal import LOGS_DIR
 from ..model import TokenUsage
 from ..policy import Policy
-from ..process_host import get_process_host
+from ..process_host import ProcessHostError, get_process_host
 from ..signals import SignalWatcher
 from ..tokens import read_usage as tally_usage
 from .base import CodingCLIAdapter, SessionHandle, SessionResult, SessionSpec
 from .multiplexer import MultiplexerError, TerminalMultiplexer, get_multiplexer
 from .profile import CLIProfile
+
+if TYPE_CHECKING:
+    from ..process_host import ProcessHost
 
 # Pane geometry for agent windows; mirrored in tui.data for log emulation.
 PANE_COLUMNS = 220
@@ -690,40 +694,130 @@ class GenericAdapter(_ResultFileMixin, CodingCLIAdapter):
         self.mux.send_text(handle.native_id, text)
 
     def kill(self, handle: SessionHandle) -> None:
-        # First strike stays the plain best-effort window kill; everything below
-        # verifies it landed. teardown_grace_s = 0 restores this line alone.
-        self.mux.kill_window(handle.native_id)
         grace = float(self.policy.limits.teardown_grace_s)
         if grace <= 0:
+            # Legacy single strike: no harvest, no wait, no pid reads. grace 0 is the
+            # documented opt-out — teardown stays exactly today's best-effort kill.
+            self.mux.kill_window(handle.native_id)
             return
+        try:
+            host = get_process_host()
+        except ProcessHostError:
+            # An explicit-but-bogus BMAD_LOOP_PROCESS_HOST override raises loudly
+            # (deliberate doctrine — never silently mis-signal). But the lookup now
+            # precedes the first strike, so the window must not be left alive behind
+            # the raise: strike once (today's teardown), then re-raise.
+            self.mux.kill_window(handle.native_id)
+            raise
+        # Harvest the pane roots AND their whole descendant tree NOW, while the
+        # window is provably alive, stamping a pid-reuse identity per member. This
+        # pre-kill snapshot is load-bearing (#183): once the window dies a detached
+        # straggler (setsid, a double-fork survivor) reparents to init and is no
+        # longer reachable from the pane pids, and a late-read pid risks reuse — so
+        # every destructive strike below is identity-guarded via alive_and_ours,
+        # never a bare pid. The snapshot is a point-in-time read: a process that
+        # detached (double-fork/setsid) BEFORE the harvest — or in the TOCTOU window
+        # AFTER it, before/around kill_window — has no pane-pid ancestor to be found
+        # by, so it is out of reach by construction (accepted, documented #183 limit).
+        # An empty list = the backend offers no pids (herdr) → degrade to the window
+        # kill alone.
+        tree: dict[int, float | None] = {}
+        for pid in self.mux.window_pane_pids(handle.native_id):
+            tree.setdefault(pid, host.identity(pid))
+            for child in host.descendants(pid):
+                tree.setdefault(child, host.identity(child))
+        # First strike stays the plain best-effort window kill; everything below
+        # verifies it landed and chases the harvested tree.
+        self.mux.kill_window(handle.native_id)
         deadline = time.monotonic() + grace
         while True:
             try:
-                if not self._window_alive(handle):
-                    return  # normal case: dead on the first probe
+                dead = not self._window_alive(handle)
             except MultiplexerError:
-                pass  # transport hiccup — liveness unknown this tick, keep polling
+                dead = False  # transport hiccup — liveness unknown this tick, keep polling
+            if dead:
+                # Window died within grace (the normal case): reap any harvested
+                # straggler that outlived the pane pgid, sharing this deadline.
+                self._reap_straggler_tree(handle, host, tree, deadline)
+                return
             if time.monotonic() >= deadline:
                 break
             time.sleep(KILL_POLL_S)
-        # The window outlived the grace: the kill was ignored (a wedged CLI, a
-        # shell that trapped the hangup). Harvest the pane pids NOW, while the
-        # window is provably still alive, so a reused pid can never be signalled.
-        # [] = capability not offered / unknown — degrade to the re-kill alone.
-        pids = self.mux.window_pane_pids(handle.native_id)
-        self._note_lifecycle(handle.task_id, "kill-escalated", pids=pids)
-        host = get_process_host()
-        for pid in pids:
+        # The window outlived the grace: the kill was ignored (a wedged CLI, a shell
+        # that trapped the hangup). Re-read the pane pids (freshest view; the live
+        # Popen-free window pins them, so they are safe to force-kill directly) and
+        # force-kill them, plus every harvested descendant still alive-and-ours. The
+        # descendant force-kill is identity-guarded AND skips members with no recorded
+        # identity: alive_and_ours(pid, None) degrades to bare is_alive, so a reused
+        # pid would pass — the ProcessHost contract forbids force-killing it, exactly
+        # like the clean-path reap below. Then re-strike the window.
+        repane = self.mux.window_pane_pids(handle.native_id)
+        self._note_lifecycle(handle.task_id, "kill-escalated", pids=repane)
+        for pid in repane:
             try:
                 host.force_kill(pid)
             except Exception:  # noqa: BLE001  # nosec B110 - already-gone races are fine
                 pass
+        for pid, identity in tree.items():
+            if pid not in repane and identity is not None and host.alive_and_ours(pid, identity):
+                try:
+                    host.force_kill(pid)
+                except Exception:  # noqa: BLE001  # nosec B110 - already-gone races are fine
+                    pass
         self.mux.kill_window(handle.native_id)
         try:
             alive: bool | None = self._window_alive(handle)
         except MultiplexerError:
             alive = None  # unknown is not dead — record it honestly
         self._note_lifecycle(handle.task_id, "kill-outcome", alive=alive, escalated=True)
+
+    def _reap_straggler_tree(
+        self,
+        handle: SessionHandle,
+        host: ProcessHost,
+        tree: dict[int, float | None],
+        deadline: float,
+    ) -> None:
+        """Reap harvested straggler pids the window death left behind — a
+        setsid/double-fork survivor escapes the pane pgid, so the window's death is
+        not the tree's. Filter to still-alive-and-ours members, then terminate →
+        poll → force-kill within the SAME grace ``deadline`` (one budget, two
+        phases): terminate first so a mid-write process can flush before SIGKILL. A
+        member whose recorded identity is None is unconfirmable (a possible reuse),
+        so it is polled via the bare-liveness degrade but NEVER force-killed. No
+        survivors → silent return: the clean-end path leaves no breadcrumb."""
+        survivors = [pid for pid, identity in tree.items() if host.alive_and_ours(pid, identity)]
+        if not survivors:
+            return
+        self._note_lifecycle(handle.task_id, "straggler-reap", pids=survivors)
+        for pid in survivors:
+            try:
+                host.terminate(pid)
+            except OSError:
+                pass  # already-gone race — the poll below settles it
+        while True:
+            survivors = [
+                pid for pid, identity in tree.items() if host.alive_and_ours(pid, identity)
+            ]
+            if not survivors or time.monotonic() >= deadline:
+                break
+            time.sleep(KILL_POLL_S)
+        forced: list[int] = []
+        for pid in survivors:
+            if tree[pid] is None:
+                continue  # unconfirmable identity: refuse to force-kill a possible reuse
+            try:
+                host.force_kill(pid)
+                forced.append(pid)
+            except Exception:  # noqa: BLE001  # nosec B110 - already-gone races are fine
+                pass
+        unreaped = [pid for pid, identity in tree.items() if host.alive_and_ours(pid, identity)]
+        # Distinct field name (`unreaped`, a pid list) from the wedged branch's
+        # `alive` (bool|None): reusing `alive` for both would give one key an
+        # unstable type across kill-outcome lines — a footgun for jsonl tailers.
+        self._note_lifecycle(
+            handle.task_id, "kill-outcome", reaped=True, forced=forced, unreaped=unreaped
+        )
 
     def _sample_weighted_usage(self, transcript_path: str, spec: SessionSpec) -> int | None:
         """Cumulative weighted spend of the live session's transcript, or None

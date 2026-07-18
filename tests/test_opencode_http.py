@@ -11,7 +11,10 @@ Everything binds 127.0.0.1; no real opencode binary or network access anywhere.
 from __future__ import annotations
 
 import json
+import os
 import queue
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -524,6 +527,101 @@ def test_missing_binary_is_a_clean_error(tmp_path):
 def test_kill_unknown_handle_is_a_noop(tmp_path):
     adapter = make_adapter(tmp_path)
     adapter.kill(SessionHandle(task_id="never-started", native_id="ses_x"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="setsid + os.kill(0) reap probe is POSIX")
+def test_kill_process_reaps_detached_descendant(tmp_path):
+    """#183 mirror on the HTTP transport, deterministic without a real opencode
+    binary: a focused _kill_process test with a real Popen server whose body
+    `setsid`-detaches a child (its own session — the root SIGTERM cannot reach it)
+    against the REAL process host. After _kill_process the detached child is reaped,
+    proving the pre-signal descendant harvest + reap covers a straggler the pane/pgid
+    kill would leak (a live opencode binary is not required, and the live-server
+    harness cannot easily be made to detach a child — noted in the report)."""
+    adapter = make_adapter(tmp_path)
+    adapter.kill_wait_s = 3.0
+    child_pid_file = tmp_path / "detached.pid"
+    # The "server" backgrounds a setsid child (records its pid), then idles so it is
+    # provably alive at harvest — the server (process.pid) is the parent of the
+    # detached child, so host.descendants(server) finds it before the SIGTERM.
+    script = f"setsid sleep 300 & echo $! > {child_pid_file}; sleep 300"
+    process = subprocess.Popen(["sh", "-c", script])
+    detached_pid = None
+    try:
+        deadline = time.monotonic() + 10
+        while not child_pid_file.is_file() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert child_pid_file.is_file(), "server never recorded its detached child"
+        detached_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
+        # sanity: the recorded pid is the setsid'd process and is currently alive
+        os.kill(detached_pid, 0)
+
+        sess = _ServerSession(process=process, port=0, base_url="", password="", log_fh=None)
+        adapter._kill_process(sess)
+
+        assert process.poll() is not None  # root server reaped
+        reap_deadline = time.monotonic() + 10
+        while True:
+            try:
+                os.kill(detached_pid, 0)
+            except ProcessLookupError:
+                break  # detached child reaped by the descendant sweep
+            assert time.monotonic() < reap_deadline, f"detached child {detached_pid} survived"
+            time.sleep(0.05)
+    finally:
+        for pid in (detached_pid, process.pid):
+            if pid is None:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+class _ReapRecordingHost:
+    """Minimal host for the reap-gate unit test: nobody dies on SIGTERM, so the
+    force-kill loop is what settles survivors — proving the identity gate, not
+    terminate, decides who gets force-killed. identity is None for ``no_identity``."""
+
+    def __init__(self, alive=(), no_identity=()):
+        self.alive = set(alive)
+        self.no_identity = set(no_identity)
+        self.terminated: list[int] = []
+        self.force_killed: list[int] = []
+
+    def identity(self, pid):
+        return None if pid in self.no_identity else float(pid)
+
+    def alive_and_ours(self, pid, identity):
+        if pid not in self.alive:
+            return False
+        return identity is None or identity == self.identity(pid)
+
+    def terminate(self, pid):
+        self.terminated.append(pid)  # deliberately does NOT kill — force_kill settles it
+
+    def force_kill(self, pid):
+        self.force_killed.append(pid)
+        self.alive.discard(pid)
+
+
+def test_reap_descendants_refuses_to_force_kill_none_identity(tmp_path):
+    """_reap_descendants terminates every surviving straggler but force-kills only
+    the identity-confirmed one; a None-identity survivor (a possible pid reuse) is
+    polled via the bare-liveness degrade and NEVER force-killed — the ProcessHost
+    contract, mirrored on the HTTP teardown (opencode_http.py:_reap_descendants)."""
+    adapter = make_adapter(tmp_path)
+    adapter.kill_wait_s = 0.1  # bound the poll: nobody dies on terminate here
+    host = _ReapRecordingHost(alive={200, 400}, no_identity={400})
+    tree = {200: 200.0, 400: None}  # 200 identity-confirmed at harvest, 400 unconfirmable
+    adapter._reap_descendants(host, tree)
+    assert host.terminated == [200, 400]  # both asked to stop
+    assert host.force_killed == [200]  # only the confirmed pid escalated
+    assert 400 not in host.force_killed
 
 
 def test_read_usage_returns_stash_by_session_id(tmp_path):

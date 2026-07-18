@@ -103,6 +103,21 @@ class ProcessHost(ABC):
             return "unknown"
         return "dead"
 
+    def descendants(self, pid: int) -> list[int]:
+        """Transitive descendant pids of ``pid`` (children, grandchildren, …), for
+        the teardown reap that must chase a session's whole process tree, not just
+        the pane root — a detached straggler (setsid, a double-fork survivor)
+        escapes the pane pgid the window kill signals.
+
+        NEVER raises: ``[]`` on an unsupported platform, a missing psutil, a gone
+        pid, or any read error — this feeds the kill escalation, which must never be
+        the thing that raises. The default enumerates via psutil (macOS/Windows);
+        the Linux host overrides it with a psutil-free ``/proc`` scan so the core
+        stays dep-free there."""
+        if pid <= 0:
+            return []
+        return _psutil_descendants(pid)
+
     def shell_quote(self, arg: str) -> str:
         """Quote ``arg`` for the shell that runs this host's hook commands, so the
         argument-quoting axis sits behind the same seam as ``hook_interpreter``. Not
@@ -151,6 +166,13 @@ class PosixProcessHost(ProcessHost):
             return _psutil().Process(pid).create_time()
         except Exception:
             return None
+
+    def descendants(self, pid: int) -> list[int]:
+        if pid <= 0:
+            return []
+        if sys.platform.startswith("linux"):
+            return _linux_descendants(pid)  # psutil-free: keeps the Linux core dep-free
+        return super().descendants(pid)  # macOS: psutil, guarded by the seam's never-raise
 
     def hook_interpreter(self) -> str:
         return "python3"
@@ -216,6 +238,50 @@ def _proc_starttime(pid: int) -> float | None:
         return float(after_comm[19])  # field 22 = index 19 after the comm token
     except (ValueError, IndexError):
         return None
+
+
+def _linux_descendants(pid: int) -> list[int]:
+    """Transitive descendants of ``pid`` from a single pass over ``/proc/*/stat``
+    (Linux only, psutil-free). Build the ppid→children map from field 4 (ppid) —
+    index 1 after the comm token, split on the last ``)`` exactly as
+    :func:`_proc_starttime` does — then BFS out from ``pid``. Best-effort: a process
+    that exits mid-scan simply drops out of the map, and any error yields ``[]`` so
+    the kill seam never raises. A ``seen`` set guards against a pid-reuse race
+    fabricating a cycle."""
+    try:
+        children: dict[int, list[int]] = {}
+        for entry in Path("/proc").iterdir():  # portability: Linux-only, guarded by caller
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text(encoding="utf-8")
+                ppid = int(stat[stat.rindex(")") + 1 :].split()[1])  # field 4 = ppid
+            except (OSError, ValueError, IndexError):
+                continue  # vanished mid-scan / unparsable line — just skip it
+            children.setdefault(ppid, []).append(int(entry.name))
+    except OSError:
+        return []
+    out: list[int] = []
+    seen: set[int] = set()
+    stack = list(children.get(pid, ()))
+    while stack:
+        child = stack.pop()
+        if child in seen:
+            continue
+        seen.add(child)
+        out.append(child)
+        stack.extend(children.get(child, ()))
+    return out
+
+
+def _psutil_descendants(pid: int) -> list[int]:
+    """Transitive descendants via psutil (non-Linux POSIX + Windows). Blanket-except
+    → ``[]`` so a missing psutil or an already-gone pid degrades silently — the
+    never-raise contract the kill escalation depends on."""
+    try:
+        return [child.pid for child in _psutil().Process(pid).children(recursive=True)]
+    except Exception:  # noqa: BLE001 - the kill-path seam must never raise
+        return []
 
 
 def _psutil():

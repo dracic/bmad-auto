@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -201,6 +202,47 @@ sleep 100000 &
 child=$!
 printf '%s\n' "$child" > "$rd/tasks/$tid/fake-child.pid"
 wait "$child"
+"""
+
+# A fake CLI that ends CLEANLY (writes a `done` spec + Stop, then idles like a real
+# interactive session) but first `setsid`-detaches a straggler into its OWN session.
+# Unlike the :185-204 same-pgid child (which tmux's SIGHUP reaps), a setsid child
+# escapes the pane pgid entirely — the #183/#139 repro the pre-harvest descendant
+# reap must cover before the worktree is merged and removed. Sprint mode: writes the
+# id-keyed done spec + a real code change so the run merges and tears the worktree down.
+DETACHED_WRITER_FAKE_CLI = r"""#!/usr/bin/env bash
+set -e
+rd="$BMAD_LOOP_RUN_DIR"; tid="$BMAD_LOOP_TASK_ID"; story="$BMAD_LOOP_STORY_KEY"
+ts=$(date +%s%N)
+mkdir -p "$rd/events"
+printf '{"ts": %s, "event": "SessionStart", "task_id": "%s", "session_id": "fake-1"}' \
+    "$ts" "$tid" > "$rd/events/$ts-$tid-SessionStart.json"
+baseline=$(git rev-parse HEAD)
+
+# Detach a straggler into a NEW session (setsid): $! is the setsid'd process itself
+# (a non-interactive shell runs background jobs in its own pgrp, so setsid does not
+# fork) — it now leads its own session and survives the pane pgid's SIGHUP.
+setsid sleep 100000 &
+child=$!
+printf '%s\n' "$child" > "$rd/tasks/$tid/fake-child.pid"
+
+# Sprint-mode result: a real code change + the id-keyed done spec the dev synthesis
+# reads back (written under the worktree cwd in isolation mode).
+impl="_bmad-output/implementation-artifacts"
+mkdir -p "$impl"
+echo "impl for $story" >> src.txt
+printf -- '---\ntitle: %s\nstatus: done\nbaseline_commit: %s\n---\n\n## Intent\n\nx\n\n## Auto Run Result\n\n- Status: done\n\nSummary: sprint.\n' \
+    "$story" "$baseline" > "$impl/spec-$story.md"
+
+ts2=$(( ts + 1 ))
+printf '{"ts": %s, "event": "Stop", "task_id": "%s", "session_id": "fake-1"}' \
+    "$ts2" "$tid" > "$rd/events/$ts2-$tid-Stop.json"
+# Stay alive like an idle interactive session so the pane shell is still live when
+# the engine kills it: the harvest sees the detached child as our descendant only
+# while we (its parent) are still around. Long enough to outlast Stop -> kill_window
+# on a loaded CI host (the window kill terminates this sleep anyway, so it costs
+# nothing) — else the shell could exit first, reparenting the child to init.
+sleep 600
 """
 
 
@@ -642,6 +684,74 @@ def test_e2e_session_timeout_teardown(tmp_path, monkeypatch):
             break  # dead and reaped — teardown covered the descendant
         assert time.monotonic() < deadline, f"sleep child {fake_pid} survived teardown"
         time.sleep(0.1)
+
+
+def test_e2e_detached_writer_reaped_before_worktree_teardown(tmp_path):
+    """#183/#139 end to end: a dev session `setsid`-detaches a straggler into its own
+    session (escaping the pane pgid tmux's SIGHUP reaps), then ends CLEANLY via a
+    Stop + done spec. The verified-kill reap must chase the harvested descendant tree
+    and reap the straggler BEFORE the worktree is merged and removed — so the
+    detached pid is dead, the worktree is gone, and no `worktree-teardown-degraded`
+    fires (the #139 signature). Worktree isolation makes the teardown real."""
+    root = tmp_path / "sbx"
+    story = "1-1-detach"
+    _scaffold_sprint(
+        root,
+        story,
+        fake_cli=DETACHED_WRITER_FAKE_CLI,
+        extra_policy=(
+            '\n[scm]\nisolation = "worktree"\n\n'
+            "[limits]\nmax_dev_attempts = 1\nteardown_grace_s = 10\n"
+        ),
+    )
+    detached_pid: int | None = None
+    try:
+        proc = _run(root, "run", timeout=120)
+        assert proc.returncode == 0, proc.stderr or proc.stdout
+
+        run_id = _run_id(root)
+        run_dir = root / ".bmad-loop" / "runs" / run_id
+
+        # (1) clean end: the story landed done and merged, not a timeout/stall
+        assert _sprint_status(root, story) == "done"
+        journal = [
+            json.loads(ln)
+            for ln in (run_dir / "journal.jsonl").read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        kinds = [j["kind"] for j in journal]
+        assert "unit-merged" in kinds, kinds
+        # (2) the #139 failure signature is ABSENT — the worktree teardown was clean
+        assert "worktree-teardown-degraded" not in kinds, kinds
+
+        # (3) no unit worktree survives (git sees only the main checkout)
+        wt = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+        )
+        mounts = [ln for ln in wt.stdout.splitlines() if ln.startswith("worktree ")]
+        assert len(mounts) == 1, wt.stdout  # only the primary checkout remains
+
+        # (4) the detached straggler was reaped within the grace: kill-0 -> gone.
+        pid_files = list((run_dir / "tasks").glob("*/fake-child.pid"))
+        assert pid_files, "fake CLI never recorded its setsid child"
+        detached_pid = int(pid_files[0].read_text(encoding="utf-8").strip())
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                os.kill(detached_pid, 0)
+            except ProcessLookupError:
+                break  # reaped by the descendant sweep before teardown
+            assert time.monotonic() < deadline, f"detached child {detached_pid} survived teardown"
+            time.sleep(0.1)
+    finally:
+        # never leak the detached sleep if the test fails before the reap check
+        if detached_pid is not None:
+            try:
+                os.kill(detached_pid, signal.SIGKILL)
+            except OSError:
+                pass
 
 
 def test_e2e_sweep_intent_gap_patch_restore(tmp_path):
