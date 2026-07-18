@@ -690,7 +690,7 @@ class Engine:
             if task.phase == Phase.DONE and task.worktree_path:
                 wt = Path(task.worktree_path)
                 if wt.is_dir():
-                    discard_worktree(repo, task.worktree_path, task.branch)
+                    discard_worktree(repo, task.worktree_path, task.branch, run_dir=self.run_dir)
             elif task.terminal and task.worktree_path and Path(task.worktree_path).is_dir():
                 # kept on purpose (keep_failed): leave it, but surface where.
                 self.journal.append(
@@ -1247,7 +1247,9 @@ class Engine:
                 )
                 if isolated:
                     # drop the half-built worktree; _run_story mounts a fresh one
-                    discard_worktree(self.paths.repo_root, task.worktree_path, task.branch)
+                    discard_worktree(
+                        self.paths.repo_root, task.worktree_path, task.branch, run_dir=self.run_dir
+                    )
                     task.worktree_path = ""
                     task.branch = ""
                 elif task.baseline_commit:

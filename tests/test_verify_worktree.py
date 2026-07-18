@@ -95,6 +95,19 @@ def test_worktree_prune_swallows_git_error(project, monkeypatch):
     verify.worktree_prune(project.project)  # returns without raising
 
 
+def test_worktree_prune_swallows_os_error(project, monkeypatch):
+    """`subprocess.run` can raise OSError outright (a spawn failure — EMFILE,
+    ENOMEM — happens before any return code exists), which #156's timeout
+    translation doesn't cover. prune's never-raise contract must hold for it
+    too — its callers invoke it from inside `except GitError` guards."""
+
+    def boom(*a, **k):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(verify, "_git", boom)
+    verify.worktree_prune(project.project)  # returns without raising
+
+
 def test_checkout_detach_frees_branch(project, tmp_path):
     """A worktree checked out on a branch holds that branch — git refuses to mount
     it elsewhere. Detaching the worktree's HEAD frees the branch name for a sibling

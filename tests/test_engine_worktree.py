@@ -1050,14 +1050,18 @@ def test_close_dirty_tree_force_retry_is_not_degraded(project):
     assert reports == []  # NOT a degradation
 
 
-def test_close_deferred_without_keep_degrades(project):
+def test_close_deferred_without_keep_degrades(project, monkeypatch):
     """The DEFERRED, no-keep teardown (success=False) runs the same fallback chain:
     the patch is already captured, so a dropped admin entry degrades to a report
-    while the worktree is reclaimed via rmtree+prune — the run continues."""
+    while the worktree is reclaimed via rmtree+prune — the run continues. (In the
+    real gh-139 sequence capture runs before the remove drops the admin entry;
+    dropping it up front here would break capture too and flip the close into the
+    capture-failure preserve path, so pin capture to its real-life outcome.)"""
     from bmad_loop.workspace import close_unit_workspace
 
     unit, run_dir = _open_unit(project)
     _drop_admin_entry(project)
+    monkeypatch.setattr(verify, "capture_diff", lambda *a, **k: "")
 
     reports: list[str] = []
     close_unit_workspace(
@@ -1071,6 +1075,67 @@ def test_close_deferred_without_keep_degrades(project):
     assert not unit.path.exists()
     assert not branch_exists(project.project, unit.branch)
     assert len(reports) == 1 and "is not a working tree" in reports[0]
+
+
+def test_close_capture_failure_preserves_worktree_and_branch(project, monkeypatch):
+    """The teardown tail's premise is that a dropped unit's changes are already
+    patch-captured — a failed capture (e.g. a #156 git timeout) breaks it, and
+    tearing down anyway would destroy the only copy of the unit's work. The
+    close must instead preserve the worktree + branch (as if keep_failed) and
+    report the degradation."""
+    from bmad_loop.workspace import close_unit_workspace
+
+    unit, run_dir = _open_unit(project)
+
+    def boom(*a, **k):
+        raise verify.GitError("git diff timed out")
+
+    monkeypatch.setattr(verify, "capture_diff", boom)
+
+    reports: list[str] = []
+    patch = close_unit_workspace(
+        unit,
+        success=False,
+        keep_failed=False,
+        run_dir=run_dir,
+        unit_key="1-1-a",
+        on_teardown_degraded=reports.append,
+    )
+
+    assert patch is None
+    assert unit.path.exists()  # preserved: the worktree holds the only copy
+    assert branch_exists(project.project, unit.branch)
+    assert len(reports) == 1 and "diff capture failed" in reports[0]
+
+
+def test_close_capture_failure_frees_shared_branch(project, monkeypatch):
+    """branch_per=run: a worktree preserved by a failed capture holds the shared
+    run branch, which would collide with every later unit's mount (gh-138). The
+    detach_kept handling must apply to this preserve path exactly as it does to
+    keep_failed: HEAD detaches, so the branch is mountable elsewhere."""
+    from bmad_loop.workspace import close_unit_workspace
+
+    unit, run_dir = _open_unit(project, branch_per="run")
+
+    def boom(*a, **k):
+        raise verify.GitError("git diff timed out")
+
+    monkeypatch.setattr(verify, "capture_diff", boom)
+
+    close_unit_workspace(
+        unit,
+        success=False,
+        keep_failed=False,
+        run_dir=run_dir,
+        unit_key="1-1-a",
+        detach_kept=True,
+        on_teardown_degraded=lambda _msg: None,
+    )
+
+    assert unit.path.exists()  # preserved for recovery
+    # the shared branch is free again: a sibling worktree can mount it
+    sibling = run_dir / "worktrees" / "1-1-b"
+    verify.worktree_add(project.project, sibling, unit.branch, create=False)
 
 
 def test_close_notes_leftover_path_when_rmtree_loses_race(project, monkeypatch):
@@ -1134,13 +1199,65 @@ def test_discard_worktree_falls_back_to_rmtree_and_prunes(project):
     same path is free to re-mount on resume, without raising."""
     from bmad_loop.workspace import discard_worktree
 
-    unit, _ = _open_unit(project)
+    unit, run_dir = _open_unit(project)
     _drop_admin_entry(project)
 
-    discard_worktree(project.project, str(unit.path), unit.branch)  # no raise
+    discard_worktree(project.project, str(unit.path), unit.branch, run_dir=run_dir)  # no raise
 
     assert not unit.path.exists()  # rmtree reclaimed the stuck dir
     assert not branch_exists(project.project, unit.branch)  # pruned → deletable
+
+
+def test_discard_refuses_rmtree_outside_run_worktrees_dir(project, tmp_path):
+    """`task.worktree_path` arrives from persisted state (state.json), which can
+    be corrupt or hand-edited. git itself refuses to remove a dir that is not a
+    worktree — but that very refusal used to hand the path to the rmtree
+    fallback, which validates nothing. The fallback must decline any path that
+    does not resolve under this run's worktrees dir."""
+    from bmad_loop.workspace import discard_worktree
+
+    victim = tmp_path / "not-a-worktree"
+    victim.mkdir()
+    (victim / "precious.txt").write_text("do not delete\n")
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+
+    discard_worktree(project.project, str(victim), "", run_dir=run_dir)  # no raise
+
+    assert (victim / "precious.txt").exists()  # confinement guard refused the rmtree
+
+
+def test_close_refuses_rmtree_outside_run_worktrees_dir(project, tmp_path):
+    """close_unit_workspace's rmtree fallback can receive a persisted path too
+    (_reopen_unit rebuilds the UnitWorkspace from task.worktree_path on resume).
+    A path outside the run's worktrees dir is never rmtree'd, and the degraded
+    report says the fallback was refused."""
+    from bmad_loop.workspace import UnitWorkspace, Workspace, close_unit_workspace
+
+    victim = tmp_path / "elsewhere"
+    victim.mkdir()
+    (victim / "precious.txt").write_text("do not delete\n")
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+    unit = UnitWorkspace(
+        workspace=Workspace(root=victim, paths=project.rebased(victim)),
+        repo_root=project.project,
+        branch="bmad-loop/test-run/1-1-a",
+        path=victim,
+        baseline="",
+    )
+
+    reports: list[str] = []
+    close_unit_workspace(
+        unit,
+        success=True,
+        keep_failed=False,
+        run_dir=run_dir,
+        unit_key="1-1-a",
+        delete_branch=False,
+        on_teardown_degraded=reports.append,
+    )
+
+    assert (victim / "precious.txt").exists()  # confinement guard refused the rmtree
+    assert len(reports) == 1 and "rmtree refused" in reports[0]
 
 
 def test_engine_run_completes_when_worktree_remove_always_fails(project, monkeypatch):

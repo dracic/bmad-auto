@@ -39,6 +39,27 @@ def unit_worktrees_dir(run_dir: Path) -> Path:
     return run_dir / WORKTREE_DIRNAME
 
 
+def _rmtree_confined(wt: Path, run_dir: Path) -> bool:
+    """rmtree `wt` only when it resolves to a strict descendant of this run's
+    worktrees dir; returns whether deletion was attempted. The teardown fallbacks
+    reach for rmtree with paths that can arrive from persisted task state
+    (`task.worktree_path` via discard_worktree and `_reopen_unit`), and rmtree —
+    unlike `git worktree remove` — performs no validation of its own, so a
+    corrupt or hand-edited state entry must not be able to point it at the repo
+    root or anywhere else outside the run's scaffolding (same doctrine as
+    runs.reconcile_orphan_worktrees / resolve_run_dir)."""
+    try:
+        root = unit_worktrees_dir(run_dir).resolve()
+        target = wt.resolve()
+        target.relative_to(root)
+    except (ValueError, OSError):
+        return False
+    if target == root:
+        return False
+    shutil.rmtree(target, ignore_errors=True)
+    return True
+
+
 @dataclass(frozen=True)
 class Workspace:
     root: Path  # where sessions run (cwd) and git operates
@@ -139,7 +160,10 @@ def close_unit_workspace(
     before it runs, so no git teardown failure escapes it. Every `GitError` from
     the worktree removal or branch deletion degrades to a call of
     on_teardown_degraded (given the failure message) instead of crashing the run;
-    a clean or force-retried removal is silent (see the teardown tail below). The
+    a clean or force-retried removal is silent (see the teardown tail below). A
+    failed diff *capture* breaks the tail's premise instead — the worktree would
+    then hold the only copy of the unit's changes — so it is reported the same
+    way but preserves the worktree + branch rather than tearing them down. The
     callback itself is the caller's (the engine's `journal.append`, whose OSError
     is engine-wide journal semantics, deliberately unguarded here).
 
@@ -153,19 +177,29 @@ def close_unit_workspace(
     """
     patch: Path | None = None
     if not success:
+        capture_err: verify.GitError | None = None
         try:
             diff = (
                 verify.capture_diff(unit.path, unit.baseline, max_file_bytes=diff_max_file_bytes)
                 if unit.baseline
                 else ""
             )
-        except verify.GitError:
+        except verify.GitError as e:
+            capture_err = e
             diff = ""
         if diff:
             patch = run_dir / "failed" / safe_segment(unit_key) / "changes.patch"
             patch.parent.mkdir(parents=True, exist_ok=True)
             patch.write_text(diff, encoding="utf-8")
-        if keep_failed:
+        if capture_err is not None and on_teardown_degraded is not None:
+            # the forensic patch is the only copy of a dropped unit's changes; a
+            # failed capture means the teardown below would destroy them, so the
+            # unit is preserved as if keep_failed (the `or` on the branch below).
+            on_teardown_degraded(
+                f"diff capture failed for {unit.path}: {capture_err}; "
+                "worktree and branch preserved (uncaptured changes)"
+            )
+        if keep_failed or capture_err is not None:
             if detach_kept:
                 # branch_per=run shares one branch across the run; a kept worktree
                 # left checked out on it blocks every later unit's `git worktree
@@ -200,13 +234,18 @@ def close_unit_workspace(
             # (plain rmtree + prune) and degrade to a warning: the content already
             # landed, so this is housekeeping, not a run failure. Both git errors
             # go into the message — each half of the fingerprint is diagnostic.
-            shutil.rmtree(unit.path, ignore_errors=True)
+            # The rmtree is confined to the run's worktrees dir: on resume the
+            # path comes from persisted state (_reopen_unit), which git validates
+            # but rmtree would not.
+            removed = _rmtree_confined(unit.path, run_dir)
             verify.worktree_prune(unit.repo_root)
             msg = (
                 f"worktree remove failed for {unit.path} ({first_err}); "
                 f"force retry failed ({retry_err}); fell back to rmtree+prune"
             )
-            if unit.path.exists():
+            if not removed:
+                msg += f" (rmtree refused: {unit.path} resolves outside this run's worktrees dir)"
+            elif unit.path.exists():
                 # rmtree lost the race too (the writer recreated files under it):
                 # the dir survives under the gitignored run dir and is reclaimed
                 # later by trim_run_dir / clean — note it, don't block on it.
@@ -229,9 +268,11 @@ def close_unit_workspace(
     return patch
 
 
-def discard_worktree(repo_root: Path, worktree_path: str, branch: str) -> None:
+def discard_worktree(repo_root: Path, worktree_path: str, branch: str, *, run_dir: Path) -> None:
     """Best-effort force teardown of a worktree + branch by path/name, for
-    resume-restart of a crashed/interrupted unit. Tolerant of partial state."""
+    resume-restart of a crashed/interrupted unit. Tolerant of partial state.
+    `worktree_path` arrives from persisted task state, so the rmtree fallback is
+    confined to `run_dir`'s worktrees dir (see _rmtree_confined)."""
     if worktree_path:
         wt = Path(worktree_path)
         try:
@@ -242,7 +283,7 @@ def discard_worktree(repo_root: Path, worktree_path: str, branch: str) -> None:
             # dropped admin entry) can keep `git worktree remove` from clearing
             # the dir. A leftover dir breaks the resume re-mount at this same path
             # (`git worktree add` refuses a non-empty target), so drop to rmtree.
-            shutil.rmtree(wt, ignore_errors=True)
+            _rmtree_confined(wt, run_dir)
         # prune git's admin entry regardless (harmless when nothing is stale) so a
         # half-removed worktree can't block that re-mount.
         verify.worktree_prune(repo_root)
