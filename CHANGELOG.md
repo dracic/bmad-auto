@@ -236,6 +236,14 @@ for antigravity`, immediately after a successful `init --cli antigravity`). Both
   `isolation = "none"` (the default) works; `isolation = "worktree"` hangs on every run, since
   each worktree is a fresh untrusted path — now called out in the profile and setup guide, and
   tracked in #169. Replaces the profile's previous "verify during probe" placeholder.
+- **Follow-up review sessions are no longer killed on their first Stop by the dev pass's stale
+  `## Auto Run Result` (#160).** The review leg re-invokes bmad-dev-auto on the finalized (`done`)
+  spec whose dev pass left that terminal marker; the review's own entry write lifted it past the
+  adapter's launch-mtime floor, so the first result-less Stop read the stale marker as this
+  session's result and ended the review mid-flight (the #109 stall grace never armed). The engine
+  now strips the marker before every review launch — the frontmatter `done` stays, so step-01
+  still routes to a review pass. The review-budget exhaustion defer reason now reports the last
+  pass's actual status instead of always claiming a lingering follow-up recommendation.
 - **`branch_per=run` + `keep_failed` no longer poisons a multi-story run after the first kept
   failure (#138).** The first story to end deferred under `keep_failed=true` left its worktree
   checked out on the single shared run branch, so every subsequent story's `git worktree add`

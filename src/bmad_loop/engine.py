@@ -1688,6 +1688,11 @@ class Engine:
         # (status: done) while still recommending an independent follow-up — the
         # only state the budget-exhaustion rescue below is allowed to commit.
         refileable_followup = False
+        # The last *completed* pass's parsed frontmatter status, so the exhaustion
+        # defer reason can name what actually happened instead of the fixed
+        # follow-up wording (issue #160). None until a pass reaches the parse below
+        # (a crash/stall that DEFERs never gets there).
+        last_status: str | None = None
         # A resumed result must enter the loop even when the crash landed in the
         # post-session window of the *final* allowed cycle (review_cycle already
         # == max_review_cycles): its recorded pass was already counted, and the
@@ -1710,6 +1715,13 @@ class Engine:
                 result = resume_result
                 resume_result = None
             else:
+                # Strip the prior pass's stale `## Auto Run Result` before launch:
+                # the review re-invokes bmad-dev-auto on the done spec, and the
+                # session's own entry write would otherwise lift that leftover
+                # marker past the adapter's launch-mtime floor and end the review
+                # on its first result-less Stop (issue #160). Non-replay branch
+                # only — the replay path above launches no session.
+                self._reset_spec_for_review(task)
                 result = self._run_session(
                     task,
                     role="review",
@@ -1756,6 +1768,7 @@ class Engine:
             # convergence/damping gate below sees the finalized state.
             self._reconcile_generic_terminal_status(task, rj)
             status = str(rj.get("status", "")).strip()
+            last_status = status  # remember the last completed pass for the defer reason
             followup = bool(rj.get("followup_review_recommended", False))
             task.followup_review_recommended = followup  # latest pass wins
             refileable_followup = status == "done" and followup
@@ -1851,9 +1864,26 @@ class Engine:
                 self._record_review_budget_followup(task)
                 self._commit(task)
                 return
-            self._defer(
-                task, "review did not converge within budget (still recommending a follow-up pass)"
-            )
+            # Name the last completed pass's real outcome (issue #160): the fixed
+            # follow-up wording is only correct when a finalized pass actually left
+            # a refileable recommendation. "did not converge" stays in every variant
+            # (callers grep it).
+            if refileable_followup:
+                detail = "still recommending a follow-up pass"
+            elif last_status == "done":
+                detail = "last review pass finalized but its verification failed"
+            elif last_status is not None:
+                # A pass completed but its status is non-terminal — or "" when the
+                # observe-degrade paths left `rj` with no status (spec read fault,
+                # out-of-tree spec, or a result.json with no spec_file so the
+                # reconcile bailed). Render "" honestly rather than mislabeling it as
+                # "no pass ran" (which is what `last_status is None` below means).
+                detail = (
+                    f"last review pass ended at non-terminal status {(last_status or 'unknown')!r}"
+                )
+            else:
+                detail = "no review pass completed"
+            self._defer(task, f"review did not converge within budget ({detail})")
             return
 
         self._commit(task)
@@ -2527,6 +2557,29 @@ class Engine:
         spec_path = Path(task.spec_file)
         devcontract.reset_spec_status(spec_path, "in-progress")
         devcontract.strip_auto_run_result(spec_path)
+
+    def _reset_spec_for_review(self, task: StoryTask) -> None:
+        """Strip the prior pass's stale `## Auto Run Result` before a review launch.
+
+        A follow-up review session re-invokes bmad-dev-auto on the FINALIZED spec,
+        which still carries the dev pass's terminal `## Auto Run Result` section.
+        The review's own step-04 entry write (it stamps the transient `in-review`
+        status) bumps the spec's mtime past `find_result_artifact`'s launch floor,
+        so the review's first result-less Stop reads that stale marker as this
+        session's terminal result and kills the session mid-flight — the #109 stall
+        grace can never arm on the review leg (issue #160). Cycle 2+ carries the
+        PREVIOUS review pass's own marker, so this runs before every review launch,
+        never on the crash-resume replay branch (no session launches there). Unlike
+        `_reset_spec_for_repair` the frontmatter is left untouched: `status: done` is
+        what routes the re-invocation's step-01 to a fresh step-04 review pass.
+
+        No-op when the dev skill is not the generic one or no spec is recorded yet.
+        Repair-write doctrine (see `devcontract.strip_auto_run_result`): a present-
+        but-unreadable spec raises rather than silently proceeding stale — skipping
+        the strip recreates the exact bug state, so it must surface."""
+        if not self._generic_dev() or not task.spec_file:
+            return
+        devcontract.strip_auto_run_result(Path(task.spec_file))
 
     def _write_feedback(self, task: StoryTask, reason: str) -> Path:
         """Persist a verification failure where the next session can read it —

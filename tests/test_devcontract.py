@@ -616,6 +616,18 @@ def test_strip_auto_run_result_noop_when_spec_absent(tmp_path):
     assert devcontract.strip_auto_run_result(sp) is False
 
 
+def test_strip_auto_run_result_raises_on_undecodable_spec(tmp_path):
+    """Repair-write doctrine: a present-but-unreadable spec must RAISE, never
+    no-op. Only an absent file is guarded; a spec that cannot be decoded is left
+    to raise so the stale terminal section can't silently survive the re-open —
+    the #160 review-launch strip site depends on that surfacing (silently skipping
+    the strip recreates the exact bug it fixes)."""
+    sp = tmp_path / "spec.md"
+    sp.write_bytes(b"---\nstatus: done\n---\n\n\xff\xfe## Auto Run Result\n\nStatus: done\n")
+    with pytest.raises(UnicodeDecodeError):
+        devcontract.strip_auto_run_result(sp)
+
+
 def test_strip_auto_run_result_ignores_heading_quoted_in_code_fence(tmp_path):
     """A spec whose frozen intent quotes the heading inside a fenced example must
     not lose that content — stripping is destructive, so fenced pseudo-headings
