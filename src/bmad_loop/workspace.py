@@ -16,6 +16,8 @@ lives in the main repo and is passed separately — it never moves.
 
 from __future__ import annotations
 
+import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -121,6 +123,7 @@ def close_unit_workspace(
     delete_branch: bool = True,
     detach_kept: bool = False,
     diff_max_file_bytes: int | None = None,
+    on_teardown_degraded: Callable[[str], None] | None = None,
 ) -> Path | None:
     """Tear down (or preserve) a unit's worktree.
 
@@ -130,6 +133,15 @@ def close_unit_workspace(
     happens. On success (or failure without keep_failed) the worktree is removed
     and, if delete_branch, the branch deleted. Returns the patch path it wrote,
     or None.
+
+    Invariant: the teardown tail is post-merge/post-capture housekeeping — the
+    unit's content is already safe (merged on success, patch-captured on failure)
+    before it runs, so no git teardown failure escapes it. Every `GitError` from
+    the worktree removal or branch deletion degrades to a call of
+    on_teardown_degraded (given the failure message) instead of crashing the run;
+    a clean or force-retried removal is silent (see the teardown tail below). The
+    callback itself is the caller's (the engine's `journal.append`, whose OSError
+    is engine-wide journal semantics, deliberately unguarded here).
 
     detach_kept (branch_per=run only): when keep_failed preserves the worktree,
     detach its HEAD so the shared run branch it holds is freed for the next unit
@@ -173,13 +185,47 @@ def close_unit_workspace(
     # tree is clean, but force is harmless and tolerant of stray artifacts.
     try:
         verify.worktree_remove(unit.repo_root, unit.path, force=not success)
-    except verify.GitError:
-        verify.worktree_remove(unit.repo_root, unit.path, force=True)
-    if delete_branch and verify.branch_exists(unit.repo_root, unit.branch):
-        # the unit's content is already on the target branch (success) or saved
-        # to a patch (failure), so a force delete loses nothing — and squash
-        # merges leave the branch looking "unmerged" to `git branch -d`.
-        verify.delete_branch(unit.repo_root, unit.branch, force=True)
+    except verify.GitError as first_err:
+        try:
+            # Ordinary dirty-tree case: the plain remove refused stray untracked
+            # artifacts, which --force clears. Not a degradation — stay silent.
+            verify.worktree_remove(unit.repo_root, unit.path, force=True)
+        except verify.GitError as retry_err:
+            # gh-139 fingerprint the retry CAN'T fix: a process the just-ended
+            # session left running (e.g. pytest recreating `.pytest_cache`) makes
+            # the plain remove fail with ENOTEMPTY (first_err), and by then git has
+            # already deleted its admin entry `.git/worktrees/<id>` — so the --force
+            # retry fails with "is not a working tree" (retry_err). Force can't
+            # restore a dropped admin entry, so fall back to git's own reclaim path
+            # (plain rmtree + prune) and degrade to a warning: the content already
+            # landed, so this is housekeeping, not a run failure. Both git errors
+            # go into the message — each half of the fingerprint is diagnostic.
+            shutil.rmtree(unit.path, ignore_errors=True)
+            verify.worktree_prune(unit.repo_root)
+            msg = (
+                f"worktree remove failed for {unit.path} ({first_err}); "
+                f"force retry failed ({retry_err}); fell back to rmtree+prune"
+            )
+            if unit.path.exists():
+                # rmtree lost the race too (the writer recreated files under it):
+                # the dir survives under the gitignored run dir and is reclaimed
+                # later by trim_run_dir / clean — note it, don't block on it.
+                msg += f" (dir still present: {unit.path})"
+            if on_teardown_degraded is not None:
+                on_teardown_degraded(msg)
+    try:
+        if delete_branch and verify.branch_exists(unit.repo_root, unit.branch):
+            # the unit's content is already on the target branch (success) or saved
+            # to a patch (failure), so a force delete loses nothing — and squash
+            # merges leave the branch looking "unmerged" to `git branch -d`.
+            # prune above frees a branch whose worktree dir was rmtree'd, so this
+            # still runs after a degraded removal.
+            verify.delete_branch(unit.repo_root, unit.branch, force=True)
+    except verify.GitError as e:
+        # second crash door in this teardown tail: branch deletion is likewise
+        # post-merge housekeeping, so degrade it rather than raise past here.
+        if on_teardown_degraded is not None:
+            on_teardown_degraded(f"branch delete failed for {unit.branch}: {e}")
     return patch
 
 
@@ -192,7 +238,14 @@ def discard_worktree(repo_root: Path, worktree_path: str, branch: str) -> None:
             if wt.exists():
                 verify.worktree_remove(repo_root, wt, force=True)
         except verify.GitError:
-            pass
+            # same gh-139 hazard as close_unit_workspace: a stray process (or a
+            # dropped admin entry) can keep `git worktree remove` from clearing
+            # the dir. A leftover dir breaks the resume re-mount at this same path
+            # (`git worktree add` refuses a non-empty target), so drop to rmtree.
+            shutil.rmtree(wt, ignore_errors=True)
+        # prune git's admin entry regardless (harmless when nothing is stale) so a
+        # half-removed worktree can't block that re-mount.
+        verify.worktree_prune(repo_root)
     if branch:
         try:
             if verify.branch_exists(repo_root, branch):

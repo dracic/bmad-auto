@@ -566,6 +566,9 @@ class Engine:
                 delete_branch=scm.delete_branch,
                 detach_kept=scm.branch_per == "run",
                 diff_max_file_bytes=self._failed_diff_max_bytes(),
+                on_teardown_degraded=lambda msg: self.journal.append(
+                    "worktree-teardown-degraded", story_key=task.story_key, error=msg
+                ),
             )
             self.journal.append(
                 "unit-closed",
@@ -635,6 +638,9 @@ class Engine:
             run_dir=self.run_dir,
             unit_key=task.story_key,
             delete_branch=scm.delete_branch,
+            on_teardown_degraded=lambda msg: self.journal.append(
+                "worktree-teardown-degraded", story_key=task.story_key, error=msg
+            ),
         )
 
     def _keep_branch_and_escalate(self, task: StoryTask, unit: UnitWorkspace, reason: str) -> None:
