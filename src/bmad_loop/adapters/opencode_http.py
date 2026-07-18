@@ -86,14 +86,14 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .. import gates
 from ..bmadconfig import ProjectPaths
 from ..journal import LOGS_DIR
 from ..model import TokenUsage
 from ..policy import Policy
-from ..process_host import get_process_host
+from ..process_host import ProcessHostError, get_process_host
 from .base import CodingCLIAdapter, SessionHandle, SessionResult, SessionSpec
 from .generic import (
     BUDGET_NUDGE_TEXT,
@@ -105,6 +105,9 @@ from .generic import (
 )
 from .profile import CLIProfile
 
+if TYPE_CHECKING:
+    from ..process_host import ProcessHost
+
 # Spawn/readiness defaults; per-instance attributes so tests shrink them.
 HEALTH_TIMEOUT_S = 30.0
 HEALTH_POLL_S = 0.25
@@ -112,6 +115,10 @@ SSE_READ_TIMEOUT_S = 30.0  # server heartbeats ~10s; 3 misses = stream is gone
 SILENCE_THRESHOLD_S = 30.0
 RECONNECT_SLEEP_S = 1.0
 KILL_WAIT_S = 5.0
+# Straggler-reap poll cadence. Independent of generic's KILL_POLL_S: this teardown
+# budgets waits at kill_wait_s scale (seconds), not the tmux grace scale, so a
+# tight fixed poll keeps the reap responsive without a per-instance knob.
+REAP_POLL_S = 0.1
 SPAWN_ATTEMPTS = 3
 POLL_TICK_S = 5.0  # max event-queue wait per loop tick (generic's cadence)
 
@@ -984,7 +991,33 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
         process = sess.process
         if process.poll() is not None:
             return
-        host = get_process_host()
+        try:
+            host = get_process_host()
+        except ProcessHostError:
+            # An explicit-but-bogus BMAD_LOOP_PROCESS_HOST override raises loudly
+            # (deliberate doctrine — never silently mis-signal). But the lookup
+            # precedes the first signal, so the server must not be left alive
+            # behind the raise: one legacy Popen root strike (no host → no tree
+            # kill; the win32 kill() reaps only the .cmd wrapper — an accepted
+            # degrade on a loud config error), then re-raise. Mirrors the tmux
+            # adapter's kill().
+            try:
+                if sys.platform == "win32":
+                    process.kill()
+                else:
+                    process.terminate()
+            except OSError:
+                pass
+            raise
+        # Harvest the server's descendant tree BEFORE the first signal, while the
+        # tree is intact (#183): a tool subprocess the server detached (setsid, a
+        # double-fork) outlives the root's SIGTERM and would keep writing into the
+        # worktree the engine is about to merge/remove. Post-kill it reparents to
+        # init and is unreachable, so snapshot it now; each member's pid-reuse
+        # identity rides along from the enumeration itself, and the reap below is
+        # identity-guarded via alive_and_ours, never a bare (reusable) pid. {} =
+        # no descendants / psutil absent → the root ladder alone, as before.
+        tree = host.descendants(process.pid)
         # The live Popen handle pins the pid (win32 handle / unreaped POSIX
         # child), so signalling it cannot hit a reused pid — the identity
         # confirmation force_kill's contract asks for.
@@ -1013,6 +1046,43 @@ class OpencodeHttpAdapter(_ResultFileMixin, CodingCLIAdapter):
             try:
                 process.wait(timeout=self.kill_wait_s)
             except subprocess.TimeoutExpired:
+                pass
+        self._reap_descendants(host, tree)
+
+    def _reap_descendants(self, host: ProcessHost, tree: dict[int, float | None]) -> None:
+        """Reap harvested straggler descendants the root signal missed — a detached
+        tool subprocess that escaped the server's process group. Terminate → bounded
+        wait ≤ ``kill_wait_s`` → force-kill, identity-guarded: a None identity is
+        unconfirmable (a possible pid reuse), so it is never signalled or polled at
+        all — even a SIGTERM to a recycled pid kills an innocent process (the tmux
+        adapter's straggler doctrine, mirrored). Same already-gone swallow as the
+        root ladder; best-effort, never a teardown gate."""
+
+        def _survivors() -> list[int]:
+            return [
+                pid
+                for pid, identity in tree.items()
+                if identity is not None and host.alive_and_ours(pid, identity)
+            ]
+
+        survivors = _survivors()
+        if not survivors:
+            return
+        for pid in survivors:
+            try:
+                host.terminate(pid)
+            except OSError:
+                pass
+        deadline = time.monotonic() + self.kill_wait_s
+        while True:
+            survivors = _survivors()
+            if not survivors or time.monotonic() >= deadline:
+                break
+            time.sleep(REAP_POLL_S)
+        for pid in survivors:
+            try:
+                host.force_kill(pid)
+            except Exception:  # noqa: BLE001  # nosec B110 - already-gone races are fine
                 pass
 
     def _atexit_sweep(self) -> None:
