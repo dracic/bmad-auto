@@ -192,7 +192,7 @@ def test_existing_ctl_session_reused(monkeypatch, tmp_path: Path):
 
 
 def test_launch_without_mux_raises(monkeypatch, tmp_path: Path):
-    monkeypatch.delenv("BMAD_LOOP_MUX_BACKEND")
+    monkeypatch.delenv("BMAD_LOOP_MUX_BACKEND", raising=False)
     get_multiplexer.cache_clear()
     monkeypatch.setattr(tmux_base.shutil, "which", lambda name: None)
     assert not launch.mux_available()

@@ -34,11 +34,11 @@ held by a CI portability guard (`tests/test_portability_guard.py`). **WSL alread
 — it _is_ Linux, so it takes every fast path unchanged; this is purely about a future _native_
 Windows host.
 
-The remaining work is the native-Windows backend itself. Three candidates now exist, and
-they are **not stages of one plan**. Two are **sibling tmux-family backends** still in
-flight: `psmux` (drives psmux's tmux-compatible CLI through its own `psmux` binary, via
-pwsh) and `tmux-windows` (#85; drives the tmux-windows port) — both subclass
-`BaseTmuxBackend` and both register for `win32`, which is exactly why selection is
+Three native-Windows candidates now exist, and they are **not stages of one plan**.
+Two are **sibling tmux-family backends**: `psmux` has **shipped in-tree** (drives
+psmux's tmux-compatible CLI through its own `psmux` binary, via pwsh) while
+`tmux-windows` (#85; drives the tmux-windows port) is still in flight — both subclass
+`BaseTmuxBackend` and both register for `win32`, which is why selection is
 availability-aware with discriminating `available()` probes (psmux →
 `which("psmux") and which("pwsh")` plus a version gate excluding releases ≤ 3.3.6, whose
 teardown can force-kill a recycled PID; tmux-windows →

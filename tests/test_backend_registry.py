@@ -82,15 +82,21 @@ def fresh_registry(monkeypatch):
 
 def test_default_matches_platform(fresh_registry, monkeypatch):
     """No override → the loop's platform match picks the right builtin (tmux
-    registers ``p != 'win32'``, psmux ``p == 'win32'``), not just the bottom
-    fallback. Both legs are pinned regardless of the host OS; the lru_cache is
-    cleared between them so the second selection actually re-runs."""
+    registers ``p != 'win32'``, psmux ``p == 'win32'``) through the
+    platform-default branch, not the bottom fallback (which returns the same
+    class when the backend is unavailable, so the reason must be asserted).
+    Both legs are pinned regardless of the host OS."""
+    monkeypatch.setattr(PsmuxMultiplexer, "available", lambda self: True)
     monkeypatch.setattr(sys, "platform", "win32")
-    assert isinstance(fresh_registry.get_multiplexer(), PsmuxMultiplexer)
+    backend, name, reason = fresh_registry._select()
+    assert isinstance(backend, PsmuxMultiplexer)
+    assert (name, reason) == ("psmux", "platform-default")
 
-    fresh_registry.get_multiplexer.cache_clear()
+    monkeypatch.setattr(TmuxMultiplexer, "available", lambda self: True)
     monkeypatch.setattr(sys, "platform", "linux")
-    assert isinstance(fresh_registry.get_multiplexer(), TmuxMultiplexer)
+    backend, name, reason = fresh_registry._select()
+    assert isinstance(backend, TmuxMultiplexer)
+    assert (name, reason) == ("tmux", "platform-default")
 
 
 def test_env_override_selects_named_backend(fresh_registry, monkeypatch):
