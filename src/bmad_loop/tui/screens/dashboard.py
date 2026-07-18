@@ -378,7 +378,7 @@ class DashboardScreen(Screen[None]):
             self._pin_task = task
         self._tick(force_rescan=False)
 
-    def _scroll_log_to(self, attempts: int = 20) -> None:
+    def _scroll_log_to(self, attempts: int = 20, finalize: bool = False) -> None:
         jump = self._pending_jump
         if jump is None or jump[0] != self._displayed_log_task:
             # jump cancelled or superseded, or the pane re-rendered another
@@ -415,7 +415,22 @@ class DashboardScreen(Screen[None]):
             return
         viewport = max(1, log.scrollable_content_region.height)
         log.scroll_to(y=max(0, target - viewport // 2), animate=False)
-        self._pending_jump = None  # landed: release so later renders don't re-jump
+        if finalize:
+            self._pending_jump = None  # landed: release so later renders don't re-jump
+            return
+        # The open height gate proves the reveal flush *wrote* — not that its
+        # scroll drained: RichLog.on_resize replays the deferred writes, whose
+        # scroll_end goes through call_after_refresh, so a tail-scroll can
+        # still be queued on the log's pump while scroll_to (immediate on a
+        # ScrollView) already landed. Releasing here would let that queued
+        # scroll stomp the jump with nothing left to re-attempt it. Route the
+        # release through the same queue instead: FIFO puts the finalize fire
+        # after any queued stomp, and it re-scrolls to the recomputed target
+        # before letting go. If its guards bail (log reset mid-window), the
+        # jump stays pending for the next ≤1s tick.
+        log.call_after_refresh(
+            lambda: (self._scroll_log_to(finalize=True) if self._pending_jump is jump else None)
+        )
 
     def action_unpin_log(self) -> None:
         if self._resize_mode:  # Escape leaves resize mode before it unpins the log

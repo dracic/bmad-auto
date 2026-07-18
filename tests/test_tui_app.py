@@ -580,14 +580,71 @@ async def test_journal_jump_retry_recomputes_line_after_same_task_repaint(projec
         log.virtual_size = Size(80, 500)
         scrolls = []
         log.scroll_to = lambda *a, **kw: scrolls.append((a, kw))
+        finalizes = []
+        log.call_after_refresh = lambda cb, *a, **kw: finalizes.append(cb)
         captured[0]()  # the delayed retry fires
-        del log.scroll_to
         viewport = max(1, log.scrollable_content_region.height)
         expected = max(0, (fresh_line + 1) - viewport // 2)
         stale = max(0, (stale_line + 1) - viewport // 2)
         assert scrolls == [((), {"y": expected, "animate": False})]
         assert expected != stale  # the recompute is what moved the target
+        # the release rides the log's queue (stomp ordering) — still pending here
+        assert screen._pending_jump is not None and len(finalizes) == 1
+        finalizes[0]()  # the queued finalize fire re-scrolls and releases
+        del log.scroll_to, log.call_after_refresh
+        assert scrolls == [((), {"y": expected, "animate": False})] * 2
         assert screen._pending_jump is None  # landed: the jump is released
+
+
+async def test_journal_jump_release_survives_flush_scroll_end_stomp(project):
+    # The reveal flush replays a hidden RichLog's deferred writes: virtual_size
+    # grows synchronously (opening _scroll_log_to's height gate) but the
+    # flushed write's scroll_end is only *queued* via call_after_refresh.
+    # ScrollView.scroll_to applies immediately, so a fire in that window used
+    # to land, release the jump, and then get stomped to the tail by the
+    # queued scroll with nothing left to re-attempt — the win-py3.11 CI
+    # failure. The release now rides the same queue: the finalize fire drains
+    # after the stomp, re-scrolls to the recomputed target, then lets go.
+    # Deterministic: the finalize callback is captured and the stomp is
+    # replayed by hand between the immediate scroll and the finalize.
+    root = project.project
+    run_dir = make_run(root, "20260611-100000-aaaa", alive=True)
+    offsets = write_numbered_log(run_dir, "story-1")
+    journal = Journal(run_dir)
+    journal.set_active_log("story-1")
+    journal.append("session-start", task_id="story-1")
+    app = BmadLoopApp(root)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        screen = dashboard(app)
+        await until(pilot, lambda: screen.selected_run_id == "20260611-100000-aaaa")
+        await until(
+            pilot,
+            lambda: screen._displayed_log_task == "story-1" and screen._log_index is not None,
+        )
+        log = screen.query_one("#log", RichLog)
+        screen._pending_jump = ("story-1", offsets[100])
+        screen._log_follow_tail = False
+        # the flush just wrote (gate open) but its scroll_end is still queued
+        log.virtual_size = Size(80, 500)
+        scrolls = []
+        log.scroll_to = lambda *a, **kw: scrolls.append((a, kw))
+        finalizes = []
+        log.call_after_refresh = lambda cb, *a, **kw: finalizes.append(cb)
+        screen._scroll_log_to(attempts=0)
+        viewport = max(1, log.scrollable_content_region.height)
+        line = screen._log_index.line_for_offset(offsets[100])
+        expected = max(0, (line + 1) - viewport // 2)
+        assert scrolls == [((), {"y": expected, "animate": False})]  # landed...
+        assert screen._pending_jump is not None  # ...but the jump is not released
+        assert len(finalizes) == 1
+        # the queued flush scroll_end drains first and stomps to the tail
+        log.scroll_y = 400
+        finalizes[0]()  # FIFO on the log's pump: finalize fires after the stomp
+        del log.scroll_to, log.call_after_refresh
+        # the finalize fire re-scrolled to the recomputed target, then let go
+        assert scrolls == [((), {"y": expected, "animate": False})] * 2
+        assert screen._pending_jump is None  # only now is the jump released
 
 
 async def test_journal_enter_without_position_notifies(project):
