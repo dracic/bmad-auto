@@ -18,6 +18,7 @@ from . import (
     decisions,
     deferredwork,
     install,
+    machine,
 )
 from . import policy as policy_mod
 from . import (
@@ -1422,17 +1423,33 @@ def cmd_decisions(args: argparse.Namespace) -> int:
 STATUS_SCHEMA_VERSION = 1
 
 
+def _run_token_totals(state: RunState) -> tuple[int, int, float]:
+    """Run-level token totals as ``(raw, weighted, weight)``.
+
+    The weight is the run's persisted snapshot — never live policy — so the
+    figures match what the run actually enforced; the TUI and the run summary
+    agree (see Engine.summary). Weighted is the sum of per-task weighted
+    totals (sum-of-rounds), never a weighted_total of the summed counters:
+    two tasks of 101 cache reads at weight 0.5 weigh 50 + 50 = 100, not
+    round(202 * 0.5) = 101.
+    """
+    weight = state.cache_read_weight()
+    raw = sum(t.tokens.total for t in state.tasks.values())
+    weighted = sum(t.tokens.weighted_total(weight) for t in state.tasks.values())
+    return raw, weighted, weight
+
+
 def _status_document(state: RunState) -> dict[str, object]:
     """The `status --json` document: the stable machine-readable contract.
 
-    Unlike the human-readable status text (best-effort, free to change), this
-    shape is an API: changes must be additive; anything breaking bumps
-    STATUS_SCHEMA_VERSION (same convention as diagnostics.SCHEMA_VERSION).
-    Everything here is derived from state.json alone — never from live policy
-    or other project files — so a consumer can reproduce the document, and the
-    weight matches what the run actually enforced (see Engine.summary).
+    Obeys the pure-document contract in machine.py (additive-only evolution;
+    anything breaking bumps STATUS_SCHEMA_VERSION), unlike the human-readable
+    status text, which is best-effort and free to change. Everything here is
+    derived from state.json alone — never from live policy or other project
+    files — so a consumer can reproduce the document, and the weight matches
+    what the run actually enforced (see _run_token_totals).
     """
-    weight = state.cache_read_weight()
+    raw_total, weighted_total, weight = _run_token_totals(state)
     if state.finished:
         status = "finished"
     elif state.paused:
@@ -1476,10 +1493,8 @@ def _status_document(state: RunState) -> dict[str, object]:
         "paused_story_key": state.paused_story_key,
         "cache_read_weight": weight,
         "tokens": {
-            "raw": sum(t.tokens.total for t in state.tasks.values()),
-            # Per-task summation, same as Engine.summary: sum-of-rounds, never
-            # a weighted_total of the summed counters.
-            "weighted": sum(t.tokens.weighted_total(weight) for t in state.tasks.values()),
+            "raw": raw_total,
+            "weighted": weighted_total,
         },
         "tasks": tasks,
     }
@@ -1500,7 +1515,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 1
     state = load_state(run_dir)
     if args.json:
-        print(json.dumps(_status_document(state), indent=2))
+        machine.emit(_status_document(state))
         return 0
     kind = f" [{state.run_type}]" if state.run_type != "story" else ""
     print(f"run {state.run_id}{kind}  started {state.started_at}")
@@ -1510,12 +1525,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"status: PAUSED ({state.paused_stage}) — {state.paused_reason}")
     else:
         print("status: in progress (or interrupted)")
-    # From the run's persisted snapshot, so this matches the TUI and the run
-    # summary exactly (see Engine.summary). Per-task summation, same reason.
-    weight = state.cache_read_weight()
-    raw_total = sum(t.tokens.total for t in state.tasks.values())
+    raw_total, weighted_total, weight = _run_token_totals(state)
     if raw_total:
-        weighted_total = sum(t.tokens.weighted_total(weight) for t in state.tasks.values())
         print(
             f"tokens: {weighted_total:,} weighted "
             f"({raw_total:,} raw incl. cache reads, cache_read_weight {weight})"
@@ -2184,11 +2195,7 @@ def main(argv: list[str] | None = None) -> int:
 
     status_p = add("status", cmd_status, "show run + sprint state")
     status_p.add_argument("run_id", nargs="?")
-    status_p.add_argument(
-        "--json",
-        action="store_true",
-        help="emit a machine-readable JSON document instead of text",
-    )
+    machine.add_json_flag(status_p, "run state")
 
     diag_p = add(
         "diagnose",

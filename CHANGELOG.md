@@ -144,6 +144,12 @@ breaking changes may land in a minor release.
 
 ### Changed
 
+- **Machine-output (`--json`) contract codified in `machine.py`.** The pure-document conventions
+  from #190 — one JSON object on stdout, inline `schema_version`, additive-only evolution,
+  errors → stderr with empty stdout — now live in one module with shared `emit`/`add_json_flag`
+  helpers; `status --json` uses them (output byte-identical) and the duplicated token-total math
+  folded into `_run_token_totals`. `diagnose`/`probe-adapter --json` keep their older
+  report+fenced-block form for now (#195); `--json` adoption on more commands is tracked in #196.
 - **Backend-neutral naming for the seam-backed helpers and operator messages.** The multiplexer
   seam has non-tmux backends now, so the helpers that wrap it drop their legacy tmux names —
   `launch.tmux_available` → `mux_available`, `app._tmux_missing` → `_mux_missing`,

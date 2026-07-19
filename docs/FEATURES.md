@@ -183,7 +183,7 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 - `bmad-loop resolve <run-id>` — resolve a CRITICAL escalation, then re-arm + resume (`--story`, `--no-interactive`, `--restore-patch <path>` for intent-gap patch-restore, `--resume`/`--no-resume`).
 - `bmad-loop decisions` — answer deferred-work decisions past sweeps left unanswered (`--list` to just show them).
 - `bmad-loop list` (`ls`) — list every run/sweep with its short ref, type, and status.
-- `bmad-loop status [<run-id>]` — run + sprint summary with per-story token totals, cost-weighted with the raw count alongside. `--json` instead emits a stable machine-readable document (schema-versioned; run state, snapshot `cache_read_weight`, per-story phase/attempt/review-cycle/tokens/commit/defer-reason) — the supported surface for scripts; the text output is best-effort.
+- `bmad-loop status [<run-id>]` — run + sprint summary with per-story token totals, cost-weighted with the raw count alongside. `--json` instead emits a stable machine-readable document (schema-versioned; run state, snapshot `cache_read_weight`, per-story phase/attempt/review-cycle/tokens/commit/defer-reason) per the [contract below](#machine-readable-output---json) — the supported surface for scripts; the text output is best-effort.
 - `bmad-loop diagnose [<run-id>]` (`diag`) — emit a sanitized diagnostic dump of a run/sweep to hand maintainers (histograms, counts, env, file sizes — no code/spec/prompts/paths/PII); a stray pseudonymized identifier is auto-substituted with its alias (disclosed in the report), while PII/secret hits still refuse to emit; defaults to the latest run (`--all`, `--out`, `--json`, `--max-journal-entries`).
 - `bmad-loop attach [<run-id>]` — tmux-attach to a run's live agent session.
 - `bmad-loop stop <run-id>` — stop a live run (engine + agent session).
@@ -194,3 +194,7 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 - `bmad-loop tui` — the interactive dashboard (`--low-frame-rate` for slow/SSH links).
 - `bmad-loop probe-adapter <cli>` (`collect-adapter-data`) — collect + sanitize adapter-finalization data for a CLI profile; default zero-launch scan, opt-in `--probe` live capture.
 - Every command takes `--project <dir>` (default: current directory). Any `<run-id>` accepts a partial — the tail after the last `-`, shortened to any unique prefix.
+
+### Machine-readable output (`--json`)
+
+A command's `--json` mode emits exactly one JSON object on stdout and nothing else — no trailers, no fenced blocks. Every document carries an inline integer `schema_version` owned by that command; evolution is additive-only, and anything breaking bumps the version. Errors never produce a partial or error document: the message goes to stderr, stdout stays empty, and the exit code is nonzero — so stdout is always either one complete valid document or empty. The contract is codified in `src/bmad_loop/machine.py`. Exception: `diagnose --json` and `probe-adapter --json` predate the contract and append a fenced JSON block to their text report instead; unifying them is tracked in [#195](https://github.com/bmad-code-org/bmad-loop/issues/195).
