@@ -170,6 +170,13 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
 
 ### Fixed
 
+- **`diagnose` leak self-check is now recoverable (#186).** A stray pseudonymized
+  identifier (a per-field routing gap) is repaired by substituting its alias and disclosed
+  in the report and on stderr, instead of refusing to emit any dump; residual failures name
+  `sensitive[<ns>:<alias>]` instead of an opaque index, and the local `--legend` file is
+  written even on refusal so the operator can decode it. PII/secret/path/username hits
+  still fail closed.
+
 - **Deferred-work bundles that adopt an existing story spec pass the baseline gate (#161).** A
   "follow-up review of story X" bundle is routed by `bmad-dev-auto` into that story's done
   spec, whose `baseline_revision` is the story's original dev baseline — necessarily older

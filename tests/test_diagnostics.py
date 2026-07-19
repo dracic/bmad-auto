@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import re
 
+import pytest
+
 from bmad_loop import diagnostics, sanitize
 from bmad_loop.journal import Journal, save_state
 from bmad_loop.model import Phase, RunState, SessionRecord, StoryTask, TokenUsage
@@ -242,3 +244,88 @@ def test_unreadable_run_does_not_crash(project):
     assert diag.runs[0].warnings  # flagged as unreadable
     # still renders without raising
     diagnostics.render_markdown(diag, pseudo=pseudo)
+
+
+# ------------------------------------------------------ backstop repair (#186)
+
+
+def _seed_routing_gap(project):
+    """A run whose journal carries a real story key in an UNLISTED field — the
+    _scrub_entry else-branch gap: identifier-shaped, so scrub_json passes it
+    verbatim while its aliased twin put the original into the legend."""
+    return _seed_run(
+        project.project,
+        extra_journal=[("custom-event", {"mystery_ref": STORY_KEY})],
+    )
+
+
+def test_routing_gap_is_repaired_end_to_end(project):
+    run_dir = _seed_routing_gap(project)
+    pseudo = sanitize.Pseudonymizer()
+    diag = diagnostics.collect([run_dir], pseudo=pseudo)
+    reps: list[tuple[str, int]] = []
+    js = diagnostics.render_json(diag, pseudo=pseudo, repairs=reps)  # must not raise
+    alias = next(a for ns, orig, a in pseudo.entries() if orig == STORY_KEY)
+    assert STORY_KEY not in js
+    assert alias in js
+    # the repair is disclosed in the dump itself and reported to the caller
+    assert json.loads(js)["backstop_repairs"] == {f"story:{alias}": 1}
+    assert reps == [(f"story:{alias}", 1)]
+    for canary in CANARIES:
+        assert canary not in js, f"LEAK after repair: {canary!r}"
+
+
+def test_no_repairs_on_fully_routed_run(project):
+    """The canonical seeded run needs ZERO repairs — the repair path must never
+    silently normalize a new per-field routing gap (CI keeps catching them)."""
+    run_dir = _seed_run(project.project)
+    pseudo = sanitize.Pseudonymizer()
+    diag = diagnostics.collect([run_dir], pseudo=pseudo)
+    reps: list[tuple[str, int]] = []
+    md = diagnostics.render_markdown(diag, pseudo=pseudo, repairs=reps)
+    js = diagnostics.render_json(diag, pseudo=pseudo, repairs=reps)
+    assert reps == []
+    assert "Backstop repairs" not in md
+    assert "backstop_repairs" not in js
+
+
+def test_guard_hard_rules_still_fail_closed():
+    pseudo = sanitize.Pseudonymizer()
+    with pytest.raises(diagnostics.LeakDetected) as exc:
+        diagnostics._guard("contact victim.canary@example.com", pseudo)
+    assert "email" in exc.value.rules
+    # a hard rule alongside a repairable one: refuse immediately, and the
+    # sensitive rule rides along under its printable ns:alias label
+    key_alias = pseudo.alias(STORY_KEY, ns="story", epic=1)
+    with pytest.raises(diagnostics.LeakDetected) as exc:
+        diagnostics._guard(f"{STORY_KEY} contact victim.canary@example.com", pseudo)
+    assert "email" in exc.value.rules
+    assert f"sensitive[story:{key_alias}]" in exc.value.rules
+    assert STORY_KEY not in str(exc.value)
+
+
+def test_repair_note_is_inside_verified_bytes(project):
+    """The disclosure appended after repair is itself covered by the self-check."""
+    run_dir = _seed_routing_gap(project)
+    pseudo = sanitize.Pseudonymizer()
+    diag = diagnostics.collect([run_dir], pseudo=pseudo)
+    js = diagnostics.render_json(diag, pseudo=pseudo)
+    extras = [(orig, f"{ns}:{alias}") for ns, orig, alias in pseudo.entries()]
+    assert sanitize.assert_no_leak(js, extra=extras) == []
+
+
+class _CyclicPseudo(sanitize.Pseudonymizer):
+    """Adversarial stand-in: each alias embeds the OTHER original at a "-"
+    boundary, so every substitution reintroduces the other value — a cycle a
+    real Pseudonymizer could only produce by hash-output coincidence."""
+
+    def entries(self):
+        return [
+            ("story", "alpha-key", "s1-beta-key"),
+            ("branch", "beta-key", "branch-alpha-key"),
+        ]
+
+
+def test_repair_loop_bound_terminates_and_fails_closed():
+    with pytest.raises(diagnostics.LeakDetected):
+        diagnostics._guard("ref alpha-key end", _CyclicPseudo())

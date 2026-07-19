@@ -1811,6 +1811,70 @@ def test_diagnose_legend_written_locally(project, tmp_path):
     assert STORY_KEY not in out_file.read_text()  # but the dump never carries it
 
 
+def test_diagnose_refusal_branch(project, tmp_path, capsys, monkeypatch):
+    """A hard-rule leak refuses to emit: rc 1, no dump written, actionable hint."""
+    from test_diagnostics import _seed_run
+
+    from bmad_loop import diagnostics
+
+    _seed_run(project.project)
+
+    def boom(*a, **k):
+        raise diagnostics.LeakDetected(["email"])
+
+    monkeypatch.setattr(diagnostics, "render_markdown", boom)
+    out_file = tmp_path / "diag.md"
+    rc = cli.main(["diagnose", "--project", str(project.project), "--out", str(out_file)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "refusing to emit" in err and "email" in err
+    assert "--legend" in err  # the hint names the local decode path
+    assert not out_file.exists()
+
+
+def test_diagnose_legend_written_on_failure(project, tmp_path, capsys, monkeypatch):
+    """On refusal the legend still lands locally — it decodes sensitive[<ns>:<alias>]."""
+    import os as os_mod
+
+    from test_diagnostics import STORY_KEY, _seed_run
+
+    from bmad_loop import diagnostics
+
+    _seed_run(project.project)
+
+    def boom(*a, **k):
+        raise diagnostics.LeakDetected(["sensitive[story:s1-deadbeef0000]"])
+
+    monkeypatch.setattr(diagnostics, "render_markdown", boom)
+    legend_file = tmp_path / "legend.json"
+    rc = cli.main(["diagnose", "--project", str(project.project), "--legend", str(legend_file)])
+    assert rc == 1
+    legend = json.loads(legend_file.read_text())
+    assert STORY_KEY in legend.values()
+    if os_mod.name == "posix":
+        assert (legend_file.stat().st_mode & 0o077) == 0  # still owner-only
+
+
+def test_diagnose_repair_warns_but_emits(project, tmp_path, capsys):
+    """A stray pseudonymized original is repaired: rc 0, dump emitted, disclosed."""
+    from test_diagnostics import CANARIES, STORY_KEY, _seed_run
+
+    _seed_run(
+        project.project,
+        extra_journal=[("custom-event", {"mystery_ref": STORY_KEY})],
+    )
+    out_file = tmp_path / "diag.md"
+    rc = cli.main(["diagnose", "--project", str(project.project), "--json", "--out", str(out_file)])
+    assert rc == 0
+    report = out_file.read_text()
+    for canary in CANARIES:
+        assert canary not in report, f"LEAK via CLI: {canary!r}"
+    assert "backstop_repairs" in report  # disclosed in the JSON block
+    err = capsys.readouterr().err
+    assert "backstop" in err and "story:" in err
+    assert STORY_KEY not in err  # the warning names labels, never originals
+
+
 # ---- validate platform preflight (routes through the multiplexer + host seams) ----
 
 
