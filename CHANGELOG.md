@@ -9,6 +9,11 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **`bmad-loop list --json` (#192).** A stable, schema-versioned JSON document — one entry
+  per run, oldest first (short ref, run id, type, started-at, liveness-aware status, paused
+  stage) — replaces the text table when passed. Unparseable runs are included as status
+  `unknown`, and an empty runs dir yields a valid empty document with exit 0.
+
 - **`bmad-loop status --json` (#190).** A stable, schema-versioned JSON document (run
   id/type/source, derived status + pause fields, snapshot `cache_read_weight`, raw +
   weighted token totals, and per-story phase/attempt/review-cycle/tokens/commit/defer

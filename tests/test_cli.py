@@ -552,6 +552,10 @@ def _status_json(project, capsys, *extra_args):
     )
 
 
+def _list_json(project, capsys):
+    return _machine_json(["list", "--project", str(project.project), "--json"], capsys)
+
+
 def test_status_json_emits_pure_document(project, capsys):
     from bmad_loop.model import Phase, StoryTask, TokenUsage
 
@@ -718,6 +722,98 @@ def test_list_shows_short_refs(project, capsys):
 def test_list_no_runs(project, capsys):
     assert cli.main(["list", "--project", str(project.project)]) == 0
     assert "no runs found" in capsys.readouterr().out
+
+
+def _make_list_run(project, run_id, **state_kwargs):
+    """A run whose state.json pins one of the deterministic list statuses
+    (finished/paused/stopped/crashed) — running/interrupted would probe pid
+    liveness and flake."""
+    from bmad_loop.journal import save_state
+    from bmad_loop.model import RunState
+
+    run_dir = project.project / ".bmad-loop" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    save_state(
+        run_dir,
+        RunState(run_id=run_id, project=str(project.project), **state_kwargs),
+    )
+    return run_dir
+
+
+def test_list_json_emits_pure_document(project, capsys):
+    from bmad_loop import runs
+
+    _make_list_run(project, "20260101-000000-aaaa", started_at="2026-01-01T00:00:00", finished=True)
+    _make_list_run(
+        project,
+        "20260102-000000-bbbb",
+        started_at="2026-01-02T00:00:00",
+        run_type="sweep",
+        stopped=True,
+    )
+
+    doc = _list_json(project, capsys)
+    assert doc["schema_version"] == cli.LIST_SCHEMA_VERSION == 1
+    first, second = doc["runs"]  # oldest first, like the table
+    assert first == {
+        "ref": runs.short_ref("20260101-000000-aaaa"),
+        "run_id": "20260101-000000-aaaa",
+        "run_type": "story",
+        "started_at": "2026-01-01T00:00:00",
+        "status": "finished",
+        "paused_stage": "",
+    }
+    assert second == {
+        "ref": runs.short_ref("20260102-000000-bbbb"),
+        "run_id": "20260102-000000-bbbb",
+        "run_type": "sweep",
+        "started_at": "2026-01-02T00:00:00",
+        "status": "stopped",
+        "paused_stage": "",
+    }
+
+
+def test_list_json_empty_runs_is_valid_empty_document(project, capsys):
+    """No runs is a valid empty document with exit 0 — never the text
+    "no runs found" (which would corrupt the stream; exit-code parity holds)."""
+    doc = _list_json(project, capsys)
+    assert doc == {"schema_version": 1, "runs": []}
+
+
+def test_list_json_unparseable_state_reported_unknown(project, capsys):
+    """A corrupt state.json still lists — enumeration scripts must see every
+    run dir, same as the table."""
+    run_dir = project.project / ".bmad-loop" / "runs" / "20260101-000000-cccc"
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text("{not json", encoding="utf-8")
+
+    doc = _list_json(project, capsys)
+    (entry,) = doc["runs"]
+    assert entry["ref"] == "cccc"
+    assert entry["run_id"] == "20260101-000000-cccc"
+    assert entry["run_type"] == "?"
+    assert entry["started_at"] == ""
+    assert entry["status"] == "unknown"
+    assert entry["paused_stage"] == ""
+
+
+def test_list_json_paused_run_carries_stage(project, capsys):
+    """paused_stage is a bonus field the text table drops — emitted verbatim
+    when paused."""
+    from bmad_loop.model import PAUSE_ESCALATION
+
+    _make_list_run(
+        project,
+        "20260101-000000-aaaa",
+        started_at="2026-01-01T00:00:00",
+        paused_reason="dev session escalated",
+        paused_stage=PAUSE_ESCALATION,
+    )
+
+    doc = _list_json(project, capsys)
+    (entry,) = doc["runs"]
+    assert entry["status"] == "paused"
+    assert entry["paused_stage"] == PAUSE_ESCALATION
 
 
 def test_attach_records_return_pane_inside_tmux(project, monkeypatch):
