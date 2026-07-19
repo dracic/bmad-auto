@@ -67,7 +67,9 @@ register_multiplexer("psmux", lambda platform: platform == "win32", PsmuxMultipl
 
 A forced name (1–2) bypasses both the platform predicate and `available()` — an
 explicit choice is trusted — and fails loudly when it matches no registered
-backend. `bmad-loop mux` lists every registered backend with its availability,
+backend. Launch preflights and TUI observers share one forced-aware gate
+(`mux_usable()`), which warns once on stderr when a forced backend probes
+unavailable instead of silently proceeding or refusing. `bmad-loop mux` lists every registered backend with its availability,
 version, and the current selection. (The result is cached — see
 [Testing a port](#testing-a-port).)
 
@@ -100,9 +102,11 @@ out-of-tree adapter is
 - **Extend `BaseTmuxBackend`** (`adapters/tmux_base.py`) for a **tmux-family**
   backend. `BaseTmuxBackend` holds every argv construction and routes every spawn
   through one primitive, `_run(argv, *, check=..., env=...)`. A native-Windows
-  "psmux" that speaks a tmux-like CLI sets the `_ENCODING` class attribute for
-  output decoding (e.g. `"utf-8"`) and passes a per-call `env=` where needed —
-  overriding `_run()` itself only to tweak the binary or timeout — plus the
+  "psmux" that speaks a tmux-like CLI sets the `_BINARY` class attribute to the
+  binary it drives (every spawn, PATH probe, and in-source client verb follows
+  it) and the `_ENCODING` class attribute for output decoding (e.g. `"utf-8"`),
+  and passes a per-call `env=` where needed — overriding `_run()` itself only
+  to tweak the timeout — plus the
   shell-dialect hooks that `new_window` / `new_parked_window` compose from
   (`_shell_wrap`, `_join_argv`, `_parked_trailer`, `_source_prefix`,
   `_window_launch` and the `_EXIT_CAPTURE`/`_ECHO`/`_PARK` fragments) —
@@ -137,32 +141,42 @@ validate preflight (seam 4).
 ### Availability discriminators (same-platform backends)
 
 Selection consults `available()`, so it must be a **cheap, side-effect-free
-probe** (PATH lookups — never a spawn), and `factory()` must be a plain
+probe** — PATH lookups, plus at most one bounded version query when usability
+genuinely depends on the installed version — and `factory()` must be a plain
 constructor: `detect_multiplexers()` instantiates every registered backend just
 to list it. When two backends claim the same platform, their `available()`
 probes should be **pairwise discriminating** — otherwise both report usable and
 only the platform default / registration order separates them in listings and
-selection. The contract for the two native-Windows tmux-family backends in
-flight (both drive a binary literally named `tmux`, and `tmux -V` cannot tell
-them apart):
+selection. The bundled psmux backend discriminates by construction: it drives
+psmux's distinctly-named binary (`_BINARY = "psmux"`), so it never claims some
+other tmux-family install that owns the `tmux` name. Its probe also
+version-gates — psmux releases up to 3.3.6 can force-kill a recycled PID during
+teardown, so an old or unidentifiable version reads as unavailable (`psmux -V`
+keeps the `tmux X.Y.Z` output format deliberately):
 
 ```python
-# psmux ships a distinctly-named psmux.exe alongside its tmux shim:
 class PsmuxMultiplexer(BaseTmuxBackend):
-    def available(self) -> bool:
-        return all(shutil.which(b) for b in ("psmux", "tmux", "pwsh"))
+    _BINARY = "psmux"
 
-# tmux-windows has no marker binary of its own — it is "tmux without psmux":
+    def available(self) -> bool:
+        if not all(shutil.which(exe) for exe in ("psmux", "pwsh")):
+            return False
+        reported = re.match(r"tmux (\d+)\.(\d+)(?:\.(\d+))?", self.version() or "")
+        return bool(reported) and tuple(int(part or 0) for part in reported.groups()) > (3, 3, 6)
+
+# a sibling that owns the `tmux` name (e.g. a tmux-windows port) discriminates
+# against psmux explicitly:
 class WindowsTmuxMultiplexer(BaseTmuxBackend):
     def available(self) -> bool:
         return shutil.which("tmux") is not None and shutil.which("psmux") is None
 ```
 
-Do **not** inherit `BaseTmuxBackend.available()` (`which("tmux")` alone) for a
-same-platform sibling: selection would still break the tie via the platform
-default, but `bmad-loop mux` and the validate preflight would list both as
-available when only one actually drives the installed binary. A host with an
-ambiguous install resolves it explicitly: `bmad-loop mux set <name>`.
+Do **not** inherit `BaseTmuxBackend.available()` (a bare `which` on `_BINARY`)
+for a same-platform sibling that shares a binary name: selection would still
+break the tie via the platform default, but `bmad-loop mux` and the validate
+preflight would list both as available when only one actually drives the
+installed binary. A host with an ambiguous install resolves it explicitly:
+`bmad-loop mux set <name>`.
 
 A backend from a **different binary family** sidesteps this problem entirely.
 The external herdr adapter probes `shutil.which("herdr")` — a distinct binary

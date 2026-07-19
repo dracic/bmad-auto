@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 from .. import runs
-from ..adapters.multiplexer import MultiplexerError, get_multiplexer
+from ..adapters.multiplexer import MultiplexerError, get_multiplexer, mux_usable
 from ..journal import Journal
 
 CTL_SESSION = "bmad-loop-ctl"
@@ -32,7 +32,10 @@ class LaunchError(Exception):
 
 
 def mux_available() -> bool:
-    return get_multiplexer().available()
+    # Forced-aware (mux_usable, not raw available()): a pinned backend must look
+    # the same to observers (attach, ctl-window lookup, prune) as it does to the
+    # launch preflight, or a launched run becomes invisible to the rest of the TUI.
+    return mux_usable(get_multiplexer())
 
 
 def session_exists(session: str) -> bool:
@@ -128,7 +131,7 @@ def return_attached_client() -> bool:
     The option is then cleared so the post-exit return trailer doesn't fire a
     second time. Returns True iff a client was actually returned."""
     mux = get_multiplexer()
-    if not mux.available():
+    if not mux_usable(mux):
         return False
     win = mux.current_window_id()
     if win is None:
@@ -198,7 +201,7 @@ def _ctl_window_candidates(project: Path) -> list[tuple[str, str]]:
     window is only a candidate when its run dir exists under this project.
     """
     mux = get_multiplexer()
-    if not mux.available() or not session_exists(CTL_SESSION):
+    if not mux_usable(mux) or not session_exists(CTL_SESSION):
         return []
     current = mux.current_window_id()
     rows = mux.list_windows(CTL_SESSION, ["window_id", "window_name", runs.PROJECT_OPTION])
@@ -275,8 +278,11 @@ def start_detached(project: Path, argv_tail: list[str], run_id: str, kind: str) 
     unambiguously (window names collide when several kinds share a run_id).
     """
     mux = get_multiplexer()
-    if not mux.available():
-        raise LaunchError("multiplexer backend unavailable (binary not on PATH)")
+    if not mux_usable(mux):
+        raise LaunchError(
+            "multiplexer backend unavailable (binary missing, version unsupported, "
+            "or a required helper absent)"
+        )
     _ensure_ctl_session(project)
     try:
         win_id = (

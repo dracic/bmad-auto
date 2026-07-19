@@ -100,7 +100,7 @@ ROLES = ("dev", "review", "triage")
 
 def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIAdapter]:
     from .adapters.generic import GenericAdapter, GenericDevAdapter
-    from .adapters.multiplexer import get_multiplexer
+    from .adapters.multiplexer import get_multiplexer, mux_usable
     from .adapters.profile import ProfileError, get_profile
 
     # The dev skill (bmad-dev-auto) writes no result.json: its adapter
@@ -108,9 +108,7 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
     # find that spec — rebasing onto the active worktree's implementation-
     # artifacts dir under isolation, not just the main checkout's.
     paths = bmadconfig.load_paths(project)
-    # One shared terminal-multiplexer backend for every role's adapter.
-    mux = get_multiplexer()
-
+    mux = None
     adapters: dict[str, CodingCLIAdapter] = {}
     by_cfg: dict = {}
     for role in ROLES:
@@ -153,6 +151,21 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
                 except OpencodeServerError as e:
                     raise SystemExit(f"error: {e}") from e
             else:
+                # Resolve and probe the shared multiplexer only when a profile
+                # actually uses it; hookless HTTP/SSE runs need no transport.
+                if mux is None:
+                    mux = get_multiplexer()
+                    if not mux_usable(mux):
+                        try:
+                            version = mux.version()
+                        except Exception:  # noqa: BLE001 — diagnosing must not mask the refusal
+                            version = None
+                        raise SystemExit(
+                            f"error: multiplexer backend {type(mux).__name__} is not usable on "
+                            f"this host (reported version: {version}); its transport binary is "
+                            "missing, the version is unsupported, or a required helper is "
+                            "absent (psmux needs `pwsh` on PATH); see `bmad-loop diagnose`"
+                        )
                 common = dict(
                     run_dir=run_dir,
                     policy=policy,
@@ -200,9 +213,13 @@ def _platform_preflight() -> tuple[list[str], list[str]]:
             version = backend.version()
             notes.append(f"multiplexer {label} available" + (f" ({version})" if version else ""))
         else:
+            version = backend.version()
             problems.append(
-                f"multiplexer {label} unavailable — its transport binary is not on PATH; "
-                f"see `bmad-loop diagnose`"
+                f"multiplexer {label} unavailable"
+                + (f" (reports {version})" if version else "")
+                + " — its transport binary is missing, the version is unsupported, or a "
+                "required helper is absent (psmux needs `pwsh` on PATH); "
+                "see `bmad-loop diagnose`"
             )
     except Exception as e:  # noqa: BLE001 — selection or readiness must not abort validate
         problems.append(f"multiplexer preflight failed: {e}")
@@ -329,8 +346,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 notes.append(f"httpx available for {profile.name}")
             else:
                 problems.append(
-                    f"{profile.name}: httpx not installed — "
-                    f"run `pip install 'bmad-loop[opencode]'`"
+                    f"{profile.name}: httpx not installed — run `pip install 'bmad-loop[opencode]'`"
                 )
             continue
         hook_config = project / profile.hooks.config_path
@@ -474,16 +490,19 @@ def _mux_set(project: Path, args: argparse.Namespace) -> int:
         return 1
     if row is not None and not row.available:
         # Deliberate choice = trusted (same doctrine as the env override), but
-        # say so: the run will fail loudly if the binary never appears.
+        # say so: a pinned backend bypasses the availability gate at launch
+        # (with a warning there too — see multiplexer.mux_usable), so a
+        # version-gated binary would otherwise run into its gated defect.
         print(
-            f"warning: backend {args.name!r} is not available on this host (its "
-            "transport binary is not on PATH); persisted anyway — `bmad-loop validate` "
-            "will report it",
+            f"warning: backend {args.name!r} is not available on this host (transport "
+            "binary missing, version unsupported, or a required helper like `pwsh` "
+            "absent); persisted anyway — launches will proceed with a warning, and "
+            "`bmad-loop validate` will report it",
             file=sys.stderr,
         )
     if os.environ.get("BMAD_LOOP_MUX_BACKEND"):
         print(
-            "note: BMAD_LOOP_MUX_BACKEND is set in this shell and outranks the " "persisted choice",
+            "note: BMAD_LOOP_MUX_BACKEND is set in this shell and outranks the persisted choice",
             file=sys.stderr,
         )
     policy_mod.write_mux_backend(path, args.name)  # a junk name raises PolicyError → main()

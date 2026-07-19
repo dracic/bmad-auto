@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from bmad_loop.adapters import tmux_base
+from bmad_loop.adapters.multiplexer import get_multiplexer
 from bmad_loop.tui import launch
 
 # Every test here asserts tmux-specific argv/behaviour through the multiplexer
@@ -48,7 +49,12 @@ def fake_run(monkeypatch) -> FakeRun:
     fake = FakeRun()
     monkeypatch.setattr(tmux_base.subprocess, "run", fake)
     monkeypatch.setattr(tmux_base.shutil, "which", lambda name: f"/usr/bin/{name}")
-    return fake
+    # These tests pin the POSIX tmux argv shapes; force that backend so they
+    # hold on hosts where platform selection would pick another (win32 → psmux).
+    monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "tmux")
+    get_multiplexer.cache_clear()
+    yield fake
+    get_multiplexer.cache_clear()
 
 
 def expected_cli(*tail: str) -> str:
@@ -186,10 +192,33 @@ def test_existing_ctl_session_reused(monkeypatch, tmp_path: Path):
 
 
 def test_launch_without_mux_raises(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("BMAD_LOOP_MUX_BACKEND", raising=False)
+    get_multiplexer.cache_clear()
     monkeypatch.setattr(tmux_base.shutil, "which", lambda name: None)
     assert not launch.mux_available()
     with pytest.raises(launch.LaunchError, match="multiplexer backend unavailable"):
         launch.start_run_detached(tmp_path, "RID")
+
+
+def test_forced_launch_bypasses_availability(fake_run, monkeypatch, capsys, tmp_path: Path):
+    from bmad_loop.adapters import multiplexer as mux_mod
+
+    monkeypatch.setattr(mux_mod, "_FORCED_UNUSABLE_WARNED", False)
+    monkeypatch.setattr(tmux_base.shutil, "which", lambda name: None)
+    launch.start_run_detached(tmp_path, "RID")
+    assert fake_run.by_verb("new-window")
+    # trusted, but not silently: the bypass names itself once on stderr
+    assert "forced multiplexer backend" in capsys.readouterr().err
+
+
+def test_observers_follow_forced_backend(fake_run, monkeypatch):
+    """The observer gates (mux_available feeds attach/ctl-window/prune) must
+    share the launch preflight's forced-aware rule — launch working while
+    attach reports "nothing to attach to" would be a silent split."""
+    from bmad_loop.adapters import multiplexer as mux_mod
+
+    monkeypatch.setattr(mux_mod, "_usable", lambda mux: False)
+    assert launch.mux_available() is True  # fake_run's fixture forces tmux by env
 
 
 def test_new_window_failure_raises(monkeypatch, tmp_path: Path):
@@ -483,6 +512,12 @@ def test_return_attached_client_noop_when_unset(monkeypatch):
 
 
 def test_return_attached_client_noop_without_tmux(monkeypatch):
+    # This is a NEGATIVE gate test: the module-wide force_tmux_backend pin makes
+    # mux_usable trust the backend regardless of available(), so drop the pin
+    # (and the pinned selection) or — inside a real tmux session, TMUX set —
+    # the trusted path reaches display-message and shells out after all.
+    monkeypatch.delenv("BMAD_LOOP_MUX_BACKEND", raising=False)
+    get_multiplexer.cache_clear()
     ran: list = []
     monkeypatch.setattr(tmux_base.shutil, "which", lambda name: None)
     monkeypatch.setattr(tmux_base.subprocess, "run", lambda *a, **k: ran.append(a))

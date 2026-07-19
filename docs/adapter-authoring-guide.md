@@ -26,11 +26,13 @@ These are independent and abstracted separately:
 - **Transport axis** — `TerminalMultiplexer` (`adapters/multiplexer.py`): how
   sessions, windows, and panes are created, observed, and torn down. The generic
   adapter never shells out itself — it goes through `self.mux`, obtained from
-  `get_multiplexer()`. The one backend today is tmux: argv construction and the
-  single spawn primitive live in `BaseTmuxBackend` (`adapters/tmux_base.py`), with
-  the thin POSIX leaf `TmuxMultiplexer` (`adapters/tmux_backend.py`); together they
-  are the **only** files allowed to invoke `tmux` (and the only place POSIX-shell
-  trailers live). A future non-POSIX backend (e.g. a native-Windows "psmux")
+  `get_multiplexer()`. The bundled family is tmux-shaped: argv construction and
+  the single spawn primitive live in `BaseTmuxBackend` (`adapters/tmux_base.py`),
+  with the thin POSIX leaf `TmuxMultiplexer` (`adapters/tmux_backend.py`) and the
+  native-Windows leaf `PsmuxMultiplexer` (`adapters/psmux_backend.py`), which
+  points the same spawn seam at psmux's own binary via the `_BINARY` class
+  attribute; the base and its POSIX leaf are the **only** files allowed to invoke
+  `tmux` (and the only place POSIX-shell trailers live). Any other backend
   registers itself via `register_multiplexer(...)` and slots in behind
   `get_multiplexer()` with no change to the adapters. A backend author reads
   `multiplexer.py` for the contract and `tmux_backend.py` / `tmux_base.py` for the

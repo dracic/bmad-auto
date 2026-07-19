@@ -3,11 +3,11 @@
 The coding-CLI adapter (:class:`~.base.CodingCLIAdapter`) abstracts *which CLI*
 to drive and how its prompts/hooks work. This module abstracts the orthogonal
 **transport** axis: how sessions, windows, and panes are created, observed, and
-torn down. The one bundled backend is tmux
-(:class:`~.tmux_backend.TmuxMultiplexer`); every other backend lives out-of-tree
-(the reference is the herdr adapter, https://github.com/pbean/bmad-loop-adapter-herdr;
-an eventual native-Windows "psmux" is the same shape) and slots in without the
-rest of the codebase shelling out to ``tmux`` directly.
+torn down. The bundled backends are tmux
+(:class:`~.tmux_backend.TmuxMultiplexer`) and the native-Windows psmux
+(:class:`~.psmux_backend.PsmuxMultiplexer`); every other backend lives out-of-tree
+(the reference is the herdr adapter, https://github.com/pbean/bmad-loop-adapter-herdr)
+and slots in without the rest of the codebase shelling out to ``tmux`` directly.
 
 ``TerminalMultiplexer`` is the contract a backend author implements. Operation
 names mirror today's call sites verbatim so the migration is mechanical. Backends
@@ -271,9 +271,9 @@ _BUILTINS_LOADED = False
 _CONFIGURED: tuple[str, Path | None] | None = None
 
 # Per-platform default backend name, consulted only when that backend is both
-# registered AND available on this host. Naming a backend that never registers
-# is deliberate and harmless: psmux is an out-of-tree backend today, so on a
-# win32 host without it the default simply doesn't apply.
+# registered AND available on this host. psmux is a bundled builtin (registered
+# below), so on a win32 host it applies whenever psmux reports available; if it
+# isn't, selection falls through to the first platform match / fallback.
 _PLATFORM_DEFAULTS: dict[str, str] = {"win32": "psmux"}
 _DEFAULT_BACKEND = "tmux"  # every platform not listed above
 
@@ -292,9 +292,10 @@ def register_multiplexer(
 
 
 def _load_builtin_backends() -> None:
-    """Register the bundled backends — today, tmux alone (every other backend is
-    out-of-tree and arrives via :func:`_load_external_backends` or a manual
-    import). Idempotent and lazy (called from :func:`get_multiplexer`, not at
+    """Register the bundled backends — tmux (POSIX) and psmux (native Windows);
+    every other backend is out-of-tree and arrives via
+    :func:`_load_external_backends` or a manual import. Idempotent and lazy
+    (called from :func:`get_multiplexer`, not at
     module import) to stay cycle-safe. Registers inline rather than via
     tmux_backend's import side effect so the registry can be cleared and
     re-loaded deterministically (a re-import is a no-op once cached) —
@@ -302,12 +303,16 @@ def _load_builtin_backends() -> None:
     global _BUILTINS_LOADED
     if _BUILTINS_LOADED:
         return
+    from .psmux_backend import PsmuxMultiplexer
     from .tmux_backend import TmuxMultiplexer
 
     # tmux is the default everywhere except native Windows (no tmux binary there);
     # get_multiplexer still falls back to tmux when no backend matches. Builtins
     # register before externals, so tmux keeps first-wins on any name collision.
     register_multiplexer("tmux", lambda platform: platform != "win32", TmuxMultiplexer)
+    # psmux speaks the tmux CLI through its own distinctly-named binary, so
+    # native Windows gets the tmux-family backend with a PowerShell dialect.
+    register_multiplexer("psmux", lambda platform: platform == "win32", PsmuxMultiplexer)
     _BUILTINS_LOADED = True  # set only after a successful import so a transient failure retries
 
 
@@ -390,6 +395,52 @@ def _usable(backend: TerminalMultiplexer) -> bool:
         return False
 
 
+def backend_forced() -> bool:
+    """True when selection is pinned by the env var or the policy choice.
+
+    A forced name bypasses ``available()`` throughout (an explicit choice is
+    trusted; the backend fails loudly if it can't run), so launch preflights
+    that refuse an unusable backend must stand down for it too — via
+    :func:`mux_usable`, which stands down loudly."""
+    return bool(os.environ.get("BMAD_LOOP_MUX_BACKEND")) or _CONFIGURED is not None
+
+
+_FORCED_UNUSABLE_WARNED = False
+
+
+def mux_usable(backend: TerminalMultiplexer | None = None) -> bool:
+    """The one usability gate for launch preflights and TUI observers
+    (attach, liveness, prune): the backend probes available, or its selection
+    is forced. Every gate must share this rule — if launch trusts a forced
+    backend but observers don't, a launched run becomes invisible to the rest
+    of the TUI with no error anywhere.
+
+    A forced backend that probes unavailable is still trusted, but says so
+    once per process on stderr: a missing binary fails loudly on first use
+    anyway, while a version-gated binary works right up until the gated defect
+    fires — proceeding must not be silent."""
+    global _FORCED_UNUSABLE_WARNED
+    if backend is None:
+        backend = get_multiplexer()
+    if _usable(backend):
+        return True
+    if not backend_forced():
+        return False
+    if not _FORCED_UNUSABLE_WARNED:
+        _FORCED_UNUSABLE_WARNED = True
+        try:
+            version = backend.version()
+        except Exception:  # noqa: BLE001 — a broken probe must not break the warning
+            version = None
+        print(
+            f"warning: forced multiplexer backend {type(backend).__name__} reports "
+            f"unavailable (version: {version!r}); proceeding because the choice is "
+            "pinned — a version-gated backend can misbehave mid-run",
+            file=sys.stderr,
+        )
+    return True
+
+
 def _select() -> tuple[TerminalMultiplexer, str, str]:
     """Resolve the backend by precedence; returns ``(instance, name, reason)``.
 
@@ -415,8 +466,7 @@ def _select() -> tuple[TerminalMultiplexer, str, str]:
         factory = _factory_by_name(forced)
         if factory is None:
             raise MultiplexerError(
-                f"BMAD_LOOP_MUX_BACKEND={forced!r} matches no registered backend; "
-                f"known: {_known()}"
+                f"BMAD_LOOP_MUX_BACKEND={forced!r} matches no registered backend; known: {_known()}"
             )
         return factory(), forced, "env"
     if _CONFIGURED is not None:
