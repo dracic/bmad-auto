@@ -169,12 +169,13 @@ def same_commit(a: str, b: str) -> bool:
 def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
     """True when `ancestor` is an ancestor of (or equal to) `descendant`.
 
-    Any git failure — unknown ref, shallow history, not a repo — reads as
+    Any git failure — unknown ref, shallow history, not a repo, a timeout
+    (surfacing as GitError since `_run_git` translates it, #156) — reads as
     False: callers use this to *relax* a gate, so uncertainty must keep the
     gate strict."""
     try:
         code, _ = _git(repo, "merge-base", "--is-ancestor", ancestor, descendant)
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, GitError):
         return False
     return code == 0
 

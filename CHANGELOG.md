@@ -170,6 +170,25 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
 
 ### Fixed
 
+- **Deferred-work bundles that adopt an existing story spec pass the baseline gate (#161).** A
+  "follow-up review of story X" bundle is routed by `bmad-dev-auto` into that story's done
+  spec, whose `baseline_revision` is the story's original dev baseline — necessarily older
+  than the bundle's worktree cut, so the exact-match gate failed every such bundle after the
+  session had already done its work. The bundle gate now accepts a claimed baseline that is
+  an _ancestor_ of the orchestrator-recorded one (the session diffed a superset of the
+  unit's changes); diverged or unknown baselines still fail, any git fault in the probe
+  reads as not-an-ancestor, and sprint/stories modes keep the exact-match requirement.
+
+- **A failed attempt inside a unit worktree auto-recovers instead of pausing with in-place
+  instructions (#161).** The mid-drive dev retry was the only recovery path without an
+  isolation guard: with `rollback_on_failure = false` it paused the run with manual-recovery
+  instructions aimed at the operator's checkout — whose HEAD _is_ the baseline under
+  worktree isolation, while the commits sat on the unit branch, so following them literally
+  did nothing and invited a destructive reset of a tree the attempt never touched. A mounted
+  unit worktree is disposable: the attempt's commits are parked on `attempt-preserve/` refs
+  and the worktree resets regardless of the flag, which gates in-place (`isolation = "none"`)
+  recovery only. The remaining reachable pauses name their tree (`git -C "<root>" …`).
+
 - **A failed worktree teardown no longer crashes the run after the merge landed (#139).** When a
   process the just-ended session left running (e.g. pytest recreating `.pytest_cache`) makes
   `git worktree remove` fail with ENOTEMPTY, git still drops its admin entry, so the `force=True`

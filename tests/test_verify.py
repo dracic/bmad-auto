@@ -460,6 +460,26 @@ def test_verify_dev_bundle_foreign_baseline_still_fails(project):
     assert not out.ok and "baseline" in out.reason
 
 
+def test_verify_dev_bundle_ancestor_probe_git_failure_stays_strict(project, monkeypatch):
+    """A git failure inside the ancestor probe (e.g. a timeout, which surfaces
+    as GitError since #156's `_run_git` translation) must read as
+    not-an-ancestor and fail the gate closed — never propagate out of
+    `_verify_shared_gates` and crash the run."""
+    ancestor = verify.rev_parse_head(project.project)
+    (project.project / "story-work.txt").write_text("stories 1.1-1.3\n")
+    git(project.project, "add", "-A")
+    git(project.project, "commit", "-q", "-m", "story work")
+    task = make_bundle_task(project, dw_ids=("DW-1",))
+    sp = project.implementation_artifacts / "spec-1-1-a.md"
+    write_spec(sp, "in-review", ancestor)
+    (project.project / "src.txt").write_text("review fixes\n")
+    rj = {"workflow": "auto-dev", "spec_file": str(sp), "dw_ids": ["DW-1"]}
+    monkeypatch.setattr(verify.subprocess, "run", _timing_out_run)
+    assert verify.is_ancestor(project.project, ancestor, task.baseline_commit) is False
+    out = verify.verify_dev_bundle(task, project, rj)
+    assert not out.ok and "baseline" in out.reason
+
+
 def test_verify_dev_sprint_ancestor_baseline_still_fails(project):
     """The ancestor relaxation is bundle-only: a sprint-mode dev spec is
     authored by this session, so its baseline must match the orchestrator's
