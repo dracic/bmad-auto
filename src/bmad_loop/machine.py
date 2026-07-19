@@ -21,9 +21,11 @@ a redirect from a failure, and do not treat rc 0 as a promise of bytes to parse.
 That file is held to the same standard as the stream: :func:`write_document` is
 the only way it is written, and validates exactly as :func:`emit_document` does.
 
-All four ``--json`` commands — ``status``, ``list``, ``diagnose`` and
-``probe-adapter`` — share this contract; there is no exception (#195 removed the
-last two, which used to append a fenced JSON block to a markdown/text report).
+Every command that takes ``--json`` shares this contract; there is no exception
+(#195 removed the last two, ``diagnose`` and ``probe-adapter``, which used to
+append a fenced JSON block to a markdown/text report). A command adopting the
+flag adopts the whole of it — the contract is the flag's meaning, not a style
+the earlier commands happen to follow.
 
 Two ways in, by what the caller already holds:
 
