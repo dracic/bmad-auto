@@ -39,7 +39,7 @@ from .platform_util import MAX_SEGMENT
 from .process_host import ProcessHostError
 from .runs import RUNS_DIR
 from .stories_engine import StoriesEngine
-from .sweep import SweepEngine
+from .sweep import Decision, SweepEngine
 
 if TYPE_CHECKING:
     from .tui.data import RunInfo
@@ -1382,6 +1382,52 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     return _resume_paused_run(project, run_dir)
 
 
+DECISIONS_SCHEMA_VERSION = 1
+
+
+def _decisions_document(pending: list[Decision]) -> dict[str, object]:
+    """The `decisions --json` document: every pending decision, in DW order.
+
+    Obeys the pure-document contract in machine.py (additive-only evolution;
+    anything breaking bumps DECISIONS_SCHEMA_VERSION). A pure projection of
+    pending_missed_decisions(), and a lossless one — unlike the `--list` text,
+    which drops `context` outright and shows only key/label/effect of each
+    option, hiding the `intent`/`resolution`/`bundle_name` that decide what a
+    sweep actually builds or writes. A caller answering by policy needs those,
+    so the document carries the whole dataclass.
+
+    `recommended` is the derived form of the decision's `recommendation` key,
+    so a consumer never has to cross-reference two fields (the text encodes it
+    as a "(recommended)" suffix on a free-text line). Exactly one option
+    carries it when the recommendation names a real key. Nothing pending is a
+    valid empty document with exit 0, never an error.
+    """
+    return {
+        "schema_version": DECISIONS_SCHEMA_VERSION,
+        "decisions": [
+            {
+                "id": d.id,
+                "question": d.question,
+                "context": d.context,
+                "recommendation": d.recommendation,
+                "options": [
+                    {
+                        "key": opt.key,
+                        "label": opt.label,
+                        "effect": opt.effect,
+                        "intent": opt.intent,
+                        "resolution": opt.resolution,
+                        "bundle_name": opt.bundle_name,
+                        "recommended": opt.key == d.recommendation,
+                    }
+                    for opt in d.options
+                ],
+            }
+            for d in pending
+        ],
+    }
+
+
 def cmd_decisions(args: argparse.Namespace) -> int:
     """Answer deferred-work decisions earlier sweeps left unanswered (skipped by
     an unattended sweep, or an interactive one that was abandoned). Answers are
@@ -1394,6 +1440,13 @@ def cmd_decisions(args: argparse.Namespace) -> int:
     except bmadconfig.BmadConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    if args.json:
+        # Before the empty-set early return (nothing pending is a valid empty
+        # document, not the text line), and regardless of --list: --json *is*
+        # the listing. It cannot fall through to the prompter, which reads stdin
+        # and prints per-answer progress — neither survives a pure document.
+        machine.emit(_decisions_document(pending))
+        return 0
     if not pending:
         print("no unanswered decisions from past sweeps")
         return 0
@@ -2281,6 +2334,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="list the pending decisions without answering them",
     )
+    machine.add_json_flag(decisions_p, "pending decisions")
 
     list_p = add("list", cmd_list, "list runs/sweeps with their short ref", aliases=["ls"])
     machine.add_json_flag(list_p, "run listing")

@@ -9,6 +9,16 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **`bmad-loop decisions --json` (#203).** A stable, schema-versioned JSON document of the
+  pending deferred-work decisions, so a script can select an option by policy and pre-answer
+  it rather than scraping the numbered text. It is strictly richer than that text, which drops
+  each decision's `context` and shows only key/label/effect per option — hiding the `intent`,
+  `resolution` and `bundle_name` that decide what the next sweep actually builds or writes.
+  The recommendation, a `(recommended)` suffix on a free-text line in the text form, becomes a
+  derived boolean on the option it names. `--json` implies the listing and never prompts (the
+  interactive prompter reads stdin and cannot coexist with a pure document), and nothing
+  pending is a valid empty document with exit 0.
+
 - **`bmad-loop list --json` (#192).** A stable, schema-versioned JSON document — one entry
   per run, oldest first (short ref, run id, type, started-at, liveness-aware status, paused
   stage) — replaces the text table when passed. Unparseable runs are included as status

@@ -355,6 +355,167 @@ def test_decisions_list(project, capsys):
     assert "[1] Widen — build  (recommended)" in out
 
 
+def _decisions_json(project, capsys, *extra_args, **kwargs):
+    return machine_json(
+        ["decisions", "--project", str(project.project), "--json", *extra_args], capsys, **kwargs
+    )
+
+
+def _make_run_with_rich_decision(project, run_id="20260101-000000-aaaa"):
+    """A triage whose options populate every DecisionOption field, including the
+    three (`intent`, `resolution`, `bundle_name`) the `--list` text never shows."""
+    run_dir = project.project / ".bmad-loop" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "project": str(project.project),
+                "started_at": "now",
+                "run_type": "sweep",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "triage.json").write_text(
+        json.dumps(
+            {
+                "workflow": "deferred-sweep-triage",
+                "open_ids": ["DW-1"],
+                "already_resolved": [],
+                "bundles": [],
+                "blocked": [],
+                "skip": [],
+                "decisions": [
+                    {
+                        "id": "DW-1",
+                        "question": "build the widening?",
+                        "context": "the parser only accepts ASCII keys",
+                        "options": [
+                            {
+                                "key": "1",
+                                "label": "Widen",
+                                "effect": "build",
+                                "intent": "accept unicode keys",
+                                "bundle_name": "unicode-keys",
+                            },
+                            {
+                                "key": "2",
+                                "label": "Close",
+                                "effect": "close",
+                                "resolution": "ASCII is the documented contract",
+                            },
+                        ],
+                        "recommendation": "2",
+                    }
+                ],
+                "escalations": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_decisions_json_emits_pure_document(project, capsys):
+    """Every field round-trips, including the three the `--list` text drops:
+    Decision.context, and each option's intent / resolution / bundle_name — the
+    fields that decide what a sweep actually builds or writes, and which a
+    caller answering by policy has no other way to read."""
+    from conftest import write_ledger
+
+    install_bmad_config(project)
+    write_ledger(project, {"DW-1": "open"})
+    _make_run_with_rich_decision(project)
+
+    doc = _decisions_json(project, capsys, "--list")
+    assert doc["schema_version"] == cli.DECISIONS_SCHEMA_VERSION == 1
+    (decision,) = doc["decisions"]
+    assert decision == {
+        "id": "DW-1",
+        "question": "build the widening?",
+        "context": "the parser only accepts ASCII keys",
+        "recommendation": "2",
+        "options": [
+            {
+                "key": "1",
+                "label": "Widen",
+                "effect": "build",
+                "intent": "accept unicode keys",
+                "resolution": "",
+                "bundle_name": "unicode-keys",
+                "recommended": False,
+            },
+            {
+                "key": "2",
+                "label": "Close",
+                "effect": "close",
+                "intent": "",
+                "resolution": "ASCII is the documented contract",
+                "bundle_name": "",
+                "recommended": True,
+            },
+        ],
+    }
+
+
+def test_decisions_json_marks_exactly_one_option_recommended(project, capsys):
+    """`recommended` is derived from the recommendation key, so it can never
+    disagree with it — and it lands on the recommended option, not merely the
+    first. The text form encodes this as a suffix on a free-text line."""
+    from conftest import write_ledger
+
+    install_bmad_config(project)
+    write_ledger(project, {"DW-1": "open"})
+    _make_run_with_rich_decision(project)
+
+    (decision,) = _decisions_json(project, capsys, "--list")["decisions"]
+    recommended = [o for o in decision["options"] if o["recommended"]]
+    assert [o["key"] for o in recommended] == [decision["recommendation"]] == ["2"]
+
+
+def test_decisions_json_empty_is_valid_empty_document(project, capsys):
+    """Nothing pending is a valid empty document with exit 0 — never the text
+    "no unanswered decisions from past sweeps", which would corrupt the stream.
+    Empty stdout is reserved for errors (same call `list --json` made in #192)."""
+    from conftest import write_ledger
+
+    install_bmad_config(project)
+    write_ledger(project, {"DW-1": "done 2026-06-01"})
+
+    assert _decisions_json(project, capsys, "--list") == {"schema_version": 1, "decisions": []}
+
+
+def test_decisions_json_without_list_emits_document_and_never_prompts(project, capsys, monkeypatch):
+    """--json implies the listing: with pending decisions and no --list, the
+    text form would construct the interactive DecisionPrompter and read stdin,
+    which no pure document can survive. Both paths are booby-trapped, so a
+    fall-through fails loudly here instead of hanging a caller's pipeline."""
+    from conftest import write_ledger
+
+    install_bmad_config(project)
+    write_ledger(project, {"DW-1": "open"})
+    _make_run_with_rich_decision(project)
+
+    def _boom(*a, **k):
+        raise AssertionError("--json must not reach the interactive prompter")
+
+    monkeypatch.setattr("bmad_loop.sweep.DecisionPrompter", _boom)
+    monkeypatch.setattr("builtins.input", _boom)
+
+    doc = _decisions_json(project, capsys)  # no --list
+    assert [d["id"] for d in doc["decisions"]] == ["DW-1"]
+
+
+def test_decisions_json_config_error_leaves_stdout_empty(project, capsys):
+    """A missing BMAD config exits 1 with the message on stderr and stdout
+    empty — a consumer piping to a parser sees the failure in the exit code,
+    never a partial or non-JSON document."""
+    assert cli.main(["decisions", "--project", str(project.project), "--json", "--list"]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "error:" in err
+
+
 def test_decisions_answer_records_and_carries_forward(project, capsys, monkeypatch):
     from conftest import write_ledger
 
