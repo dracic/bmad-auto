@@ -512,6 +512,12 @@ def test_return_attached_client_noop_when_unset(monkeypatch):
 
 
 def test_return_attached_client_noop_without_tmux(monkeypatch):
+    # This is a NEGATIVE gate test: the module-wide force_tmux_backend pin makes
+    # mux_usable trust the backend regardless of available(), so drop the pin
+    # (and the pinned selection) or — inside a real tmux session, TMUX set —
+    # the trusted path reaches display-message and shells out after all.
+    monkeypatch.delenv("BMAD_LOOP_MUX_BACKEND", raising=False)
+    get_multiplexer.cache_clear()
     ran: list = []
     monkeypatch.setattr(tmux_base.shutil, "which", lambda name: None)
     monkeypatch.setattr(tmux_base.subprocess, "run", lambda *a, **k: ran.append(a))

@@ -22,7 +22,7 @@ from textual.binding import Binding
 from tomlkit.exceptions import ParseError
 
 from .. import bmadconfig, decisions, devcontract, policy, resolve, runs, stories, verify
-from ..adapters.multiplexer import MultiplexerError
+from ..adapters.multiplexer import MultiplexerError, mux_usable
 from ..journal import load_state
 from ..model import (
     PAUSE_EPIC_BOUNDARY,
@@ -969,5 +969,13 @@ class BmadLoopApp(App[None]):
 
 
 def run_tui(project: Path) -> int:
+    # Trip the once-per-process forced-backend warning while stderr is still the
+    # real terminal: Textual captures sys.stderr for the app's whole run, so a
+    # first firing inside the app (any observer gate) would consume the single
+    # emission invisibly. Selection errors stay loud at their real call sites.
+    try:
+        mux_usable()
+    except MultiplexerError:
+        pass
     BmadLoopApp(project).run()
     return 0

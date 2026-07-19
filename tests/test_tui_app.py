@@ -2429,3 +2429,61 @@ async def test_quit_in_resize_mode_persists_geometry(project):
         # Leave without Escape: shutdown unmounts the screen, which persists.
     saved = policy_mod.load(root / ".bmad-loop" / "policy.toml").tui
     assert saved.left_width == 38  # 34 + 4
+
+
+def test_run_tui_trips_forced_warning_before_app_capture(monkeypatch, capsys, tmp_path):
+    """The forced-backend usability warning is once-per-process on stderr, and
+    Textual captures sys.stderr for the app's whole run — so run_tui must trip
+    the warning (and its latch) BEFORE App.run, or a first firing inside the
+    app (any observer gate) consumes the single emission invisibly."""
+    from bmad_loop.adapters import multiplexer as mux_mod
+    from bmad_loop.tui import app as tui_app
+
+    monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "tmux")
+    monkeypatch.setattr(mux_mod, "_usable", lambda mux: False)
+    monkeypatch.setattr(mux_mod, "_FORCED_UNUSABLE_WARNED", False)
+    mux_mod.get_multiplexer.cache_clear()
+
+    stderr_at_run: list[str] = []
+
+    class _StubApp:
+        def __init__(self, _project):
+            pass
+
+        def run(self):
+            # snapshot what already reached stderr when the app takes over
+            stderr_at_run.append(capsys.readouterr().err)
+
+    monkeypatch.setattr(tui_app, "BmadLoopApp", _StubApp)
+    try:
+        assert tui_app.run_tui(tmp_path) == 0
+    finally:
+        mux_mod.get_multiplexer.cache_clear()  # don't leak the forced pick
+    assert stderr_at_run and "forced multiplexer backend" in stderr_at_run[0]
+
+
+def test_run_tui_survives_junk_forced_backend(monkeypatch, tmp_path):
+    """A junk forced name makes selection raise MultiplexerError; the preflight
+    must swallow it (the same junk name still fails loudly at every real mux
+    call site) so the TUI itself can still come up."""
+    from bmad_loop.adapters import multiplexer as mux_mod
+    from bmad_loop.tui import app as tui_app
+
+    monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "no-such-backend")
+    mux_mod.get_multiplexer.cache_clear()
+
+    ran: list[bool] = []
+
+    class _StubApp:
+        def __init__(self, _project):
+            pass
+
+        def run(self):
+            ran.append(True)
+
+    monkeypatch.setattr(tui_app, "BmadLoopApp", _StubApp)
+    try:
+        assert tui_app.run_tui(tmp_path) == 0
+    finally:
+        mux_mod.get_multiplexer.cache_clear()
+    assert ran == [True]
