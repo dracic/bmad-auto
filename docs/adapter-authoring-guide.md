@@ -164,8 +164,8 @@ bmad-loop probe-adapter <cli> --probe --project .  # opt-in live capture
 
 ## Two modes
 
-Both modes emit the **same single sanitized report** (markdown to stdout, or to a
-file with `--out`; add `--json` for a machine-readable block).
+Both modes emit the **same single sanitized finding** (markdown to stdout, or to a
+file with `--out`; `--json` emits it as a machine-readable JSON document instead).
 
 ### SCAN (default — no process launch)
 
@@ -291,8 +291,8 @@ reason; the convention glob is the fallback.
 | `--binary NAME`     | Binary to probe for a CLI that has no profile yet (enables a reduced report).    |
 | `--model NAME`      | Model passed to the probe turn (PROBE mode).                                     |
 | `--timeout SECONDS` | Probe turn timeout (default 90).                                                 |
-| `--out FILE`        | Write the report to a file instead of stdout (the only file the command writes). |
-| `--json`            | Append a machine-readable JSON block to the report.                              |
+| `--out FILE`        | Write the output to a file instead of stdout (the only file the command writes). |
+| `--json`            | Emit a machine-readable JSON document _instead of_ the report (honours `--out`). |
 | `--keep-temp`       | (hidden, debug) keep the raw probe temp dir — prints a "do not share" warning.   |
 
 Exit codes mirror `validate`: `0` whenever a report is produced (warnings are

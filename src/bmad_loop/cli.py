@@ -1887,6 +1887,9 @@ def cmd_probe(args: argparse.Namespace) -> int:
     from .adapters.profile import ProfileError, get_profile
 
     project = _project(args)
+    # What this invocation actually produces — the operator messages below say
+    # "report" only when a report was rendered; --json renders a document.
+    noun = "document" if args.json else "report"
     hints = probe_mod.Hints(
         binary=args.binary,
         transcript=args.transcript,
@@ -1901,7 +1904,11 @@ def cmd_probe(args: argparse.Namespace) -> int:
         if not args.binary:
             print(f"FAIL: {e}", file=sys.stderr)
             return 1
-        print(f"  ok: unknown profile {args.cli!r}; reduced report from --binary {args.binary}")
+        # Human-facing notice — stderr in JSON mode, where stdout is the document.
+        print(
+            f"  ok: unknown profile {args.cli!r}; reduced {noun} from --binary {args.binary}",
+            file=sys.stderr if args.json else sys.stdout,
+        )
 
     if profile is not None and profile.hookless:
         print(
@@ -1928,17 +1935,33 @@ def cmd_probe(args: argparse.Namespace) -> int:
     else:
         finding = probe_mod.scan(cli=args.cli, profile=profile, project=project, hints=hints)
 
-    report = probe_mod.render_markdown(finding)
+    # One or the other, never both: --json selects the pure JSON document
+    # (machine.py contract), otherwise the human-readable markdown report.
     if args.json:
-        report = report + "\n\n## JSON\n\n```json\n" + probe_mod.render_json(finding) + "\n```\n"
+        report = probe_mod.render_json(finding)
+    else:
+        report = probe_mod.render_markdown(finding)
 
+    # Every `ok:` trailer is human-facing chatter, so in JSON mode it goes to
+    # stderr — stdout is the document alone, or empty when --out took it.
+    trailers = sys.stderr if args.json else sys.stdout
     if args.out:
         out_path = Path(args.out)
-        out_path.write_text(report, encoding="utf-8")
-        print(f"  ok: report written to {out_path} ({len(finding.warnings)} warning(s))")
+        # Trailing newline in JSON mode: same bytes the stdout form would emit.
+        out_path.write_text((report + "\n") if args.json else report, encoding="utf-8")
+        print(
+            f"  ok: {noun} written to {out_path} ({len(finding.warnings)} warning(s))",
+            file=trailers,
+        )
     else:
-        print(report)
-        print(f"  ok: {finding.mode} report for {args.cli} ({len(finding.warnings)} warning(s))")
+        if args.json:
+            machine.emit_document(report)
+        else:
+            print(report)
+        print(
+            f"  ok: {finding.mode} {noun} for {args.cli} ({len(finding.warnings)} warning(s))",
+            file=trailers,
+        )
     return 0
 
 
@@ -1967,13 +1990,24 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     fail_rules: list[str] | None = None
     report = ""
     try:
-        report = diagnostics.render_markdown(diag, pseudo=pseudo, repairs=repairs)
+        # Exactly one render — JSON mode skips render_markdown entirely. The
+        # warrant has two halves, and only the first is about coverage:
+        #   FIELDS: render_json's asdict() covers every field the markdown report
+        #     merely samples, so nothing escapes the guard by not being rendered.
+        #   ENCODING: json.dumps is NOT a faithful carrier of the bytes the guard
+        #     matches on — it doubles backslashes and (by default) escapes
+        #     non-ASCII, which silently defeated the absolute-home-path and
+        #     sensitive-value rules that the markdown pass used to catch. That is
+        #     closed at the source, not here: sanitize._ABS_HOME_RE now matches the
+        #     escaped separator too, and render_json dumps with ensure_ascii=False.
+        # So the JSON self-check is a superset in field coverage and equal in
+        # encoding fidelity — never rely on the field half alone.
+        # Dropping the second render also fixes a live double-count: both renders
+        # extend the same `repairs` list, inflating the warning ~2x.
         if args.json:
-            report += (
-                "\n\n## JSON\n\n```json\n"
-                + diagnostics.render_json(diag, pseudo=pseudo, repairs=repairs)
-                + "\n```\n"
-            )
+            report = diagnostics.render_json(diag, pseudo=pseudo, repairs=repairs)
+        else:
+            report = diagnostics.render_markdown(diag, pseudo=pseudo, repairs=repairs)
     except diagnostics.LeakDetected as e:
         fail_rules = e.rules
 
@@ -2021,8 +2055,18 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
 
     if args.out:
         out_path = Path(args.out)
-        out_path.write_text(report, encoding="utf-8")
-        print(f"  ok: sanitized diagnostics for {len(diag.runs)} run(s) written to {out_path}")
+        # Trailing newline in JSON mode so the file is byte-identical to what the
+        # stdout form (print) emits — same document either way, no fences.
+        out_path.write_text((report + "\n") if args.json else report, encoding="utf-8")
+        print(
+            f"  ok: sanitized diagnostics for {len(diag.runs)} run(s) written to {out_path}",
+            # JSON mode must leave stdout empty even when the document went to a
+            # file; text mode keeps the trailer on stdout, as before.
+            file=sys.stderr if args.json else sys.stdout,
+        )
+    elif args.json:
+        # Verbatim: these are the exact bytes render_json's self-check verified.
+        machine.emit_document(report)
     else:
         print(report)
     return 0
@@ -2137,8 +2181,11 @@ def main(argv: list[str] | None = None) -> int:
     probe_p.add_argument(
         "--timeout", type=float, default=90, help="probe turn timeout (default: 90s)"
     )
-    probe_p.add_argument("--out", help="write the report to this file instead of stdout")
-    probe_p.add_argument("--json", action="store_true", help="append a machine-readable JSON block")
+    probe_p.add_argument(
+        "--out",
+        help="write the output (report, or the JSON document with --json) to this file instead of stdout",
+    )
+    machine.add_json_flag(probe_p, "probe finding")
     probe_p.add_argument("--keep-temp", action="store_true", help=argparse.SUPPRESS)
 
     run_p = add("run", cmd_run, "run the orchestration loop")
@@ -2245,8 +2292,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     diag_p.add_argument("run_id", nargs="?", help="run ref (default: latest)")
     diag_p.add_argument("--all", action="store_true", help="dump every run in the project")
-    diag_p.add_argument("--out", help="write the report to this file instead of stdout")
-    diag_p.add_argument("--json", action="store_true", help="append a machine-readable JSON block")
+    diag_p.add_argument(
+        "--out",
+        help="write the output (report, or the JSON document with --json) to this file instead of stdout",
+    )
+    machine.add_json_flag(diag_p, "diagnostic dump")
     diag_p.add_argument(
         "--max-journal-entries",
         type=int,

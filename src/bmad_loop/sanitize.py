@@ -73,7 +73,13 @@ _SECRET_ENTROPY_MIN = 3.5  # bits/char; pure hex ~4.0, base64 ~6.0, prose/slug w
 # Token shape used by assert_no_leak to re-scan rendered output for secrets.
 _LEAK_TOKEN_RE = re.compile(r"[A-Za-z0-9._/+-]{6,}")
 _URL_CRED_RE = re.compile(r"https?://[^/\s]*:[^/@\s]+@")
-_ABS_HOME_RE = re.compile(r"/home/|/Users/|/root/|[A-Za-z]:\\Users\\", re.I)
+# The same bytes reach assert_no_leak either as raw text (the markdown report)
+# or as JSON text (the --json document), and json.dumps DOUBLES a backslash —
+# `C:\Users\alice` is serialized as `C:\\Users\\alice`. Matching only the raw
+# form let a Windows home path through the JSON render untouched, so the
+# separator alternates one-or-two backslashes. POSIX prefixes need no such
+# treatment: `/` is not escaped by JSON.
+_ABS_HOME_RE = re.compile(r"/home/|/Users/|/root/|[A-Za-z]:\\{1,2}Users\\{1,2}", re.I)
 
 _REDACTED_STR = "<redacted:str>"
 _REDACTED_SECRET = "<redacted:secret>"  # nosec B105 - redaction marker, not a credential

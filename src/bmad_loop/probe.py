@@ -18,6 +18,22 @@ Two strategies, one report shape:
   turn in a tmux window, capture each event's complete payload, then tear down. The
   raw capture exists only transiently inside the temp dir, which is ``rmtree``'d in a
   ``finally`` (even on exception / Ctrl-C).
+
+One finding, two render targets: :func:`render_markdown` for the human report
+(the CLI default) and :func:`render_json` for the machine-readable document that
+``--json`` emits instead (the :mod:`bmad_loop.machine` contract — one object on
+stdout, nothing else). The document carries :data:`SCHEMA_VERSION` as a top-level
+``schema_version``; do not confuse it with the document's ``version`` key, which
+holds the *probed CLI's* own ``--version`` output.
+
+Safety model — note how it differs from :mod:`bmad_loop.diagnostics`. Both route
+captured data through :mod:`bmad_loop.sanitize` at COLLECTION time, but only
+diagnostics adds an egress self-check (``assert_no_leak`` over its own rendered
+bytes, refusing to write on a hit). This module has **no such final backstop**:
+its safety rests entirely on the collection-time scrubbing being complete, so a
+new field that forgets to scrub would ship. That gap is real and tracked in
+https://github.com/bmad-code-org/bmad-loop/issues/199 — deliberately not fixed
+here, since a guard needs the pseudonymizer/repair machinery to be useful.
 """
 
 from __future__ import annotations
@@ -42,6 +58,10 @@ from .install import merge_hooks, relay_registered
 from .process_host import get_process_host
 from .signals import SignalWatcher
 from .tokens import _jsonl_entries, read_usage
+
+# Version of the `--json` document (machine.py contract). Distinct from the
+# document's `version` key, which holds the *probed CLI's* `--version` output.
+SCHEMA_VERSION = 1
 
 # Per-parser transcript-location conventions (from tokens.py docstrings).
 TRANSCRIPT_GLOBS = {
@@ -793,6 +813,7 @@ def render_json(f: ProfileFinding) -> str:
         }
 
     data = {
+        "schema_version": SCHEMA_VERSION,
         "cli": f.cli,
         "mode": f.mode,
         "known_profile": f.known_profile,
@@ -828,4 +849,6 @@ def render_json(f: ProfileFinding) -> str:
         "warnings": f.warnings,
         "next_steps": f.next_steps,
     }
-    return json.dumps(data, indent=2)
+    # sort_keys so two probes of the same CLI diff cleanly — the document has
+    # consumers now, and dict-literal order is an implementation detail.
+    return json.dumps(data, indent=2, sort_keys=True)

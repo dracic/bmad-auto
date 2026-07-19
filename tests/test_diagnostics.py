@@ -51,8 +51,14 @@ CANARIES = [
 ]
 
 
-def _seed_run(root, run_id="20260627-120000-aaaa", *, extra_journal=None):
-    """Build a run dir loaded with canaries in every readable sink."""
+def _seed_run(root, run_id="20260627-120000-aaaa", *, extra_journal=None, sweeps_triggered=()):
+    """Build a run dir loaded with canaries in every readable sink.
+
+    ``sweeps_triggered`` seeds a routing gap the MARKDOWN report can reach: the
+    collector passes identifier-shaped entries through verbatim, and the report
+    renders them inline. (``extra_journal`` seeds a gap only the JSON document
+    reaches — markdown renders journal aggregates, never per-entry fields.)
+    """
     run_dir = root / ".bmad-loop" / "runs" / run_id
 
     task = StoryTask(
@@ -107,6 +113,7 @@ def _seed_run(root, run_id="20260627-120000-aaaa", *, extra_journal=None):
         },
         plugin_shared={"unity": {"creds": SECRET_AWS}},
         tasks={STORY_KEY: task},
+        sweeps_triggered=list(sweeps_triggered),
     )
     save_state(run_dir, state)
 
@@ -279,6 +286,22 @@ def test_routing_gap_is_repaired_end_to_end(project):
         assert canary not in js, f"LEAK after repair: {canary!r}"
 
 
+def test_render_json_keys_are_sorted(project):
+    """`sort_keys=True` keeps two dumps diffable. Only object_pairs_hook can see
+    key ORDER — json.loads into a dict preserves insertion order, so a plain
+    round-trip cannot detect the flag being dropped."""
+    run_dir = _seed_run(project.project)
+    pseudo = sanitize.Pseudonymizer()
+    js = diagnostics.render_json(diagnostics.collect([run_dir], pseudo=pseudo), pseudo=pseudo)
+
+    def hook(pairs):
+        keys = [k for k, _ in pairs]
+        assert keys == sorted(keys), f"object keys not sorted: {keys}"
+        return dict(pairs)
+
+    json.loads(js, object_pairs_hook=hook)
+
+
 def test_no_repairs_on_fully_routed_run(project):
     """The canonical seeded run needs ZERO repairs — the repair path must never
     silently normalize a new per-field routing gap (CI keeps catching them)."""
@@ -316,6 +339,62 @@ def test_repair_note_is_inside_verified_bytes(project):
     js = diagnostics.render_json(diag, pseudo=pseudo)
     extras = [(orig, f"{ns}:{alias}") for ns, orig, alias in pseudo.entries()]
     assert sanitize.assert_no_leak(js, extra=extras) == []
+
+
+# ---- JSON-encoding fidelity of the guard (regression: #195 dropped the second render) ----
+#
+# Until `--json` became a pure document, EVERY dump was rendered to markdown too,
+# and that raw-text pass is what actually caught these two. Once JSON mode stopped
+# calling render_markdown, the JSON render became the only guard — and json.dumps
+# is not a faithful carrier of the bytes assert_no_leak matches on: it doubles
+# backslashes, and by default escapes non-ASCII to \uXXXX. Both evasions were live.
+#
+# These inject at the render boundary (the collector would scrub such a value long
+# before it got here, which is exactly why the escape only ever bites on a routing
+# gap — the case the backstop exists for). Everything downstream of _to_jsonable is
+# the real path: real json.dumps options, real _guard, real fail-closed behavior.
+
+
+def _render_json_over(monkeypatch, payload, *, pseudo=None):
+    monkeypatch.setattr(diagnostics, "_to_jsonable", lambda _d: payload)
+    return diagnostics.render_json(object(), pseudo=pseudo)
+
+
+def test_json_escaped_windows_home_path_still_fails_closed(monkeypatch):
+    """json.dumps doubles the separator: `C:\\Users\\x` serializes as `C:\\\\Users\\\\x`.
+    A guard anchored on the raw form alone matched nothing and emitted the path."""
+    with pytest.raises(diagnostics.LeakDetected) as exc:
+        _render_json_over(monkeypatch, {"spec_file": r"C:\Users\alice\proj\story.md"})
+    assert "absolute-home-path" in exc.value.rules
+    # the POSIX form must keep firing too — the fix widened the rule, not moved it
+    with pytest.raises(diagnostics.LeakDetected) as exc:
+        _render_json_over(monkeypatch, {"spec_file": "/home/alice/proj/story.md"})
+    assert "absolute-home-path" in exc.value.rules
+
+
+def test_non_ascii_sensitive_value_reaches_the_guard(monkeypatch):
+    """With the default ensure_ascii=True the value is escaped to `caf\\u00e9-user`,
+    which matches no rule — yet json.loads hands the consumer back the original.
+    The document a consumer parses is therefore what must be asserted on."""
+    pseudo = sanitize.Pseudonymizer()
+    original = "café-user"
+    alias = pseudo.alias(original, ns="story", epic=1)
+
+    rendered = _render_json_over(monkeypatch, {"mystery_ref": original}, pseudo=pseudo)
+
+    # what a consumer actually receives — the escape hid the leak from `in rendered`
+    assert json.loads(rendered)["mystery_ref"] == alias
+    assert original not in rendered
+    assert json.loads(rendered)["backstop_repairs"] == {f"story:{alias}": 1}
+
+
+def test_non_ascii_survives_the_utf8_round_trip(tmp_path, monkeypatch):
+    """ensure_ascii=False emits real non-ASCII, so confirm the document still
+    round-trips through the encoding the CLI writes it with."""
+    rendered = _render_json_over(monkeypatch, {"note": "café — naïve ✓"})
+    path = tmp_path / "diag.json"
+    path.write_text(rendered, encoding="utf-8")  # exactly what cmd_diagnose --out does
+    assert json.loads(path.read_text(encoding="utf-8"))["note"] == "café — naïve ✓"
 
 
 class _CyclicPseudo(sanitize.Pseudonymizer):
