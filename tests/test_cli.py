@@ -5,7 +5,7 @@ import json
 
 import pytest
 import yaml
-from conftest import escalated_run, install_bmad_config, write_sprint
+from conftest import escalated_run, install_bmad_config, machine_json, write_sprint
 
 from bmad_loop import cli
 from bmad_loop import policy as policy_mod
@@ -536,16 +536,6 @@ def test_status_stories_mode_bad_manifest_is_soft(project, capsys):
     assert "no stories.yaml found" in capsys.readouterr().out
 
 
-def _machine_json(argv, capsys):
-    """Run a `--json` CLI command and parse the WHOLE of stdout — parsing the
-    full stream (not a substring) is itself the assertion that nothing but the
-    document is printed (the machine.py purity contract)."""
-    assert cli.main(argv) == 0
-    out, err = capsys.readouterr()
-    assert err == ""
-    return json.loads(out)
-
-
 def test_emit_document_verifies_without_altering_the_bytes(capsys):
     """The helper half the --json commands write through: it must validate, and
     it must emit the ORIGINAL string — diagnose's leak self-check verified those
@@ -587,13 +577,13 @@ def test_write_document_matches_the_stdout_bytes_and_validates(tmp_path, capsys)
 
 
 def _status_json(project, capsys, *extra_args):
-    return _machine_json(
+    return machine_json(
         ["status", "--project", str(project.project), "--json", *extra_args], capsys
     )
 
 
 def _list_json(project, capsys):
-    return _machine_json(["list", "--project", str(project.project), "--json"], capsys)
+    return machine_json(["list", "--project", str(project.project), "--json"], capsys)
 
 
 def test_status_json_emits_pure_document(project, capsys):
@@ -2378,7 +2368,7 @@ def test_diagnose_json_emits_pure_document(project, capsys):
     from bmad_loop import diagnostics
 
     _seed_run(project.project)
-    doc = _machine_json(["diagnose", "--project", str(project.project), "--json"], capsys)
+    doc = machine_json(["diagnose", "--project", str(project.project), "--json"], capsys)
     assert doc["schema_version"] == diagnostics.SCHEMA_VERSION == 1
     assert doc["runs"], "the document carries the run it resolved"
     for canary in CANARIES:

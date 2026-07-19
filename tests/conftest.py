@@ -3,6 +3,7 @@ that simulate the side effects skill sessions would have on disk."""
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from bmad_loop import cli
 from bmad_loop.adapters.base import SessionResult, SessionSpec
 from bmad_loop.bmadconfig import ProjectPaths
 from bmad_loop.journal import save_state
@@ -131,6 +133,34 @@ def git(repo: Path, *args: str) -> str:
         ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
     )
     return proc.stdout.strip()
+
+
+# ------------------------------------------------ machine-readable CLI output
+
+
+def machine_json(argv, capsys, *, rc: int = 0, err_contains: str | None = None):
+    """Run a `--json` CLI command and parse the WHOLE of stdout — parsing the
+    full stream (not a substring) is itself the assertion that nothing but the
+    document is printed (the machine.py purity contract).
+
+    `rc` is the expected exit code, and it is not always 0: a command may report
+    a negative verdict through its exit status while still owing the caller a
+    complete document. Only stdout purity is being asserted here, not success.
+
+    `err_contains` guards the other stream. The default — stderr is *empty* — is
+    the strict form and the one to reach for; pass a substring only for a command
+    that documents chatter there, as `probe-adapter --json` does by routing its
+    human `ok:` trailer to stderr so stdout stays the document alone. That is an
+    opt-in to a different assertion, never a waiver: the substring must be
+    present, so a trailer that silently moves back to stdout still fails.
+    """
+    assert cli.main(argv) == rc
+    out, err = capsys.readouterr()
+    if err_contains is None:
+        assert err == ""
+    else:
+        assert err_contains in err
+    return json.loads(out)
 
 
 @pytest.fixture(scope="session")

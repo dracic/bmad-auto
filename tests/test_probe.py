@@ -4,6 +4,7 @@ CLI plumbing, and end-to-end scrub-through. No live CLI required."""
 import json
 
 import pytest
+from conftest import machine_json
 
 from bmad_loop import cli, probe
 from bmad_loop.adapters.profile import get_profile
@@ -303,6 +304,10 @@ def _assert_keys_sorted(raw):
     Only `object_pairs_hook` can see key ORDER — `json.loads` into a dict keeps
     insertion order, so a plain round-trip comparison can never detect the flag
     being dropped. Sorted output is what makes two probes of the same CLI diffable.
+
+    Takes the RAW string for that reason. Handing it anything re-serialized here
+    (`json.dumps(doc, sort_keys=True)`) would sort the keys on the way in and
+    assert nothing at all.
     """
 
     def hook(pairs):
@@ -313,16 +318,41 @@ def _assert_keys_sorted(raw):
     json.loads(raw, object_pairs_hook=hook)
 
 
+def test_render_json_sorts_keys_at_every_depth(project):
+    """Asserted against `render_json`'s own return value, not the CLI's stdout:
+    key order lives in the raw bytes, and the shared `--json` CLI helper hands
+    back a parsed dict, which has already lost it. This is the renderer's
+    property anyway — the CLI just prints what it returns."""
+    profile = get_profile("claude")
+    finding = probe.scan(
+        cli="claude", profile=profile, project=project.project, hints=probe.Hints()
+    )
+    _assert_keys_sorted(probe.render_json(finding))
+
+
 def test_cli_json_emits_pure_document(tmp_path, capsys):
     """--json is the whole of stdout: parsing the full stream (not a fence out of
-    prose) is itself the assertion that nothing else was printed."""
+    prose) is itself the assertion that nothing else was printed.
+
+    `err_contains="ok:"` rather than the helper's default empty stderr: probe's
+    human trailer is not gone, it moved off stdout, and pinning it here is what
+    catches it moving back. The fenced form leaving stdout is covered by the
+    helper parsing the whole stream — a fence in prose would not parse.
+    """
     path = _write_jsonl(tmp_path / "t.jsonl", CLAUDE_ROWS)
-    rc = cli.main(
-        ["probe-adapter", "claude", "--project", str(tmp_path), "--transcript", str(path), "--json"]
+    data = machine_json(
+        [
+            "probe-adapter",
+            "claude",
+            "--project",
+            str(tmp_path),
+            "--transcript",
+            str(path),
+            "--json",
+        ],
+        capsys,
+        err_contains="ok:",
     )
-    assert rc == 0
-    out, err = capsys.readouterr()
-    data = json.loads(out)
     assert data["cli"] == "claude" and data["mode"] == "scan"
     # schema_version is a NEW sibling of `version`, which holds the probed CLI's
     # own --version output — the two must not be conflated.
@@ -332,9 +362,6 @@ def test_cli_json_emits_pure_document(tmp_path, capsys):
     assert data["schema_version"] == probe.SCHEMA_VERSION == 1
     assert isinstance(data["schema_version"], int)
     assert "version" in data and (data["version"] is None or isinstance(data["version"], str))
-    assert "```" not in out  # the fenced form is gone
-    assert "ok:" in err  # the human trailer moved to stderr
-    _assert_keys_sorted(out)
 
 
 def test_cli_json_out_writes_document_and_keeps_stdout_empty(tmp_path, capsys):
