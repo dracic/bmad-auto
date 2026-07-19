@@ -2944,7 +2944,7 @@ def test_manual_recovery_notice_names_committed_work(project):
     assert "intact" in reason
     assert "pushed" in reason
     # save-the-commits comes before any reset instruction
-    assert reason.index("git branch") < reason.index("reset --hard")
+    assert reason.index("branch my-rescue") < reason.index("reset --hard")
     manual = [e for e in engine.journal.entries() if e["kind"] == "rollback-manual-required"]
     assert manual and manual[-1]["commits"] == 1
 

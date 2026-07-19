@@ -1373,3 +1373,60 @@ def test_spec_file_serialized_with_posix_separators():
     serialized = task.to_dict()["spec_file"]
     assert serialized == "_out/sub/spec.md"
     assert "\\" not in serialized
+
+
+# ------------------------------------------------- retry recovery (issue #161)
+
+
+def test_dev_retry_in_worktree_auto_recovers_instead_of_pausing(project):
+    """#161: a mid-drive dev retry inside a unit worktree must auto-recover the
+    disposable worktree (parking the attempt's commits on a preserve ref) even
+    with rollback_on_failure OFF — never pause with in-place manual-recovery
+    instructions aimed at the operator's checkout, which the attempt never
+    touched. rollback_on_failure gates isolation="none" recovery only."""
+    commit_sprint(project, {"1-1-a": "ready-for-dev"})
+
+    def bad_dev(spec):
+        # commits work in the worktree, then claims a foreign baseline — the
+        # non-fixable verify retry that routes through _rollback_or_pause
+        cwd = spec.cwd
+        wt = project.rebased(cwd)
+        src = cwd / "src.txt"
+        src.write_text(src.read_text() + "bad attempt\n")
+        git(cwd, "add", "-A")
+        git(cwd, "commit", "-q", "-m", "bad attempt work")
+        sp = wt.implementation_artifacts / "spec-1-1-a.md"
+        write_spec(sp, "in-review", "0" * 40)
+        return SessionResult(
+            status="completed",
+            result_json={
+                "workflow": "auto-dev",
+                "story_key": "1-1-a",
+                "spec_file": str(sp),
+                "escalations": [],
+            },
+        )
+
+    engine, _ = make_engine(
+        project,
+        [
+            bad_dev,
+            wt_dev_effect(project, "1-1-a"),
+            wt_review_effect(project, "1-1-a", clean=True),
+        ],
+        policy=wt_policy(rollback_on_failure=False),
+    )
+    summary = engine.run()
+
+    assert not summary.paused  # the old behavior: paused for manual recovery
+    assert summary.done == 1
+    kinds = journal_kinds(engine)
+    assert "rollback-manual-required" not in kinds
+    assert "rollback-auto" in kinds
+    # the bad attempt's commits were parked on a recovery ref, not lost
+    preserved = [e for e in engine.journal.entries() if e["kind"] == "attempt-commits-preserved"]
+    assert preserved and preserved[0]["ref"].startswith("attempt-preserve/")
+    # only the successful attempt's work merged to the target branch
+    src = (project.project / "src.txt").read_text()
+    assert "change for 1-1-a" in src and "bad attempt" not in src
+    assert worktree_clean(project.project)
