@@ -260,13 +260,18 @@ def test_cli_unknown_cli_with_binary_reduced_report(tmp_path, capsys):
     assert "reduced report" in out or "no (reduced report)" in out
 
 
-def test_cli_hookless_profile_politely_refused(tmp_path, capsys):
+@pytest.mark.parametrize("json_mode", [False, True], ids=["text", "json"])
+def test_cli_hookless_profile_politely_refused(tmp_path, capsys, json_mode):
     """opencode-http (resolved via its `opencode` alias) is HTTP/SSE-driven —
     there is no transcript or hook surface to finalize, so probe-adapter
-    explains itself instead of producing a meaningless report."""
-    rc = cli.main(["probe-adapter", "opencode", "--project", str(tmp_path)])
+    explains itself instead of producing a meaningless report. The explanation
+    is stderr-only, so JSON mode leaves stdout empty rather than half a
+    document."""
+    argv = ["probe-adapter", "opencode", "--project", str(tmp_path)]
+    rc = cli.main([*argv, "--json"] if json_mode else argv)
     assert rc == 1
-    err = capsys.readouterr().err
+    out, err = capsys.readouterr()
+    assert out == ""
     assert "hookless" in err
     assert "opencode_http" in err
     assert "FAIL" not in err  # a polite refusal, not an error dump
@@ -292,25 +297,93 @@ def test_cli_out_writes_file(tmp_path):
     assert "Profile finalize report" in out_file.read_text()
 
 
-def test_cli_json_block_appended(tmp_path, capsys):
+def _assert_keys_sorted(raw):
+    """Every object in the document has its keys in sorted order (`sort_keys=True`).
+
+    Only `object_pairs_hook` can see key ORDER — `json.loads` into a dict keeps
+    insertion order, so a plain round-trip comparison can never detect the flag
+    being dropped. Sorted output is what makes two probes of the same CLI diffable.
+    """
+
+    def hook(pairs):
+        keys = [k for k, _ in pairs]
+        assert keys == sorted(keys), f"object keys not sorted: {keys}"
+        return dict(pairs)
+
+    json.loads(raw, object_pairs_hook=hook)
+
+
+def test_cli_json_emits_pure_document(tmp_path, capsys):
+    """--json is the whole of stdout: parsing the full stream (not a fence out of
+    prose) is itself the assertion that nothing else was printed."""
     path = _write_jsonl(tmp_path / "t.jsonl", CLAUDE_ROWS)
     rc = cli.main(
         ["probe-adapter", "claude", "--project", str(tmp_path), "--transcript", str(path), "--json"]
     )
     assert rc == 0
-    out = capsys.readouterr().out
-    assert "## JSON" in out
-    # the JSON block must parse
-    blob = out.split("```json", 1)[1].rsplit("```", 1)[0]
-    data = json.loads(blob)
+    out, err = capsys.readouterr()
+    data = json.loads(out)
     assert data["cli"] == "claude" and data["mode"] == "scan"
+    # schema_version is a NEW sibling of `version`, which holds the probed CLI's
+    # own --version output — the two must not be conflated.
+    # `!=` between them would be vacuously true (str vs int never compare equal),
+    # so pin the TYPE contract instead — that is what breaks if the two are ever
+    # conflated: schema_version is our int, version is the CLI's own string.
+    assert data["schema_version"] == probe.SCHEMA_VERSION == 1
+    assert isinstance(data["schema_version"], int)
+    assert "version" in data and (data["version"] is None or isinstance(data["version"], str))
+    assert "```" not in out  # the fenced form is gone
+    assert "ok:" in err  # the human trailer moved to stderr
+    _assert_keys_sorted(out)
+
+
+def test_cli_json_out_writes_document_and_keeps_stdout_empty(tmp_path, capsys):
+    path = _write_jsonl(tmp_path / "t.jsonl", CLAUDE_ROWS)
+    out_file = tmp_path / "report.json"
+    rc = cli.main(
+        [
+            "probe-adapter",
+            "claude",
+            "--project",
+            str(tmp_path),
+            "--transcript",
+            str(path),
+            "--json",
+            "--out",
+            str(out_file),
+        ]
+    )
+    assert rc == 0
+    out, err = capsys.readouterr()
+    assert out == ""  # the document went to the file; stdout stays empty
+    assert "document written to" in err  # the noun tracks what was produced
+    assert json.loads(out_file.read_text())["cli"] == "claude"
+
+
+def test_cli_json_unknown_profile_notice_goes_to_stderr(tmp_path, capsys):
+    """A reduced report still emits a clean document: the notice is stderr-only."""
+    rc = cli.main(
+        [
+            "probe-adapter",
+            "no-such-cli",
+            "--project",
+            str(tmp_path),
+            "--binary",
+            "definitely-not-a-real-binary",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    out, err = capsys.readouterr()
+    assert json.loads(out)["cli"] == "no-such-cli"
+    assert "unknown profile" in err
 
 
 # ----------------------------------------------------------- scrub-through
 
 
-def test_scan_report_contains_no_pii(tmp_path, capsys, monkeypatch):
-    """A transcript carrying an email + a home path produces a report with neither."""
+def _seed_pii_scan(tmp_path, monkeypatch):
+    """A transcript whose rows carry an email and a home-rooted path."""
     monkeypatch.setenv("HOME", str(tmp_path))
     rows = [
         {
@@ -320,13 +393,42 @@ def test_scan_report_contains_no_pii(tmp_path, capsys, monkeypatch):
             "message": {"usage": {"input_tokens": 7, "output_tokens": 3}},
         }
     ]
-    path = _write_jsonl(tmp_path / "t.jsonl", rows)
-    rc = cli.main(
-        ["probe-adapter", "claude", "--project", str(tmp_path), "--transcript", str(path), "--json"]
-    )
-    assert rc == 0
+    return _write_jsonl(tmp_path / "t.jsonl", rows)
+
+
+def _pii_argv(tmp_path, path, *extra):
+    return [
+        "probe-adapter",
+        "claude",
+        "--project",
+        str(tmp_path),
+        "--transcript",
+        str(path),
+        *extra,
+    ]
+
+
+def test_scan_report_contains_no_pii(tmp_path, capsys, monkeypatch):
+    """A transcript carrying an email + a home path produces a report with neither.
+
+    Text mode (no --json): the markdown report is what carries the schema table.
+    """
+    path = _seed_pii_scan(tmp_path, monkeypatch)
+    assert cli.main(_pii_argv(tmp_path, path)) == 0
     out = capsys.readouterr().out
     assert "secret@example.com" not in out
     assert "private/project" not in out
     # but the token schema is still there
     assert "message.usage.input_tokens:int" in out
+
+
+def test_scan_json_document_contains_no_pii(tmp_path, capsys, monkeypatch):
+    """The same scrub-through holds for the JSON document, which is rendered by a
+    separate path (render_json, not render_markdown) — assert it on its own."""
+    path = _seed_pii_scan(tmp_path, monkeypatch)
+    assert cli.main(_pii_argv(tmp_path, path, "--json")) == 0
+    out = capsys.readouterr().out
+    assert "secret@example.com" not in out
+    assert "private/project" not in out
+    doc = json.loads(out)
+    assert "message.usage.input_tokens:int" in doc["tokens"]["key_paths"]

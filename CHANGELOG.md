@@ -149,12 +149,29 @@ breaking changes may land in a minor release.
 
 ### Changed
 
+- **BREAKING: `diagnose --json` and `probe-adapter --json` now emit a pure JSON document
+  (#195).** Both used to print their human-readable report with a fenced ` ```json ` block
+  appended, so a consumer had to scrape the fence out of prose. `--json` now emits the
+  document _instead of_ the report — stdout parses whole, and every human-facing line (`ok:`
+  trailers, the leak-backstop warning, the `unknown profile` notice) moves to stderr. With
+  `--out FILE` the document goes to the file, stdout stays empty and the confirmation goes to
+  stderr; **no file written in JSON mode carries markdown fences any more**. That file is held to
+  the same standard as the stream — it is validated and newline-terminated identically, so
+  `--json --out FILE` and `--json > FILE` produce byte-identical files. The text mode (no
+  `--json`) is unchanged. `diagnostics.SCHEMA_VERSION` deliberately stays at 1 — it versions the
+  document, and only the packaging changed — while the probe document gains a `schema_version`
+  of 1 alongside its existing `version` key, which still holds the _probed CLI's_ `--version`
+  output. Scripts that split on ` ```json ` must switch to parsing stdout directly; the break is
+  in the flag's output shape, not in either payload. Two
+  incidental fixes ride along: `diagnose --json` no longer renders the markdown report it was
+  about to discard, which was double-counting every leak-backstop repair in the warning, and
+  the probe document is now `sort_keys`-stable so two probes of the same CLI diff cleanly.
 - **Machine-output (`--json`) contract codified in `machine.py`.** The pure-document conventions
   from #190 — one JSON object on stdout, inline `schema_version`, additive-only evolution,
   errors → stderr with empty stdout — now live in one module with shared `emit`/`add_json_flag`
   helpers; `status --json` uses them (output byte-identical) and the duplicated token-total math
-  folded into `_run_token_totals`. `diagnose`/`probe-adapter --json` keep their older
-  report+fenced-block form for now (#195); `--json` adoption on more commands is tracked in #196.
+  folded into `_run_token_totals`. All four `--json` commands share the contract (#195); `--json`
+  adoption on more commands is tracked in #196.
 - **Backend-neutral naming for the seam-backed helpers and operator messages.** The multiplexer
   seam has non-tmux backends now, so the helpers that wrap it drop their legacy tmux names —
   `launch.tmux_available` → `mux_available`, `app._tmux_missing` → `_mux_missing`,
@@ -197,6 +214,16 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
   the three `_escalated_run` fixtures collapse into one parameterized conftest builder. (closes #84)
 
 ### Fixed
+
+- **Leak self-check now matches JSON-escaped values (#195).** Two evasions became reachable
+  the moment `diagnose --json` stopped also rendering the markdown report, since that raw-text
+  pass was what had been catching them: `json.dumps` doubles backslashes, so a Windows home
+  path (`C:\Users\…`) serialized to a form `_ABS_HOME_RE` did not match, and its default
+  `ensure_ascii=True` escaped non-ASCII sensitive values to `\uXXXX`, hiding them from the
+  pseudonymizer's stray-original check while `json.loads` handed the consumer back the
+  original. The home-path rule now matches either separator form, and `diagnostics.render_json`
+  serializes with `ensure_ascii=False` so the guard sees values as themselves. Both apply to
+  the markdown path too; neither changes what a clean dump contains.
 
 - **Resumed runs display the policy they actually enforce (#189).** `policy_snapshot` was
   stamped only at run creation. `resume` reloads `policy.toml` and enforces it — the

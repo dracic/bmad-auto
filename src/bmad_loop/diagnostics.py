@@ -8,8 +8,11 @@ that diagnostic shape from a run dir and routes every content-bearing value
 through the audited :mod:`bmad_loop.sanitize` chokepoint before rendering.
 
 It mirrors :mod:`bmad_loop.probe`: typed findings → collectors → ``render_markdown``
-/ ``render_json``, with ``--out``/``--json`` on the CLI. The safety model is
-fail-closed by construction: structure (counts, enums, ints, durations) is derived
+/ ``render_json``. On the CLI the default is the markdown report and ``--json``
+selects the pure JSON document instead (the :mod:`bmad_loop.machine` contract —
+one object on stdout, nothing else); ``--out FILE`` redirects whichever of the
+two was selected to a file. The safety model is fail-closed by construction:
+structure (counts, enums, ints, durations) is derived
 directly; every value that could carry content is dropped, reduced to a boolean,
 **pseudonymized** (story keys/branches/SHAs are identifier-shaped and would
 otherwise survive verbatim), or scrubbed. Unknown/future fields default to a
@@ -17,10 +20,11 @@ otherwise survive verbatim), or scrubbed. Unknown/future fields default to a
 through :func:`sanitize.assert_no_leak`. A stray pseudonymized original (a
 per-field routing gap — the value is in the legend, so its safe alias is known)
 is **repaired** by substituting the alias, re-verified, and disclosed in the
-dump itself (a "Backstop repairs" section in markdown; an optional top-level
-``backstop_repairs`` label→count key in JSON) so the gap still surfaces as a
-reportable bug. A genuine PII/secret/path/username hit, or a repair that does
-not converge, raises so the command refuses to write.
+dump itself — a "Backstop repairs" section in the markdown report, an optional
+top-level ``backstop_repairs`` label→count key in the JSON document — so the gap
+still surfaces as a reportable bug even when only one of the two was rendered.
+A genuine PII/secret/path/username hit, or a repair that does not converge,
+raises so the command refuses to write.
 
 The guiding assumption: the dump will be posted publicly.
 """
@@ -39,6 +43,12 @@ from . import __version__, sanitize
 from .journal import Journal, load_state
 from .model import RunState, StoryTask
 
+# Deliberately NOT bumped when `--json` stopped being a fenced ```json block
+# inside the markdown report and became a pure document (machine.py contract):
+# this number versions the *document*, and the payload did not change. Bumping it
+# would falsely tell a consumer pinned to v1 that the fields it reads are gone,
+# while a consumer actually broken by the repackaging finds out immediately —
+# the fence is gone and json.loads fails. Bump only on a payload break.
 SCHEMA_VERSION = 1
 DEFAULT_JOURNAL_CAP = 200
 
@@ -507,7 +517,14 @@ def render_json(
     pseudo: sanitize.Pseudonymizer | None = None,
     repairs: list[tuple[str, int]] | None = None,
 ) -> str:
-    rendered = json.dumps(_to_jsonable(d), indent=2, sort_keys=True)
+    # ensure_ascii=False is a SAFETY requirement, not cosmetics: the default
+    # escapes every non-ASCII char to \uXXXX, so a sensitive value like a
+    # non-ASCII username reaches _guard as "café-user" and matches nothing.
+    # The guard must see the string as itself. The document is only ever written
+    # with encoding="utf-8" (CLI --out) or printed to a UTF-8 stream, so emitting
+    # real non-ASCII is safe — and it must be identical in both dumps below, or
+    # the bytes we verified would not be the bytes we emit.
+    rendered = json.dumps(_to_jsonable(d), indent=2, sort_keys=True, ensure_ascii=False)
     rendered, reps = _guard(rendered, pseudo)
     if reps:
         # Disclose the repair in the dump itself so the routing gap surfaces as
@@ -517,7 +534,7 @@ def render_json(
         # backstop_repairs is an optional additive key: absent on a clean dump.
         data = json.loads(rendered)
         data["backstop_repairs"] = dict(reps)
-        rendered = json.dumps(data, indent=2, sort_keys=True)
+        rendered = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False)
         _assert_clean(rendered, pseudo)
     if repairs is not None:
         repairs.extend(reps)

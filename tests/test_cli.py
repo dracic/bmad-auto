@@ -546,6 +546,46 @@ def _machine_json(argv, capsys):
     return json.loads(out)
 
 
+def test_emit_document_verifies_without_altering_the_bytes(capsys):
+    """The helper half the --json commands write through: it must validate, and
+    it must emit the ORIGINAL string — diagnose's leak self-check verified those
+    exact bytes, so a re-serialization would ship bytes nothing checked."""
+    from bmad_loop import machine
+
+    # deliberately non-canonical: unsorted keys, 4-space indent, real non-ASCII.
+    # A re-`json.dumps` would normalize every one of these away.
+    original = '{\n    "z": 1,\n    "a": "café"\n}'
+    machine.emit_document(original)
+    out, _ = capsys.readouterr()
+    assert out == original + "\n"  # byte-identical but for print's newline
+
+    with pytest.raises(ValueError, match="malformed JSON document"):
+        machine.emit_document('{"truncated": ')
+    assert capsys.readouterr().out == ""  # refused before writing anything
+
+
+def test_write_document_matches_the_stdout_bytes_and_validates(tmp_path, capsys):
+    """`--out FILE` is the same contract aimed at a file, so it holds the same
+    line: identical bytes to the stdout form, and the same refusal. Until it went
+    through here the file was the weaker half — stdout refused a malformed
+    document while write_text accepted it, which is backwards: the file is the one
+    nobody eyeballs before feeding it to a parser."""
+    from bmad_loop import machine
+
+    original = '{\n    "z": 1,\n    "a": "café"\n}'
+    machine.emit_document(original)
+    piped = capsys.readouterr().out  # what `--json > FILE` would put in the file
+
+    out_file = tmp_path / "doc.json"
+    machine.write_document(out_file, original)
+    assert out_file.read_text(encoding="utf-8") == piped  # byte-identical
+
+    missing = tmp_path / "never.json"
+    with pytest.raises(ValueError, match="malformed JSON document"):
+        machine.write_document(missing, '{"truncated": ')
+    assert not missing.exists()  # refused before the file was created
+
+
 def _status_json(project, capsys, *extra_args):
     return _machine_json(
         ["status", "--project", str(project.project), "--json", *extra_args], capsys
@@ -2323,7 +2363,7 @@ def test_diagnose_default_latest_and_out(project, tmp_path, capsys):
 
     _seed_run(project.project)
     out_file = tmp_path / "diag.md"
-    rc = cli.main(["diagnose", "--project", str(project.project), "--json", "--out", str(out_file)])
+    rc = cli.main(["diagnose", "--project", str(project.project), "--out", str(out_file)])
     assert rc == 0
     report = out_file.read_text()
     assert "diagnostic dump (sanitized)" in report
@@ -2331,9 +2371,50 @@ def test_diagnose_default_latest_and_out(project, tmp_path, capsys):
         assert canary not in report, f"LEAK via CLI: {canary!r}"
 
 
-def test_diagnose_no_runs(tmp_path, capsys):
-    assert cli.main(["diagnose", "--project", str(tmp_path)]) == 1
-    assert "no runs found" in capsys.readouterr().err
+def test_diagnose_json_emits_pure_document(project, capsys):
+    """--json is the whole of stdout — no markdown report, no fence to scrape."""
+    from test_diagnostics import CANARIES, _seed_run
+
+    from bmad_loop import diagnostics
+
+    _seed_run(project.project)
+    doc = _machine_json(["diagnose", "--project", str(project.project), "--json"], capsys)
+    assert doc["schema_version"] == diagnostics.SCHEMA_VERSION == 1
+    assert doc["runs"], "the document carries the run it resolved"
+    for canary in CANARIES:
+        assert canary not in json.dumps(doc), f"LEAK via CLI: {canary!r}"
+
+
+def test_diagnose_json_out_writes_document_and_keeps_stdout_empty(project, tmp_path, capsys):
+    from test_diagnostics import CANARIES, _seed_run
+
+    from bmad_loop import diagnostics
+
+    _seed_run(project.project)
+    out_file = tmp_path / "diag.json"
+    rc = cli.main(["diagnose", "--project", str(project.project), "--json", "--out", str(out_file)])
+    assert rc == 0
+    out, err = capsys.readouterr()
+    assert out == ""  # the document went to the file; stdout stays empty
+    assert "written to" in err  # the confirmation moved to stderr
+    written = out_file.read_text()
+    doc = json.loads(written)
+    assert doc["schema_version"] == diagnostics.SCHEMA_VERSION == 1
+    assert "```" not in written  # no fences in a file written in JSON mode
+    for canary in CANARIES:
+        assert canary not in written, f"LEAK via CLI: {canary!r}"
+
+
+@pytest.mark.parametrize("json_mode", [False, True], ids=["text", "json"])
+def test_diagnose_no_runs(tmp_path, capsys, json_mode):
+    """Nothing to dump is an error, not an empty document — and in JSON mode it
+    still leaves stdout empty rather than emitting `no runs found` into the
+    stream a consumer is parsing."""
+    argv = ["diagnose", "--project", str(tmp_path)]
+    assert cli.main([*argv, "--json"] if json_mode else argv) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "no runs found" in err
 
 
 def test_diagnose_legend_written_locally(project, tmp_path):
@@ -2359,28 +2440,42 @@ def test_diagnose_legend_written_locally(project, tmp_path):
     assert STORY_KEY not in out_file.read_text()  # but the dump never carries it
 
 
-def test_diagnose_refusal_branch(project, tmp_path, capsys, monkeypatch):
+# The two modes call *different* renders — JSON mode skips render_markdown
+# entirely — so a refusal test must patch the one its mode actually reaches.
+# Patching only render_markdown would let the JSON leg pass vacuously: the real
+# render would simply succeed and the refusal branch would never run.
+def _patch_render_boom(monkeypatch, diagnostics, json_mode, rules):
+    def boom(*a, **k):
+        raise diagnostics.LeakDetected(rules)
+
+    monkeypatch.setattr(diagnostics, "render_json" if json_mode else "render_markdown", boom)
+
+
+@pytest.mark.parametrize("json_mode", [False, True], ids=["text", "json"])
+def test_diagnose_refusal_branch(project, tmp_path, capsys, monkeypatch, json_mode):
     """A hard-rule leak refuses to emit: rc 1, no dump written, actionable hint."""
     from test_diagnostics import _seed_run
 
     from bmad_loop import diagnostics
 
     _seed_run(project.project)
+    _patch_render_boom(monkeypatch, diagnostics, json_mode, ["email"])
 
-    def boom(*a, **k):
-        raise diagnostics.LeakDetected(["email"])
-
-    monkeypatch.setattr(diagnostics, "render_markdown", boom)
     out_file = tmp_path / "diag.md"
-    rc = cli.main(["diagnose", "--project", str(project.project), "--out", str(out_file)])
+    argv = ["diagnose", "--project", str(project.project), "--out", str(out_file)]
+    rc = cli.main([*argv, "--json"] if json_mode else argv)
     assert rc == 1
-    err = capsys.readouterr().err
+    out, err = capsys.readouterr()
+    # Never a partial document: the refusal returns before anything is written
+    # or printed, in either mode.
+    assert out == ""
     assert "refusing to emit" in err and "email" in err
     assert "--legend" in err  # the hint names the local decode path
     assert not out_file.exists()
 
 
-def test_diagnose_legend_written_on_failure(project, tmp_path, capsys, monkeypatch):
+@pytest.mark.parametrize("json_mode", [False, True], ids=["text", "json"])
+def test_diagnose_legend_written_on_failure(project, tmp_path, capsys, monkeypatch, json_mode):
     """On refusal the legend still lands locally — it decodes sensitive[<ns>:<alias>]."""
     import os as os_mod
 
@@ -2389,13 +2484,11 @@ def test_diagnose_legend_written_on_failure(project, tmp_path, capsys, monkeypat
     from bmad_loop import diagnostics
 
     _seed_run(project.project)
+    _patch_render_boom(monkeypatch, diagnostics, json_mode, ["sensitive[story:s1-deadbeef0000]"])
 
-    def boom(*a, **k):
-        raise diagnostics.LeakDetected(["sensitive[story:s1-deadbeef0000]"])
-
-    monkeypatch.setattr(diagnostics, "render_markdown", boom)
     legend_file = tmp_path / "legend.json"
-    rc = cli.main(["diagnose", "--project", str(project.project), "--legend", str(legend_file)])
+    argv = ["diagnose", "--project", str(project.project), "--legend", str(legend_file)]
+    rc = cli.main([*argv, "--json"] if json_mode else argv)
     assert rc == 1
     legend = json.loads(legend_file.read_text())
     assert STORY_KEY in legend.values()
@@ -2403,24 +2496,63 @@ def test_diagnose_legend_written_on_failure(project, tmp_path, capsys, monkeypat
         assert (legend_file.stat().st_mode & 0o077) == 0  # still owner-only
 
 
-def test_diagnose_repair_warns_but_emits(project, tmp_path, capsys):
-    """A stray pseudonymized original is repaired: rc 0, dump emitted, disclosed."""
+@pytest.mark.parametrize("json_mode", [False, True], ids=["text", "json"])
+def test_diagnose_repair_warns_but_emits(project, tmp_path, capsys, json_mode):
+    """A stray pseudonymized original is repaired: rc 0, dump emitted, disclosed.
+
+    Both modes, because each discloses the repair through its OWN render — the
+    markdown `### Backstop repairs` section and the JSON `backstop_repairs` key
+    are separate code paths, and JSON mode no longer reaches the markdown one.
+
+    The seed is `sweeps_triggered` specifically because BOTH renders reach it —
+    which is what makes the `1 stray occurrence(s)` assertion below able to fail.
+    A journal-entry gap is invisible to markdown (it renders journal aggregates,
+    never per-entry fields), so with that seed a reintroduced double render would
+    still tally 1 and the count would pin nothing. Here md=1, json=1, both=2.
+    """
     from test_diagnostics import CANARIES, STORY_KEY, _seed_run
+
+    _seed_run(project.project, sweeps_triggered=[STORY_KEY])
+    out_file = tmp_path / "diag.md"
+    argv = ["diagnose", "--project", str(project.project), "--out", str(out_file)]
+    rc = cli.main([*argv, "--json"] if json_mode else argv)
+    assert rc == 0
+    report = out_file.read_text()
+    for canary in CANARIES:
+        assert canary not in report, f"LEAK via CLI: {canary!r}"
+    if json_mode:
+        # A repaired dump is still a whole document, not a document plus an
+        # apology: parse the file rather than grepping it before trusting the key.
+        assert "backstop_repairs" in json.loads(report)
+    else:
+        assert "### Backstop repairs" in report
+        assert "1 stray occurrence(s) pseudonymized" in report
+        assert STORY_KEY not in report  # the note names the alias, never the original
+
+    err = capsys.readouterr().err
+    # The literal count, not just the word "backstop": rendering BOTH reports
+    # extends the same `repairs` list and doubles every tally, which is exactly
+    # the bug JSON mode's single render fixed. A substring match would not see it.
+    assert "pseudonymized 1 stray occurrence(s)" in err
+    assert "story:" in err and "x1" in err
+    assert STORY_KEY not in err  # the warning names labels, never originals
+
+
+def test_diagnose_json_repair_keeps_stdout_pure(project, capsys):
+    """Repairs firing while the document goes to STDOUT — the one configuration
+    where a stray warning line would corrupt a consumer's parse."""
+    from test_diagnostics import STORY_KEY, _seed_run
 
     _seed_run(
         project.project,
         extra_journal=[("custom-event", {"mystery_ref": STORY_KEY})],
     )
-    out_file = tmp_path / "diag.md"
-    rc = cli.main(["diagnose", "--project", str(project.project), "--json", "--out", str(out_file)])
-    assert rc == 0
-    report = out_file.read_text()
-    for canary in CANARIES:
-        assert canary not in report, f"LEAK via CLI: {canary!r}"
-    assert "backstop_repairs" in report  # disclosed in the JSON block
-    err = capsys.readouterr().err
-    assert "backstop" in err and "story:" in err
-    assert STORY_KEY not in err  # the warning names labels, never originals
+    assert cli.main(["diagnose", "--project", str(project.project), "--json"]) == 0
+    out, err = capsys.readouterr()
+    doc = json.loads(out)  # parses WHOLE — the warning never touched stdout
+    assert "backstop_repairs" in doc
+    assert "pseudonymized 1 stray occurrence(s)" in err
+    assert STORY_KEY not in out and STORY_KEY not in err
 
 
 # ---- validate platform preflight (routes through the multiplexer + host seams) ----
