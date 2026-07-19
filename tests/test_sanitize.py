@@ -221,11 +221,29 @@ def test_assert_no_leak_clean_text():
         ("contact me@example.com", "email"),
         ("see https://user:pass@host/x", "url-credentials"),
         ("path /home/alice/x", "absolute-home-path"),
+        # Every arm of _ABS_HOME_RE, not just the Linux one. The macOS and root
+        # arms were correct but unpinned; so was the drive-letter-plus-FORWARD-
+        # slash form (`C:/Users/...`, what Path.as_posix and MSYS-ish tooling
+        # produce), which the `/Users/` arm already subsumes as a substring —
+        # the Windows arm exists for BACKSLASHES only. Reviewers have read the
+        # rule as "Windows is handled solely by the drive-letter arm" and
+        # proposed widening it to `[\\/]`; these cases show why that is a no-op.
+        ("path /Users/alice/x", "absolute-home-path"),
+        ("path /root/x", "absolute-home-path"),
+        ("path C:/Users/alice/x", "absolute-home-path"),
         ("key ghp_CANARYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx01", "secret"),
     ],
 )
 def test_assert_no_leak_fires(text, rule):
     assert rule in sanitize.assert_no_leak(text)
+
+
+@pytest.mark.parametrize("text", ["path D:/data/alice/x", "path /var/lib/alice/x"])
+def test_assert_no_leak_home_rule_is_not_any_absolute_path(text):
+    """The rule names *home* directories, and firing is fail-closed — diagnose
+    refuses to emit. Matching every absolute path would turn an ordinary dump
+    into a refusal, so the bound is load-bearing in the other direction too."""
+    assert "absolute-home-path" not in sanitize.assert_no_leak(text)
 
 
 def test_assert_no_leak_extra_word_boundary():

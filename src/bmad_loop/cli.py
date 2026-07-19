@@ -1947,8 +1947,10 @@ def cmd_probe(args: argparse.Namespace) -> int:
     trailers = sys.stderr if args.json else sys.stdout
     if args.out:
         out_path = Path(args.out)
-        # Trailing newline in JSON mode: same bytes the stdout form would emit.
-        out_path.write_text((report + "\n") if args.json else report, encoding="utf-8")
+        if args.json:
+            machine.write_document(out_path, report)
+        else:
+            out_path.write_text(report, encoding="utf-8")
         print(
             f"  ok: {noun} written to {out_path} ({len(finding.warnings)} warning(s))",
             file=trailers,
@@ -2055,9 +2057,12 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
 
     if args.out:
         out_path = Path(args.out)
-        # Trailing newline in JSON mode so the file is byte-identical to what the
-        # stdout form (print) emits — same document either way, no fences.
-        out_path.write_text((report + "\n") if args.json else report, encoding="utf-8")
+        if args.json:
+            # Verbatim, validated, newline-terminated — byte-identical to the
+            # stdout form, and the same bytes render_json's self-check verified.
+            machine.write_document(out_path, report)
+        else:
+            out_path.write_text(report, encoding="utf-8")
         print(
             f"  ok: sanitized diagnostics for {len(diag.runs)} run(s) written to {out_path}",
             # JSON mode must leave stdout empty even when the document went to a

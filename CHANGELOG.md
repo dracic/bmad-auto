@@ -155,7 +155,9 @@ breaking changes may land in a minor release.
   document _instead of_ the report — stdout parses whole, and every human-facing line (`ok:`
   trailers, the leak-backstop warning, the `unknown profile` notice) moves to stderr. With
   `--out FILE` the document goes to the file, stdout stays empty and the confirmation goes to
-  stderr; **no file written in JSON mode carries markdown fences any more**. The text mode (no
+  stderr; **no file written in JSON mode carries markdown fences any more**. That file is held to
+  the same standard as the stream — it is validated and newline-terminated identically, so
+  `--json --out FILE` and `--json > FILE` produce byte-identical files. The text mode (no
   `--json`) is unchanged. `diagnostics.SCHEMA_VERSION` deliberately stays at 1 — it versions the
   document, and only the packaging changed — while the probe document gains a `schema_version`
   of 1 alongside its existing `version` key, which still holds the _probed CLI's_ `--version`

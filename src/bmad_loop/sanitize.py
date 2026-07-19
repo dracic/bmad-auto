@@ -79,6 +79,14 @@ _URL_CRED_RE = re.compile(r"https?://[^/\s]*:[^/@\s]+@")
 # form let a Windows home path through the JSON render untouched, so the
 # separator alternates one-or-two backslashes. POSIX prefixes need no such
 # treatment: `/` is not escaped by JSON.
+#
+# The drive-letter arm is for BACKSLASHES only, deliberately: the forward-slash
+# Windows form (`C:/Users/alice`, from Path.as_posix or MSYS-ish tooling) already
+# matches the `/Users/` arm as a substring, as does git-bash's `/c/Users/alice`.
+# Widening the drive-letter arm to `[\\/]` buys only the mixed-separator oddity
+# `C:\Users/alice` — and any string carrying a separator at all is rejected by
+# looks_like_identifier upstream and redacted before it can reach here.
+# tests/test_sanitize.py::test_assert_no_leak_fires pins each arm.
 _ABS_HOME_RE = re.compile(r"/home/|/Users/|/root/|[A-Za-z]:\\{1,2}Users\\{1,2}", re.I)
 
 _REDACTED_STR = "<redacted:str>"

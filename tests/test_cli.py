@@ -564,6 +564,28 @@ def test_emit_document_verifies_without_altering_the_bytes(capsys):
     assert capsys.readouterr().out == ""  # refused before writing anything
 
 
+def test_write_document_matches_the_stdout_bytes_and_validates(tmp_path, capsys):
+    """`--out FILE` is the same contract aimed at a file, so it holds the same
+    line: identical bytes to the stdout form, and the same refusal. Until it went
+    through here the file was the weaker half — stdout refused a malformed
+    document while write_text accepted it, which is backwards: the file is the one
+    nobody eyeballs before feeding it to a parser."""
+    from bmad_loop import machine
+
+    original = '{\n    "z": 1,\n    "a": "café"\n}'
+    machine.emit_document(original)
+    piped = capsys.readouterr().out  # what `--json > FILE` would put in the file
+
+    out_file = tmp_path / "doc.json"
+    machine.write_document(out_file, original)
+    assert out_file.read_text(encoding="utf-8") == piped  # byte-identical
+
+    missing = tmp_path / "never.json"
+    with pytest.raises(ValueError, match="malformed JSON document"):
+        machine.write_document(missing, '{"truncated": ')
+    assert not missing.exists()  # refused before the file was created
+
+
 def _status_json(project, capsys, *extra_args):
     return _machine_json(
         ["status", "--project", str(project.project), "--json", *extra_args], capsys

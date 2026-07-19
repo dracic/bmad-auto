@@ -18,6 +18,8 @@ stdout stays empty, and the exit code is nonzero. Consumers may rely on
 the file and stdout is legitimately empty at exit 0, with only a confirmation on
 stderr. So empty stdout means "no document *here*" — check the exit code to tell
 a redirect from a failure, and do not treat rc 0 as a promise of bytes to parse.
+That file is held to the same standard as the stream: :func:`write_document` is
+the only way it is written, and validates exactly as :func:`emit_document` does.
 
 All four ``--json`` commands — ``status``, ``list``, ``diagnose`` and
 ``probe-adapter`` — share this contract; there is no exception (#195 removed the
@@ -32,17 +34,35 @@ Two ways in, by what the caller already holds:
   is nothing to re-encode, whereas ``diagnostics.render_json`` serializes
   *before* running its leak self-check, making those exact bytes the ones the
   check verified — re-encoding them here would emit bytes nothing verified.
+
+:func:`write_document` is the ``--out`` sibling of :func:`emit_document`, taking
+the same already-serialized string to a file instead of stdout.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 
 def emit(doc: dict[str, object]) -> None:
     """The single stdout write in JSON mode."""
     emit_document(json.dumps(doc, indent=2))
+
+
+def _validated(rendered: str) -> str:
+    """Return ``rendered`` unchanged, or raise if it is not a whole JSON document.
+
+    Parse to assert, never to re-serialize: the caller's exact bytes are what gets
+    written. ``diagnostics.render_json`` runs its leak self-check *before* handing
+    the string over, so re-encoding here would ship bytes nothing checked.
+    """
+    try:
+        json.loads(rendered)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"refusing to emit a malformed JSON document: {e}") from e
+    return rendered
 
 
 def emit_document(rendered: str) -> None:
@@ -59,11 +79,22 @@ def emit_document(rendered: str) -> None:
     renderer, and far better surfaced as a crash with empty stdout (which the
     contract permits) than as a half-parsable stream a consumer has to diagnose.
     """
-    try:
-        json.loads(rendered)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"refusing to emit a malformed JSON document: {e}") from e
-    print(rendered)
+    print(_validated(rendered))
+
+
+def write_document(path: Path, rendered: str) -> None:
+    """The single file write in JSON mode — the bytes :func:`emit_document` prints.
+
+    ``--out FILE`` is the other half of the same contract, so it gets the same
+    validation and the same trailing newline: ``--json --out FILE`` and
+    ``--json > FILE`` produce byte-identical files. Without the parse the file was
+    the weaker half — stdout refused a malformed document while the file accepted
+    it, which is backwards, since a document written to a file is the one nobody
+    eyeballs before feeding it to a parser.
+
+    Raises :class:`ValueError` on a malformed document, before the file is created.
+    """
+    path.write_text(_validated(rendered) + "\n", encoding="utf-8")
 
 
 def add_json_flag(parser: argparse.ArgumentParser, what: str) -> None:
