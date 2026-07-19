@@ -81,14 +81,34 @@ class RunSummary:
     escalated: int
     paused: bool
     paused_reason: str
+    # Raw: cache reads at full weight. Kept as the historical field name.
     total_tokens: int
+    # Cost-proportional: cache reads discounted by limits.cache_read_weight, the
+    # same total every budget judges (#129). Deliberately has NO default — a 0
+    # would render "0 weighted tokens (716M raw)", silently wrong in exactly the
+    # direction this field exists to fix. There is one construction site; a
+    # TypeError beats a plausible zero.
+    weighted_tokens: int
     crashed: bool = False
     crash_error: str | None = None
 
     def render(self) -> str:
+        # Lead with weighted (what spend actually costs) and name both units:
+        # raw is 5-8x higher on agentic workloads, where cache reads are 80-95%
+        # of the count, and an unlabeled raw figure reads as a cost overrun.
+        if self.total_tokens:
+            tokens = (
+                f"{self.weighted_tokens:,} weighted tokens "
+                f"({self.total_tokens:,} raw incl. cache reads)"
+            )
+        else:
+            # No usage tracked at all (usage_parser = "none", or Copilot's
+            # shutdown-only flush). Splitting this into "0 weighted (0 raw)"
+            # would assert free work twice over; one plain zero is honest.
+            tokens = "0 tokens"
         lines = [
             f"run {self.run_id}: {self.done} done, {self.deferred} deferred, "
-            f"{self.escalated} escalated, {self.total_tokens:,} tokens"
+            f"{self.escalated} escalated, {tokens}"
         ]
         if self.crashed:
             lines.append(f"CRASHED: {self.crash_error}")
@@ -726,6 +746,13 @@ class Engine:
 
     def summary(self) -> RunSummary:
         tasks = self.state.tasks.values()
+        # Weight from the run's persisted snapshot, NOT self.policy — every
+        # display surface must be reproducible from state.json alone, which is
+        # all the TUI and `bmad-loop status` can see. Resume reloads policy.toml
+        # without re-stamping the snapshot, so live policy and snapshot can
+        # disagree; sourcing this from live policy would make the CLI and the
+        # TUI print different totals for the same run. Do not "unify" these.
+        weight = self.state.cache_read_weight()
         return RunSummary(
             run_id=self.state.run_id,
             done=sum(1 for t in tasks if t.phase == Phase.DONE),
@@ -734,6 +761,12 @@ class Engine:
             paused=self.state.paused,
             paused_reason=self.state.paused_reason or "",
             total_tokens=sum(t.tokens.total for t in tasks),
+            # Sum PER TASK, not over one aggregated TokenUsage: weighted_total
+            # rounds internally, so sum-of-rounds != round-of-sum (they drift by
+            # a few tokens under banker's rounding). Per-task summation is what
+            # tui/widgets.py does, which is what makes the CLI and the TUI agree
+            # to the token. This is not a redundant loop — do not collapse it.
+            weighted_tokens=sum(t.tokens.weighted_total(weight) for t in tasks),
             crashed=self.state.crashed,
             crash_error=self.state.crash_error,
         )
@@ -2498,6 +2531,17 @@ class Engine:
                 task_id=task_id,
                 status=result.status,
                 tokens=usage.total if usage else None,
+                # Weighted rides every usage-bearing session-end, not just
+                # budget-tripped ones (#129): `tokens` alone is a bare scalar
+                # from which the weighted figure cannot be recovered, so
+                # per-session spend was unreconstructible after the fact.
+                # `None`, never 0, when usage is untracked — a zeroed
+                # TokenUsage weighs 0, and untracked != free (see tokens.py).
+                # Distinct from `budget_weighted`, which the extras add only on
+                # a trip and which means the guard's mid-session sample.
+                tokens_weighted=(
+                    usage.weighted_total(self.state.cache_read_weight()) if usage else None
+                ),
                 **self._session_end_extras(result),
             )
             ended = True
@@ -2509,11 +2553,16 @@ class Engine:
                     if result is not None:
                         # A post-run step raised (e.g. read_usage): the session
                         # itself finished — journal its real status, sans usage.
+                        # Both token fields are hardcoded None: `usage` may be
+                        # UNBOUND here (read_usage itself is a candidate raiser),
+                        # so referencing it would raise NameError on a path that
+                        # is already unwinding an exception.
                         self.journal.append(
                             "session-end",
                             task_id=task_id,
                             status=result.status,
                             tokens=None,
+                            tokens_weighted=None,
                             **self._session_end_extras(result),
                         )
                     else:

@@ -9,6 +9,16 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **`session-end` journal entries carry `tokens_weighted` beside `tokens` (#129).** Only the
+  raw scalar was persisted, and the weight cannot be backed out of it, so a session's
+  cost-weighted spend was unreconstructible after the fact — the weighted figure existed
+  only for sessions that tripped the budget guard. Every entry whose usage was read now
+  records both. `null` (never `0`) when the usage read failed, since untracked is not free;
+  both fields stay absent on an `aborted` end, where no read happened. Distinct from a
+  tripped session's `budget_weighted`, which is the guard's mid-session sample at trip time
+  rather than the end-of-session total. The `cache_read_weight` knob also gained a
+  description in the TUI settings screen, where it had none.
+
 - **Mid-session token-budget guard (#158).** Both adapter wait loops now sample cumulative
   weighted usage every ~30s and act on crossing the new per-session cap
   (`limits.max_tokens_per_session`, default 4M weighted) per `limits.session_budget_mode`:
@@ -169,6 +179,25 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
   the three `_escalated_run` fixtures collapse into one parameterized conftest builder. (closes #84)
 
 ### Fixed
+
+- **Run summaries and `bmad-loop status` report weighted tokens, with both units labeled
+  (#129).** The run-finished summary — stdout, the `ATTENTION` file, and the desktop
+  notification all render from one place — reported the **raw** total, counting cache reads
+  at full price, while every budget judges the **cost-weighted** total. On a cache-heavy run
+  that overstates spend by ~6.5x, and neither figure said which unit it was. Both surfaces
+  now lead with weighted and name both: `<weighted> weighted tokens (<raw> raw incl. cache
+reads)`, matching the TUI, which has shown weighted since 0.7.12. `bmad-loop status` also
+  gained a run-level `tokens:` line (it previously printed no run total at all).
+  **Visible output change:** per-story `status` cells go from `<raw>t` to
+  `<weighted>t (<raw> raw)`, so the number is both differently scaled and differently
+  shaped — scripts scraping that column need updating. A story with only cache reads under
+  `cache_read_weight = 0` correctly renders `0`, not `-` (which means no tokens at all).
+  Displayed weights come from the run's persisted policy snapshot, so every observer
+  reproduces the same number from `state.json` alone.
+
+- **The TUI guide's task-table reference described the pre-0.7.12 columns.** It documented
+  `tokens` as the raw total and omitted the `raw` column entirely; the run-header and
+  journal sections were likewise silent on the weighted/raw split. Docs only.
 
 - **`diagnose` leak self-check is now recoverable (#186).** A stray pseudonymized
   identifier (a per-field routing gap) is repaired by substituting its alias and disclosed

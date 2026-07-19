@@ -256,9 +256,12 @@ def _session_tally(tasks: list[StoryTask]) -> SessionTally:
     return SessionTally(by_status=dict(by_status), by_role=dict(by_role))
 
 
-def _task_diag(task: StoryTask, pseudo: sanitize.Pseudonymizer) -> TaskDiag:
+def _task_diag(task: StoryTask, pseudo: sanitize.Pseudonymizer, weight: float) -> TaskDiag:
     tokens = task.tokens.to_dict()
     tokens["total"] = task.tokens.total
+    # Derived from the run's snapshot weight, which this bundle also carries
+    # under policy.limits — so the figure stays checkable against its inputs.
+    tokens["weighted"] = task.tokens.weighted_total(weight)
     return TaskDiag(
         alias=pseudo.alias(task.story_key, ns="story", epic=task.epic),
         epic=task.epic,
@@ -396,11 +399,15 @@ def collect_run(run_dir: Path, *, pseudo: sanitize.Pseudonymizer, cap: int) -> R
     tasks = list(state.tasks.values())
     epic_by_key = {t.story_key: t.epic for t in tasks}
 
+    weight = state.cache_read_weight()
     token_totals: Counter[str] = Counter()
     for t in tasks:
         for k, v in t.tokens.to_dict().items():
             token_totals[k] += v
         token_totals["total"] += t.tokens.total
+        # Per-task, matching Engine.summary and the TUI (weighted_total rounds
+        # internally, so summing per task is what keeps the numbers identical).
+        token_totals["weighted"] += t.tokens.weighted_total(weight)
 
     phase_hist: Counter[str] = Counter(str(t.phase) for t in tasks)
 
@@ -426,7 +433,7 @@ def collect_run(run_dir: Path, *, pseudo: sanitize.Pseudonymizer, cap: int) -> R
         phase_histogram=dict(phase_hist),
         token_totals=dict(token_totals),
         session_tally=_session_tally(tasks),
-        tasks=[_task_diag(t, pseudo) for t in tasks],
+        tasks=[_task_diag(t, pseudo, weight) for t in tasks],
         journal=summarize_journal(Journal(run_dir).entries(), pseudo, epic_by_key, cap=cap),
         files=summarize_files(run_dir),
     )
@@ -572,14 +579,15 @@ def render_markdown(
         out.append("### Tasks")
         if r.tasks:
             out.append(
-                "| alias | epic | phase | att | rev | committed | spec | dw | sessions | tokens |"
+                "| alias | epic | phase | att | rev | committed | spec | dw | sessions "
+                "| weighted | raw |"
             )
-            out.append("|---|---|---|---|---|---|---|---|---|---|")
+            out.append("|---|---|---|---|---|---|---|---|---|---|---|")
             for t in r.tasks:
                 out.append(
                     f"| `{t.alias}` | {t.epic} | {t.phase} | {t.attempt} | {t.review_cycle} "
                     f"| {t.committed} | {t.spec_present} | {t.dw_count} | {t.n_sessions} "
-                    f"| {t.tokens.get('total', 0)} |"
+                    f"| {t.tokens.get('weighted', 0)} | {t.tokens.get('total', 0)} |"
                 )
         else:
             out.append("_no tasks._")

@@ -169,6 +169,10 @@ def test_run_session_persists_session_when_usage_read_raises(project):
     assert len(ends) == 1
     assert ends[0]["status"] == "completed"
     assert ends[0]["tokens"] is None
+    # null, never 0: a zeroed TokenUsage weighs 0, and untracked != free. This
+    # is also the path where `usage` is unbound in the finally, so a weighted
+    # figure derived from it there would raise NameError instead of journaling.
+    assert ends[0]["tokens_weighted"] is None
 
 
 def test_run_session_journals_exactly_one_session_end(project):
@@ -210,6 +214,11 @@ def test_adapter_crash_journals_aborted_session_end(project, monkeypatch):
     assert "1-1-a" in ends[0]["task_id"]
     assert ends[0]["status"] == "aborted"
     assert ends[0]["error"] == "RuntimeError"
+    # No usage read ever happened, so neither token field appears at all.
+    # The invariant is `tokens_weighted` present iff `tokens` present — a lone
+    # null weighted here would imply a read that came back empty.
+    assert "tokens" not in ends[0]
+    assert "tokens_weighted" not in ends[0]
 
 
 def test_timeout_session_end_carries_fire_forensics(project):
@@ -947,9 +956,144 @@ def test_token_budget_discounts_cache_reads(project):
     summary = engine.run()
 
     assert summary.done == 1
-    assert summary.total_tokens == 2 * 620_000  # display stays raw
+    # Both units ride the summary (#129). total_tokens stays raw; weighted is
+    # the same figure the budget just declined to trip on, 7.75x smaller here.
+    # Per task, not per session: 30k in + 10k out + round(1.2M * 0.1).
+    assert summary.total_tokens == 2 * 620_000
+    assert summary.weighted_tokens == 160_000
     journal_text = (run_dir / "journal.jsonl").read_text()
     assert "token-budget-exceeded" not in journal_text
+
+
+def _cache_heavy_engine(project, *, snapshot_weight, live_weight, usage):
+    """A one-story run whose live policy weight deliberately differs from the
+    weight in its persisted policy snapshot, so tests can prove which one a
+    display surface read."""
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+    adapter = MockAdapter(
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+        usage_per_session=usage,
+    )
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        limits=LimitsPolicy(cache_read_weight=live_weight),
+    )
+    state = RunState(
+        run_id="test-run",
+        project=str(project.project),
+        started_at="now",
+        policy_snapshot={"limits": {"cache_read_weight": snapshot_weight}},
+    )
+    return Engine(
+        paths=project,
+        policy=policy,
+        adapter=adapter,
+        run_dir=run_dir,
+        journal=Journal(run_dir),
+        state=state,
+    )
+
+
+def test_summary_weighted_reads_the_run_snapshot_not_live_policy(project):
+    """Displays must be reproducible from state.json alone, because that is all
+    the TUI and `bmad-loop status` can see. Resume reloads policy.toml without
+    re-stamping the snapshot, so sourcing the summary from live policy would
+    make the CLI and the TUI disagree for the same run.
+
+    The two weights differ here precisely so the number identifies the source:
+    0.5 (snapshot) -> 1,320; 1.0 (live policy) -> 2,320, i.e. raw.
+    """
+    engine = _cache_heavy_engine(
+        project,
+        snapshot_weight=0.5,
+        live_weight=1.0,
+        usage=TokenUsage(
+            input_tokens=100, output_tokens=50, cache_creation_tokens=10, cache_read_tokens=1000
+        ),
+    )
+    summary = engine.run()
+
+    assert summary.total_tokens == 2 * 1160
+    assert summary.weighted_tokens == 1320  # 200 + 100 + 20 + round(2000 * 0.5)
+
+    # ...and the number a TUI observer computes from the persisted state, by the
+    # same per-task route tui/widgets.py takes, is identical.
+    reloaded = load_state(engine.run_dir)
+    weight = reloaded.cache_read_weight()
+    assert weight == 0.5
+    assert sum(t.tokens.weighted_total(weight) for t in reloaded.tasks.values()) == 1320
+
+
+def test_summary_weights_per_task_not_over_the_aggregate(project):
+    """weighted_total rounds internally, so summing per task is NOT the same as
+    weighting one aggregated TokenUsage — and the TUI sums per task (its header
+    is the sum of the rows it shows). Weighting the aggregate instead would make
+    the CLI and the TUI disagree, which is the bug class #129 exists to remove.
+
+    Three tasks at cache_read=5, weight 0.1: per task round(0.5) = 0 under
+    banker's rounding, so 30. Aggregated first: round(15 * 0.1) = 2, so 32.
+    """
+    engine = _cache_heavy_engine(project, snapshot_weight=0.1, live_weight=0.1, usage=TokenUsage())
+    for key in ("1-1-a", "1-1-b", "1-1-c"):
+        task = StoryTask(story_key=key, epic=1)
+        task.tokens = TokenUsage(input_tokens=10, cache_read_tokens=5)
+        engine.state.tasks[key] = task
+
+    summary = engine.summary()
+
+    assert summary.total_tokens == 45  # 3 x (10 + 5)
+    assert summary.weighted_tokens == 30  # NOT 32
+
+
+def test_run_summary_render_labels_both_units(project):
+    """render() feeds stdout, the ATTENTION file and the desktop notification
+    from one place, so this covers all three."""
+    engine = _cache_heavy_engine(
+        project,
+        snapshot_weight=0.5,
+        live_weight=0.5,
+        usage=TokenUsage(
+            input_tokens=100, output_tokens=50, cache_creation_tokens=10, cache_read_tokens=1000
+        ),
+    )
+    rendered = engine.run().render()
+
+    assert "1,320 weighted tokens (2,320 raw incl. cache reads)" in rendered
+    # the bare, unlabeled figure the issue reported must be gone
+    assert "2,320 tokens" not in rendered
+
+
+def test_run_summary_render_untracked_usage_stays_one_plain_zero(project):
+    """usage_parser = "none" profiles never report usage. Splitting that into
+    "0 weighted tokens (0 raw incl. cache reads)" asserts free work twice."""
+    engine = _cache_heavy_engine(project, snapshot_weight=0.5, live_weight=0.5, usage=TokenUsage())
+    rendered = engine.run().render()
+
+    assert "0 tokens" in rendered
+    assert "weighted" not in rendered
+    assert "raw" not in rendered
+
+
+def test_session_end_journals_weighted_beside_raw(project):
+    """Per-session weighted spend must be recoverable from the journal after
+    the fact — `tokens` alone is a scalar the weight cannot be backed out of."""
+    engine = _cache_heavy_engine(
+        project,
+        snapshot_weight=0.5,
+        live_weight=0.5,
+        usage=TokenUsage(
+            input_tokens=100, output_tokens=50, cache_creation_tokens=10, cache_read_tokens=1000
+        ),
+    )
+    engine.run()
+
+    ends = [e for e in engine.journal.entries() if e["kind"] == "session-end"]
+    assert len(ends) == 2
+    for end in ends:
+        assert end["tokens"] == 1160
+        assert end["tokens_weighted"] == 660  # 100 + 50 + 10 + round(1000 * 0.5)
 
 
 def test_token_budget_exceeded_journals_weighted(project):
@@ -1070,6 +1214,11 @@ def test_session_end_journals_budget_extras_when_tripped(project):
     assert ends[1]["budget_weighted"] == 4_100_000
     # the untripped review session carries none
     assert "budget_weighted" not in ends[2]
+    # ...but the ordinary usage fields are unconditional, which is the whole
+    # distinction: budget_weighted = the guard's sample at trip time (only when
+    # tripped); tokens_weighted = the end-of-session total (always, when usage
+    # was read). They can legitimately differ on the same entry.
+    assert "tokens_weighted" in ends[2]
 
 
 def test_engine_threads_budget_policy_into_session_spec(project):
@@ -1116,6 +1265,9 @@ def test_happy_path(project):
     assert task.commit_sha and task.commit_sha != task.baseline_commit
     assert worktree_clean(project.project)
     assert summary.total_tokens == 30  # 2 sessions x 15
+    # No cache reads in the default fixture usage, so weighting is a no-op —
+    # pins that the weighted path doesn't distort the ordinary case.
+    assert summary.weighted_tokens == 30
     assert [s.role for s in adapter.sessions] == ["dev", "review"]
     assert adapter.sessions[0].env["BMAD_LOOP_MODE"] == "1"
     assert adapter.sessions[1].prompt.startswith("/bmad-dev-auto ")
