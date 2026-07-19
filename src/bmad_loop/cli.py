@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import (
     __version__,
@@ -39,6 +40,9 @@ from .process_host import ProcessHostError
 from .runs import RUNS_DIR
 from .stories_engine import StoriesEngine
 from .sweep import SweepEngine
+
+if TYPE_CHECKING:
+    from .tui.data import RunInfo
 
 POLICY_FILE = policy_mod.POLICY_FILE
 
@@ -1565,11 +1569,46 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+LIST_SCHEMA_VERSION = 1
+
+
+def _list_document(infos: list[RunInfo]) -> dict[str, object]:
+    """The `list --json` document: one entry per run, oldest first.
+
+    Obeys the pure-document contract in machine.py (additive-only evolution;
+    anything breaking bumps LIST_SCHEMA_VERSION). A pure projection of
+    discover_runs(): status is its liveness-aware vocabulary
+    (running|paused|finished|stopped|crashed|interrupted|unknown), and runs
+    whose state.json fails to parse are included (run_type "?", started_at "",
+    status "unknown") — enumeration scripts must see them. `ref` is
+    runs.short_ref(run_id), derived from the id — stable, not positional.
+    paused_stage is "" unless status is "paused". An empty runs dir is a valid
+    empty document with exit 0, never an error.
+    """
+    return {
+        "schema_version": LIST_SCHEMA_VERSION,
+        "runs": [
+            {
+                "ref": runs.short_ref(ri.run_id),
+                "run_id": ri.run_id,
+                "run_type": ri.run_type,
+                "started_at": ri.started_at,
+                "status": ri.status,
+                "paused_stage": ri.paused_stage,
+            }
+            for ri in infos
+        ],
+    }
+
+
 def cmd_list(args: argparse.Namespace) -> int:
     from .tui.data import discover_runs  # import-safe: data.py has no textual imports
 
     project = _project(args)
     infos = discover_runs(project)  # oldest first
+    if args.json:
+        machine.emit(_list_document(infos))
+        return 0
     if not infos:
         print("no runs found")
         return 0
@@ -2191,7 +2230,8 @@ def main(argv: list[str] | None = None) -> int:
         help="list the pending decisions without answering them",
     )
 
-    add("list", cmd_list, "list runs/sweeps with their short ref", aliases=["ls"])
+    list_p = add("list", cmd_list, "list runs/sweeps with their short ref", aliases=["ls"])
+    machine.add_json_flag(list_p, "run listing")
 
     status_p = add("status", cmd_status, "show run + sprint state")
     status_p.add_argument("run_id", nargs="?")
