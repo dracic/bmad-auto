@@ -536,14 +536,20 @@ def test_status_stories_mode_bad_manifest_is_soft(project, capsys):
     assert "no stories.yaml found" in capsys.readouterr().out
 
 
-def _status_json(project, capsys, *extra_args):
-    """Run `status --json` and parse the WHOLE of stdout — parsing the full
-    stream (not a substring) is itself the assertion that nothing but the
-    document is printed."""
-    assert cli.main(["status", "--project", str(project.project), "--json", *extra_args]) == 0
+def _machine_json(argv, capsys):
+    """Run a `--json` CLI command and parse the WHOLE of stdout — parsing the
+    full stream (not a substring) is itself the assertion that nothing but the
+    document is printed (the machine.py purity contract)."""
+    assert cli.main(argv) == 0
     out, err = capsys.readouterr()
     assert err == ""
     return json.loads(out)
+
+
+def _status_json(project, capsys, *extra_args):
+    return _machine_json(
+        ["status", "--project", str(project.project), "--json", *extra_args], capsys
+    )
 
 
 def test_status_json_emits_pure_document(project, capsys):
