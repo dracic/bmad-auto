@@ -158,7 +158,9 @@ scrollable modal (`escape` closes).
 A one-glance summary of the selected run: id, `[sweep]` tag for sweep runs,
 status glyph + word, start timestamp, current epic, and a counts line —
 `tasks N · done (green) · deferred (yellow) · escalated (red when nonzero) ·
-total tokens`. Below that, situational banners:
+tokens`, where the token figure reads `<weighted> tokens (<raw> raw)` — the
+cost-weighted total first (cache reads at `limits.cache_read_weight`), the
+unweighted one in parentheses. Below that, situational banners:
 
 - `⏸ paused (<stage>) — <reason> · press e to resume` — gate or escalation
   pause; stages are `spec-approval`, `epic-boundary`, `escalation`,
@@ -176,14 +178,15 @@ total tokens`. Below that, situational banners:
 
 One row per story (or sweep bundle/triage task) in the selected run:
 
-| Column   | Meaning                                                                                                                                                                                                      |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `story`  | story key, or the sweep task id                                                                                                                                                                              |
-| `phase`  | `pending` → `dev-running` → `dev-verify` → `review-running` → `review-verify` → `committing` → `done`; terminal alternatives `deferred` / `escalated`; sweep triage shows `triage-running` / `triage-verify` |
-| `dev`    | dev attempt counter, `×N`                                                                                                                                                                                    |
-| `review` | review cycle counter, `×N`                                                                                                                                                                                   |
-| `tokens` | raw token total for the story, `-` until known                                                                                                                                                               |
-| `info`   | defer reason, or the commit SHA (first 12 chars) once committed                                                                                                                                              |
+| Column   | Meaning                                                                                                                                                                                                                                 |
+| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `story`  | story key, or the sweep task id                                                                                                                                                                                                         |
+| `phase`  | `pending` → `dev-running` → `dev-verify` → `review-running` → `review-verify` → `committing` → `done`; terminal alternatives `deferred` / `escalated`; sweep triage shows `triage-running` / `triage-verify`                            |
+| `dev`    | dev attempt counter, `×N`                                                                                                                                                                                                               |
+| `review` | review cycle counter, `×N`                                                                                                                                                                                                              |
+| `tokens` | cost-weighted token total for the story — cache reads counted at `limits.cache_read_weight` (default 0.1), the same total the budgets judge. `-` until known; a real `0` (possible with the weight set to 0) is shown as `0`, never `-` |
+| `info`   | defer reason, or the commit SHA (first 12 chars) once committed                                                                                                                                                                         |
+| `raw`    | unweighted token total, cache reads at full price — typically 5–8x the `tokens` column on agentic work                                                                                                                                  |
 
 ### Tabs (bottom right)
 
@@ -193,7 +196,12 @@ One row per story (or sweep bundle/triage task) in the selected run:
   `session-end` unconditionally (status `aborted` when the outcome is
   unknowable, even after a teardown that threw); a timed-out one carries
   `fired_at`, `teardown_s`, and `expired_clock` (`monotonic` / `wall` / `both` —
-  `wall` alone fingerprints a host suspend that froze the monotonic clock). The
+  `wall` alone fingerprints a host suspend that froze the monotonic clock).
+  Entries whose usage was read carry `tokens` (raw) and `tokens_weighted` (cache
+  reads at `limits.cache_read_weight`); both are `null` if the usage read failed
+  and both are absent on an `aborted` end. `tokens_weighted` is the
+  end-of-session total, distinct from a tripped session's `budget_weighted`
+  (the guard's mid-session sample at trip time). The
   matching `tasks/<id>/` dir holds the forensic breadcrumbs the adapter wrote
   while the session ran: `session-lifecycle.jsonl` (timeout-fire,
   budget-guard `budget-tripped` / `over-budget-fired`, and kill-escalation
@@ -507,7 +515,7 @@ behavior.
 | `limits.dev_stall_nudges`             | int ≥ 0                | 2                  | wake-nudges on grace expiry before stalling; a Stop response restores the budget · 0 = stall on grace expiry                                                              |
 | `limits.dev_stall_nudges_cap`         | int ≥ 0                | 6                  | total (never-restored) wake-nudges per dev/review session — bounds the refill loop when the reply to a nudge is itself a result-less Stop                                 |
 | `limits.max_tokens_per_story`         | int ≥ 1                | 2000000            | cost-weighted budget                                                                                                                                                      |
-| `limits.cache_read_weight`            | float 0.0–1.0          | 0.1                | cache-read weight in the budget; 1.0 = raw                                                                                                                                |
+| `limits.cache_read_weight`            | float 0.0–1.0          | 0.1                | cache-read weight in every token total, budgets and displays alike; 1.0 = raw                                                                                             |
 | `limits.session_budget_mode`          | select                 | `warn`             | mid-session per-session budget guard: `off` (no sampling) / `warn` (one ATTENTION + breadcrumb) / `enforce` (wrap-up nudge, then `over_budget` termination → retry/defer) |
 | `limits.max_tokens_per_session`       | int ≥ 1                | 4000000            | weighted per-session cap sampled every ~30s mid-session; healthy sessions run ~1–2.5M weighted, so the default trips only true runaways                                   |
 | `limits.session_budget_grace_s`       | int ≥ 0                | 240                | enforce mode: wrap-up window after the nudge before `over_budget` · 0 = terminate at trip, no nudge                                                                       |

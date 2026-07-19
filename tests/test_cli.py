@@ -390,6 +390,88 @@ def test_status_surfaces_missed_decision_count(project, capsys):
     assert "decisions awaiting an answer: 1" in capsys.readouterr().out
 
 
+def _make_run_with_tokens(project, tasks, *, weight, run_id="20260101-000000-aaaa"):
+    """A finished run whose persisted snapshot pins cache_read_weight, so status
+    assertions prove the weight came from state.json rather than the default."""
+    from bmad_loop.journal import save_state
+    from bmad_loop.model import RunState
+
+    run_dir = project.project / ".bmad-loop" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    save_state(
+        run_dir,
+        RunState(
+            run_id=run_id,
+            project=str(project.project),
+            started_at="2026-01-01T00:00:00",
+            finished=True,
+            tasks=tasks,
+            policy_snapshot={"limits": {"cache_read_weight": weight}},
+        ),
+    )
+    return run_dir
+
+
+def _story_row(out, story_key="1-1-login"):
+    """The per-story status line, split into fields — so token-cell assertions
+    can't be satisfied by an unrelated dash elsewhere in the output (run ids
+    are full of them)."""
+    (line,) = [ln for ln in out.splitlines() if ln.startswith(f"  {story_key} ")]
+    return line.split()
+
+
+def test_status_shows_weighted_and_raw_tokens(project, capsys):
+    """Budgets judge the weighted total; showing only raw overstated spend ~6.5x
+    on cache-heavy runs. Same fixture numbers as the TUI test, deliberately, so
+    the two surfaces are visibly the same case (#129)."""
+    from bmad_loop.model import Phase, StoryTask, TokenUsage
+
+    task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    task.tokens = TokenUsage(
+        input_tokens=100, output_tokens=50, cache_creation_tokens=10, cache_read_tokens=1000
+    )
+    # 0.5, not the 0.1 default: with the default an assertion cannot tell
+    # "read the snapshot" from "silently fell back".
+    _make_run_with_tokens(project, {"1-1-login": task}, weight=0.5)
+
+    assert cli.main(["status", "--project", str(project.project)]) == 0
+    out = capsys.readouterr().out
+    assert "660t (1,160 raw)" in out
+    assert "tokens: 660 weighted (1,160 raw incl. cache reads, cache_read_weight 0.5)" in out
+
+
+def test_status_zero_weight_shows_zero_not_dash(project, capsys):
+    """With cache_read_weight=0 a cache-read-only story weighs 0 but is not
+    untracked. "-" means no tokens at all; rendering 0 as "-" would read as
+    missing data. Mirrors the TUI guard in tui/screens/dashboard.py."""
+    from bmad_loop.model import Phase, StoryTask, TokenUsage
+
+    task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    task.tokens = TokenUsage(cache_read_tokens=1000)
+    _make_run_with_tokens(project, {"1-1-login": task}, weight=0.0)
+
+    assert cli.main(["status", "--project", str(project.project)]) == 0
+    out = capsys.readouterr().out
+    assert "0t (1,000 raw)" in out
+    # the token cell itself is "0", not the "-" placeholder
+    assert _story_row(out)[4] == "0t"
+
+
+def test_status_omits_token_line_when_nothing_tracked(project, capsys):
+    """usage_parser = "none" profiles never report usage — a totals line of
+    zeros would assert free work rather than absent data."""
+    from bmad_loop.model import Phase, StoryTask
+
+    task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    _make_run_with_tokens(project, {"1-1-login": task}, weight=0.1)
+
+    assert cli.main(["status", "--project", str(project.project)]) == 0
+    out = capsys.readouterr().out
+    assert "tokens:" not in out
+    # no tokens at all is exactly what "-" is reserved for
+    assert _story_row(out)[4] == "-"
+
+
 def test_status_resolves_partial_ref(project, capsys):
     _make_run_with_decision(project, run_id="20260101-000000-aaaa")
     # the trailing segment alone resolves to the full run

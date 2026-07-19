@@ -1402,8 +1402,24 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"status: PAUSED ({state.paused_stage}) — {state.paused_reason}")
     else:
         print("status: in progress (or interrupted)")
+    # From the run's persisted snapshot, so this matches the TUI and the run
+    # summary exactly (see Engine.summary). Per-task summation, same reason.
+    weight = state.cache_read_weight()
+    raw_total = sum(t.tokens.total for t in state.tasks.values())
+    if raw_total:
+        weighted_total = sum(t.tokens.weighted_total(weight) for t in state.tasks.values())
+        print(
+            f"tokens: {weighted_total:,} weighted "
+            f"({raw_total:,} raw incl. cache reads, cache_read_weight {weight})"
+        )
     for key, task in state.tasks.items():
-        tokens = f"{task.tokens.total:,}t" if task.tokens.total else "-"
+        raw = task.tokens.total
+        # Gate on raw (does this task have ANY tokens?), never on weighted: with
+        # cache_read_weight = 0 a cache-read-only task weighs 0 but has nonzero
+        # raw, and must render "0", not "-" — "-" means no tokens at all, i.e.
+        # missing data. Mirrors tui/screens/dashboard.py. Do not "simplify" this
+        # to `if weighted` now that weighted is the displayed value.
+        tokens = f"{task.tokens.weighted_total(weight):,}t ({raw:,} raw)" if raw else "-"
         extra = task.defer_reason or task.commit_sha or ""
         print(
             f"  {key:40s} {task.phase:16s} dev×{task.attempt} review×{task.review_cycle} "

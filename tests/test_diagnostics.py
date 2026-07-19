@@ -192,6 +192,10 @@ def test_structure_is_preserved(project):
     # token totals equal the one session's usage (the other session has none)
     assert run.token_totals["input_tokens"] == 100
     assert run.token_totals["total"] == 160
+    # both units, so a bundle reader isn't left recomputing the weighted figure
+    # the budgets actually judged (#129): 100 + 50 + round(10 * 0.1)
+    assert run.token_totals["weighted"] == 151
+    assert run.tasks[0].tokens["weighted"] == 151
     # logs file group reports a nonzero size but no path/content (covered above)
     logs = next(g for g in run.files if g.category == "logs")
     assert logs.count == 1 and logs.total_bytes > 0 and logs.total_lines == 2
