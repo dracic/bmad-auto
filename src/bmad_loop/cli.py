@@ -1789,22 +1789,23 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
 
     pseudo = sanitize.Pseudonymizer()
     diag = diagnostics.collect(run_dirs, pseudo=pseudo, cap=args.max_journal_entries)
+    repairs: list[tuple[str, int]] = []
+    fail_rules: list[str] | None = None
+    report = ""
     try:
-        report = diagnostics.render_markdown(diag, pseudo=pseudo)
+        report = diagnostics.render_markdown(diag, pseudo=pseudo, repairs=repairs)
         if args.json:
             report += (
                 "\n\n## JSON\n\n```json\n"
-                + diagnostics.render_json(diag, pseudo=pseudo)
+                + diagnostics.render_json(diag, pseudo=pseudo, repairs=repairs)
                 + "\n```\n"
             )
     except diagnostics.LeakDetected as e:
-        # The output tripped the final self-check — fail closed, write nothing.
-        print(
-            f"FAIL: refusing to emit — leak self-check fired: {', '.join(e.rules)}", file=sys.stderr
-        )
-        return 1
+        fail_rules = e.rules
 
     if args.legend:
+        # Written even when the self-check refused: the legend is what decodes a
+        # sensitive[<ns>:<alias>] rule name, and it never leaves this machine.
         legend_path = Path(args.legend)
         # The legend reverses the pseudonyms, so it must never land world-readable
         # via the inherited umask — create it owner-only (0600).
@@ -1815,6 +1816,32 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         print(
             f"  ok: alias legend written to {legend_path} — LOCAL ONLY, do NOT share "
             "(it reverses the pseudonyms); delete after use",
+            file=sys.stderr,
+        )
+
+    if fail_rules is not None:
+        # The output tripped the final self-check — fail closed, emit no dump.
+        print(
+            f"FAIL: refusing to emit — leak self-check fired: {', '.join(fail_rules)}",
+            file=sys.stderr,
+        )
+        print(
+            "hint: sensitive[<ns>:<alias>] names a pseudonymized identifier; rerun with "
+            "--legend FILE to decode it locally (never share the legend), and report the "
+            "rule names above as a bmad-loop bug",
+            file=sys.stderr,
+        )
+        return 1
+
+    if repairs:
+        merged: dict[str, int] = {}
+        for label, count in repairs:
+            merged[label] = merged.get(label, 0) + count
+        summary = ", ".join(f"{label} x{count}" for label, count in sorted(merged.items()))
+        print(
+            f"warning: leak backstop pseudonymized {sum(merged.values())} stray "
+            f"occurrence(s) ({summary}) — a per-field routing gap in bmad-loop; "
+            "please include this line in your bug report",
             file=sys.stderr,
         )
 

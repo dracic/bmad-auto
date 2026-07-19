@@ -239,3 +239,64 @@ def test_assert_no_leak_extra_word_boundary():
     # values whose own edge is punctuation are still caught (the \b blind spot)
     assert sanitize.assert_no_leak("see .acme here", extra=[".acme"]) == ["sensitive[0]"]
     assert sanitize.assert_no_leak("use acme. now", extra=["acme."]) == ["sensitive[0]"]
+
+
+def test_assert_no_leak_labeled_extras():
+    # a (value, label) pair reports the label — printable by construction —
+    # instead of the opaque enumerate position, and never echoes the value
+    fired = sanitize.assert_no_leak(
+        "dir secretkey1 here", extra=[("secretkey1", "story:s1-ab12cd34ef56")]
+    )
+    assert fired == ["sensitive[story:s1-ab12cd34ef56]"]
+    assert "secretkey1" not in "".join(fired)
+    # mixed: bare items keep their position-based name
+    fired = sanitize.assert_no_leak("alpha beta", extra=[("alpha", "branch:b-1"), "beta"])
+    assert fired == ["sensitive[branch:b-1]", "sensitive[1]"]
+    # labeled values below the 4-char threshold never fire, same as bare ones
+    assert sanitize.assert_no_leak("a bc d", extra=[("bc", "story:s-x")]) == []
+
+
+# --------------------------------------------------------- replace_standalone
+
+
+@pytest.mark.parametrize(
+    "text,needle,expected,count",
+    [
+        ("dir proj here", "proj", "dir X here", 1),  # mid-text
+        ("proj at start", "proj", "X at start", 1),  # string edge (start)
+        ("ends with proj", "proj", "ends with X", 1),  # string edge (end)
+        ("the project root", "proj", "the project root", 0),  # embedded: untouched
+        ("see .acme here", ".acme", "see X here", 1),  # punctuation-edge needle
+        ("use acme. now", "acme.", "use X now", 1),
+        ("acme.acme", "acme", "X.X", 2),  # adjacent occurrences
+        ("no needle here", "zzzz", "no needle here", 0),  # absent
+        ("aaa", "aa", "aaa", 0),  # word-flanked overlap never matches
+    ],
+)
+def test_replace_standalone_table(text, needle, expected, count):
+    assert sanitize.replace_standalone(text, needle, "X") == (expected, count)
+
+
+def test_replace_standalone_terminates_and_is_idempotent():
+    # a replacement containing the needle is not rescanned within the call
+    out, n = sanitize.replace_standalone("ref key1 end", "key1", "x-key1-x")
+    assert (out, n) == ("ref x-key1-x end", 1)
+    # a replacement free of the needle: a second pass finds nothing
+    out, n = sanitize.replace_standalone("dir proj here", "proj", "p-1a2b")
+    assert n == 1
+    assert sanitize.replace_standalone(out, "proj", "p-1a2b") == (out, 0)
+    # replacement mirrors detection exactly: whatever fired assert_no_leak is
+    # gone after one substitution with a needle-free replacement
+    assert sanitize.assert_no_leak(out, extra=["proj"]) == []
+
+
+def test_pseudonymizer_entries_expose_ns():
+    p = sanitize.Pseudonymizer()
+    a_story = p.alias("1.2-secret", ns="story", epic=1)
+    a_branch = p.alias("feat/secret", ns="branch")
+    assert p.entries() == [
+        ("story", "1.2-secret", a_story),
+        ("branch", "feat/secret", a_branch),
+    ]
+    # legend keeps its shape: alias -> original, ns discarded
+    assert p.legend() == {a_story: "1.2-secret", a_branch: "feat/secret"}

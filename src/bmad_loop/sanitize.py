@@ -26,6 +26,11 @@ identifiers — story keys, branches, SHAs — that *are* identifier-shaped and 
 would otherwise survive verbatim) and :func:`assert_no_leak` (a final-output
 self-check the dump runs over its own rendered bytes before writing, so a
 routing bug or a future field can never silently ship a secret/PII/path).
+`assert_no_leak` accepts labeled extras (``(value, label)``) so a hit can be
+reported by a printable label instead of an opaque index, and its companion
+:func:`replace_standalone` substitutes a leaked value under identical
+word-boundary semantics — the check stays the authority; whether a caller
+repairs-and-rechecks or refuses outright is the caller's policy.
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ import os
 import re
 import secrets
 from collections import Counter
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 # A conservative "this is a machine identifier, not prose or PII" shape: starts
 # alphanumeric, then only word-ish chars (letters, digits, ``.`` ``_`` ``-``),
@@ -145,18 +150,50 @@ def _is_word_boundary(ch: str) -> bool:
     return ch == "" or not (ch.isalnum() or ch == "_")
 
 
-def _contains_standalone(text: str, needle: str) -> bool:
-    """Whole-token search for an opaque needle: matches only when the needle is not
-    flanked by word characters. Unlike re's ``\\b`` on the needle's own edges, this
-    still fires when the needle begins or ends with punctuation (e.g. ``.acme``)."""
+def _iter_standalone(text: str, needle: str) -> Iterator[int]:
+    """Yield start indices of standalone occurrences of an opaque needle: each is
+    flanked by a string edge or a non-word char on both sides. Unlike re's ``\\b``
+    on the needle's own edges, this still fires when the needle begins or ends
+    with punctuation (e.g. ``.acme``). str.find, never regex — needles routinely
+    carry regex metachars. Non-overlapping: a hit resumes scanning past the
+    needle. Both detection and repair walk this one loop so their boundary
+    semantics can never drift apart."""
     start = 0
     while (idx := text.find(needle, start)) >= 0:
         before = text[idx - 1] if idx else ""
         after = text[idx + len(needle)] if idx + len(needle) < len(text) else ""
         if _is_word_boundary(before) and _is_word_boundary(after):
-            return True
-        start = idx + 1
-    return False
+            yield idx
+            start = idx + len(needle)
+        else:
+            start = idx + 1
+
+
+def _contains_standalone(text: str, needle: str) -> bool:
+    """True when ``needle`` occurs standalone (word-boundary-flanked) in ``text``."""
+    return next(_iter_standalone(text, needle), None) is not None
+
+
+def replace_standalone(text: str, needle: str, replacement: str) -> tuple[str, int]:
+    """Replace every standalone occurrence of ``needle``; return ``(text, count)``.
+
+    Occurrences embedded in a longer word stay untouched — that containment is
+    the detection side's deliberate false-positive exclusion (``proj`` inside
+    ``project``), and this must mirror :func:`_contains_standalone` exactly.
+    Scanning consumes past each replaced span, so the replacement is never
+    itself rescanned and a replacement containing the needle still terminates."""
+    parts: list[str] = []
+    pos = 0
+    count = 0
+    for idx in _iter_standalone(text, needle):
+        parts.append(text[pos:idx])
+        parts.append(replacement)
+        pos = idx + len(needle)
+        count += 1
+    if not count:
+        return text, 0
+    parts.append(text[pos:])
+    return "".join(parts), count
 
 
 def _scrub_str(s: str) -> str:
@@ -254,8 +291,14 @@ class Pseudonymizer:
         """alias -> original, for LOCAL use only. Never write this into a dump."""
         return {alias: value for (_, value), alias in self._map.items()}
 
+    def entries(self) -> list[tuple[str, str, str]]:
+        """``(ns, original, alias)`` triples in insertion order — feeds the
+        labeled leak check and alias-substitution repair. Like :meth:`legend`,
+        LOCAL ONLY: the originals must never be written into a dump."""
+        return [(ns, value, alias) for (ns, value), alias in self._map.items()]
 
-def assert_no_leak(text: str, *, extra: Iterable[str] = ()) -> list[str]:
+
+def assert_no_leak(text: str, *, extra: Iterable[str | tuple[str, str]] = ()) -> list[str]:
     """Re-scan already-rendered output for anything that must not ship.
 
     The defense-in-depth backstop to the per-field routing: even if a handler is
@@ -265,6 +308,13 @@ def assert_no_leak(text: str, *, extra: Iterable[str] = ()) -> list[str]:
     string (e.g. a project basename, or every :meth:`Pseudonymizer.legend` value)
     in the final bytes. Returns the list of rule names that fired — empty means
     clean. Callers fail closed (refuse to write) on a non-empty result.
+
+    An ``extra`` item is either a bare sensitive value (fires as
+    ``sensitive[<index>]``) or a ``(value, label)`` pair (fires as
+    ``sensitive[<label>]``). The label is echoed verbatim into rule names and
+    thence CLI output, so callers must NEVER put the sensitive value (or any
+    part of it) in the label — diagnostics builds labels from ``ns:alias``
+    only, which are safe to print by construction.
     """
     fired: list[str] = []
     if _EMAIL_RE.search(text):
@@ -284,12 +334,16 @@ def assert_no_leak(text: str, *, extra: Iterable[str] = ()) -> list[str]:
     if len(user) >= 5 and _contains_standalone(text, user):
         fired.append("username")
     for i, item in enumerate(extra):
-        item = str(item)
+        if isinstance(item, tuple):
+            value, label = str(item[0]), item[1]
+        else:
+            # Bare value: report the position only — never echo the value, since
+            # this rule name is surfaced in the CLI failure message and would
+            # otherwise leak it.
+            value, label = str(item), str(i)
         # delimiter check so a short basename ("proj") can't false-positive on a
         # common word that contains it ("project"), yet a value whose own edge is
         # punctuation (".acme") is still caught — a blind spot of a \b regex.
-        # Report the position only — never echo the value, since this rule name is
-        # surfaced in the CLI failure message and would otherwise leak it.
-        if len(item) >= 4 and _contains_standalone(text, item):
-            fired.append(f"sensitive[{i}]")
+        if len(value) >= 4 and _contains_standalone(text, value):
+            fired.append(f"sensitive[{label}]")
     return fired

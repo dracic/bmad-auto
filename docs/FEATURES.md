@@ -184,7 +184,7 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 - `bmad-loop decisions` — answer deferred-work decisions past sweeps left unanswered (`--list` to just show them).
 - `bmad-loop list` (`ls`) — list every run/sweep with its short ref, type, and status.
 - `bmad-loop status [<run-id>]` — run + sprint summary with per-story token totals.
-- `bmad-loop diagnose [<run-id>]` (`diag`) — emit a sanitized diagnostic dump of a run/sweep to hand maintainers (histograms, counts, env, file sizes — no code/spec/prompts/paths/PII); defaults to the latest run (`--all`, `--out`, `--json`, `--max-journal-entries`).
+- `bmad-loop diagnose [<run-id>]` (`diag`) — emit a sanitized diagnostic dump of a run/sweep to hand maintainers (histograms, counts, env, file sizes — no code/spec/prompts/paths/PII); a stray pseudonymized identifier is auto-substituted with its alias (disclosed in the report), while PII/secret hits still refuse to emit; defaults to the latest run (`--all`, `--out`, `--json`, `--max-journal-entries`).
 - `bmad-loop attach [<run-id>]` — tmux-attach to a run's live agent session.
 - `bmad-loop stop <run-id>` — stop a live run (engine + agent session).
 - `bmad-loop delete <run-id>` — delete a run directory (`--force` stops it first if live).
