@@ -380,7 +380,13 @@ class RunState:
         """The run's cache-read weight from its persisted policy snapshot; the
         product default (policy.LimitsPolicy.cache_read_weight = 0.1) when the
         snapshot predates the field or is malformed. Lets the TUI show the same
-        weighted total the engine's budget uses without importing Policy."""
+        weighted total the engine's budget uses without importing Policy.
+
+        The snapshot is re-stamped at every engine start (run, sweep, resume), so
+        on a resumed run this is the *resuming* process's weight, matching what
+        that process enforces. Edit the weight and resume and the run's whole
+        accumulated history re-weights — totals are recomputed from raw counts,
+        and the budget has always judged cumulative counts at the live weight."""
         limits = self.policy_snapshot.get("limits")
         if isinstance(limits, dict):
             try:

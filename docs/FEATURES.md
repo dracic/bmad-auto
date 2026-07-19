@@ -142,7 +142,7 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 
 ### Configuration (`.bmad-loop/policy.toml`)
 
-- Single policy file written by `init`, snapshotted at run start (applies to new runs and resumes; editable live from the TUI).
+- Single policy file written by `init`, stamped into the run at every engine start — `run`, `sweep`, `resume` — so it always describes the policy that process enforces (applies to new runs and resumes; editable live from the TUI).
 - Sections: `[gates]`, `[limits]`, `[verify]`, `[notify]`, `[review]`, `[adapter]` (+ per-stage), `[sweep]`, `[scm]` (worktree isolation + merge-back), `[cleanup]` (run-dir retention + disk reclamation), `[plugins]` (trust allowlist + per-plugin `[plugins.<name>]` config — e.g. the opt-in game-engine layer via `[plugins.unity]`, off by default), `[tui]` (`low_frame_rate` for slow/SSH links; persisted dashboard pane sizes).
 - Tunable limits: `max_review_cycles`, `max_dev_attempts`, `max_followup_reviews`, `session_timeout_min`, `git_timeout_s`, `teardown_grace_s` (one shared budget bounding the verified window kill _and_ the follow-on reap of any straggler descendant the session detached — e.g. a `setsid` background writer — combined; whatever remains after the window dies is what the straggler reap gets, before the worktree is merged and removed), `stop_without_result_nudges`, `dev_stall_grace_s`, `dev_stall_nudges`, `dev_stall_nudges_cap`, `workflow_stall_nudges_cap`, `max_tokens_per_story`.
 

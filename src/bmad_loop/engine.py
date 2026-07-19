@@ -748,10 +748,12 @@ class Engine:
         tasks = self.state.tasks.values()
         # Weight from the run's persisted snapshot, NOT self.policy — every
         # display surface must be reproducible from state.json alone, which is
-        # all the TUI and `bmad-loop status` can see. Resume reloads policy.toml
-        # without re-stamping the snapshot, so live policy and snapshot can
-        # disagree; sourcing this from live policy would make the CLI and the
-        # TUI print different totals for the same run. Do not "unify" these.
+        # all the TUI, `bmad-loop status` and `diagnose` can see; sourcing this
+        # from live policy would make them print different totals for the same
+        # run. Reading the snapshot is safe precisely because every engine start
+        # (run, sweep, resume) stamps it with the policy that process enforces
+        # (#189) — so it agrees with self.policy rather than substituting for it.
+        # Do not "unify" these.
         weight = self.state.cache_read_weight()
         return RunSummary(
             run_id=self.state.run_id,

@@ -998,9 +998,48 @@ def _resume_paused_run(project: Path, run_dir: Path) -> int:
     if not _require_base_skills(project, pol, require_stories=state.source == "stories"):
         return 1
     journal = Journal(run_dir)
-    journal.append("run-resume", was_paused=state.paused_reason)
+    # Read the outgoing weight BEFORE the re-stamp below replaces it: the
+    # session-end entries this run already wrote were weighted at it, so without
+    # recording it here they stop being reconstructible from the (now newer)
+    # snapshot — the very guarantee #129 exists to provide. Scalars only, never
+    # policy keys or values: journal entries are unsanitized at write time, and
+    # diagnose scrubs unknown fields with scrub_json, NOT the key-aware
+    # _scrub_policy that reduces adapter.env and plugins.settings.
+    new_snapshot = pol.to_dict()
+    fields: dict[str, object] = {
+        "was_paused": state.paused_reason,
+        "cache_read_weight": pol.limits.cache_read_weight,
+        # Compare JSON-normalized, the way save_state persists it: to_dict()
+        # returns TUPLES (verify.commands, extra_args, plugins.enabled) where the
+        # reloaded snapshot has lists, so a plain != reports "changed" on every
+        # resume — including one where policy.toml was never touched.
+        "policy_changed": bool(state.policy_snapshot)
+        and json.dumps(new_snapshot, sort_keys=True)
+        != json.dumps(state.policy_snapshot, sort_keys=True),
+    }
+    prior_weight = state.cache_read_weight()
+    if prior_weight != pol.limits.cache_read_weight:
+        fields["cache_read_weight_was"] = prior_weight
+    journal.append("run-resume", **fields)
+    # Re-stamp: the snapshot must describe the policy THIS process enforces, for
+    # its whole lifetime (Policy is loaded once here and frozen — the engine never
+    # re-reads policy.toml). Enforcement already reads the reloaded `pol` (the
+    # per-story budget in Engine._finish_commit, every SessionSpec), so leaving
+    # the launch-time snapshot in place made every display — status, the TUI, the
+    # run summary, the diagnose bundle — report a weight the budget was not using,
+    # silently up to 10x off at the legal extremes (#189).
+    # Deliberately NOT re-derived from the new policy: state.source/spec_folder/
+    # run_type/epic_filter/target_branch stay pinned at launch (see RunState), so
+    # a policy edit mid-run cannot switch a live run's mode or scope. The snapshot
+    # can therefore disagree with those fields; that is correct, not a bug.
+    state.policy_snapshot = new_snapshot
     state.clear_pause()
     runs.write_pid(run_dir)
+    # Persist before the engine starts: status, the TUI and diagnose only ever
+    # read state.json, and Engine._save() may not fire for minutes. write_pid
+    # runs FIRST so no observer catches a window of "not paused + dead pid",
+    # which tui.data classifies as INTERRUPTED.
+    save_state(run_dir, state)
     # drop any stale agent session so the run spins up a fresh one (a stopped or
     # interrupted run can leave a lingering bmad-loop-<id> session behind).
     runs.kill_session(run_dir.name)
