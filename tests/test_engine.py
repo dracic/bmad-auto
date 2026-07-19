@@ -998,9 +998,12 @@ def _cache_heavy_engine(project, *, snapshot_weight, live_weight, usage):
 
 def test_summary_weighted_reads_the_run_snapshot_not_live_policy(project):
     """Displays must be reproducible from state.json alone, because that is all
-    the TUI and `bmad-loop status` can see. Resume reloads policy.toml without
-    re-stamping the snapshot, so sourcing the summary from live policy would
-    make the CLI and the TUI disagree for the same run.
+    the TUI, `bmad-loop status` and `diagnose` can see — sourcing the summary
+    from live policy would make them disagree for the same run.
+
+    The engine keeps the two in agreement by stamping the snapshot at every
+    start (#189); this test forces them apart to prove which one is read, so it
+    must keep constructing the divergence by hand rather than via resume.
 
     The two weights differ here precisely so the number identifies the source:
     0.5 (snapshot) -> 1,320; 1.0 (live policy) -> 2,320, i.e. raw.

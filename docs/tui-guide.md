@@ -494,6 +494,9 @@ rewrites keys you actually changed; everything else — comments, order,
 formatting — stays byte-identical. A missing policy file starts from the full
 inline-documented template. The note at the top is load-bearing: **running
 engines snapshot policy at start — changes apply to new runs and resumes.**
+Because a resume re-stamps, editing `limits.cache_read_weight` and resuming
+re-weights that run's _whole_ accumulated history, not just the sessions after
+the resume — every total is recomputed from raw counts at the current weight.
 
 The form is grouped by TOML section. Every section starts **collapsed** with a
 one-line description in its header, so the grown-large form scans at a glance —

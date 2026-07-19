@@ -1809,6 +1809,207 @@ def test_resume_restores_persisted_run_scope(project, monkeypatch):
     assert captured["max_stories"] == 4
 
 
+# --------------------------------------------------- resume re-stamps the snapshot (#189)
+
+# 0.5, never the 0.1 default: with the default an assertion cannot tell "read the
+# re-stamped snapshot" from "fell back to RunState.cache_read_weight's default".
+# `gates.mode` and `verify.commands` are non-defaults, so a whole-tree stamp is
+# distinguishable from a surgical poke at the weight.
+RESUME_POLICY = """\
+[gates]
+mode = "none"
+
+[verify]
+commands = ["true"]
+
+[limits]
+cache_read_weight = 0.5
+"""
+LAUNCH_SNAPSHOT = {"limits": {"cache_read_weight": 0.1}}
+
+
+def _paused_run_for_resume(project, monkeypatch, *, snapshot=LAUNCH_SNAPSHOT, **state_kwargs):
+    """A paused run plus a real policy.toml, wired so `_resume_paused_run` drives
+    a stub engine for real. `snapshot=None` omits `policy_snapshot` entirely —
+    a legacy run persisted before the field existed."""
+    from conftest import install_base_skills
+
+    from bmad_loop import runs
+
+    install_bmad_config(project)
+    install_base_skills(project)
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    _write_policy(project.project, RESUME_POLICY)
+    if snapshot is not None:
+        state_kwargs["policy_snapshot"] = snapshot
+    run_dir = _make_run_with_state(
+        project.project,
+        "20990101-000000-beef",
+        paused_reason="escalation",
+        paused_stage="escalation",
+        **state_kwargs,
+    )
+    monkeypatch.setattr(runs, "kill_session", lambda rid: None)
+    monkeypatch.setattr(cli, "_make_adapters", lambda *a, **k: {r: None for r in cli.ROLES})
+    return run_dir
+
+
+def _state_reading_engine(seen):
+    """A stub engine that records state.json as it stood when the engine started.
+    _StubEngine never saves, so anything `seen` contains was written by the CLI
+    before `run()` — which is the actual requirement, since `status`, the TUI and
+    `diagnose` can only read the file."""
+
+    class _Engine(_StubEngine):
+        def __init__(self, **kwargs):
+            self._run_dir = kwargs["run_dir"]
+
+        def run(self):
+            from bmad_loop.journal import load_state
+
+            seen.append(load_state(self._run_dir))
+            return super().run()
+
+    return _Engine
+
+
+def _resume_entries(run_dir):
+    from bmad_loop.journal import Journal
+
+    return [e for e in Journal(run_dir).entries() if e["kind"] == "run-resume"]
+
+
+def _resume_entry(run_dir):
+    (entry,) = _resume_entries(run_dir)
+    return entry
+
+
+def test_resume_restamps_policy_snapshot_before_the_engine_runs(project, monkeypatch):
+    """#189: resume reloads policy.toml and enforces it (the per-story budget,
+    every SessionSpec) but used to leave the launch-time snapshot in place, so
+    every display read a weight the budget was not using — silently up to 10x off
+    at the legal extremes. The stamp must also be *durable before* the engine
+    starts, since Engine._save() may not fire for minutes."""
+    seen: list = []
+    run_dir = _paused_run_for_resume(project, monkeypatch)
+    monkeypatch.setattr(cli, "Engine", _state_reading_engine(seen))
+
+    assert cli._resume_paused_run(project.project, run_dir) == 0
+
+    (at_start,) = seen
+    assert at_start.cache_read_weight() == 0.5  # was 0.1 — the launch-time value
+    assert at_start.paused is False
+
+
+def test_resume_restamps_the_whole_policy_not_just_the_weight(project, monkeypatch):
+    """The snapshot backs the diagnose `policy` block too, not only the weight,
+    so the stamp is the whole tree — a surgical poke at limits.cache_read_weight
+    would pass the weight assertions and still ship a stale bundle."""
+    from bmad_loop.journal import load_state
+
+    run_dir = _paused_run_for_resume(project, monkeypatch)
+    monkeypatch.setattr(cli, "Engine", _StubEngine)
+
+    assert cli._resume_paused_run(project.project, run_dir) == 0
+
+    snapshot = load_state(run_dir).policy_snapshot
+    assert snapshot["limits"]["cache_read_weight"] == 0.5
+    assert snapshot["gates"]["mode"] == "none"  # non-default, straight from policy.toml
+    assert snapshot["verify"]["commands"] == ["true"]
+    assert "adapter" in snapshot  # a section policy.toml never mentions
+
+
+def test_resume_restamps_policy_snapshot_for_sweep_runs(project, monkeypatch):
+    """The sweep arm of the resume branch rebuilds a SweepEngine down a separate
+    path — fixing only the story arm would leave sweeps displaying stale."""
+    from bmad_loop.journal import load_state
+
+    run_dir = _paused_run_for_resume(project, monkeypatch, run_type="sweep")
+    monkeypatch.setattr(cli, "SweepEngine", _StubEngine)
+
+    assert cli._resume_paused_run(project.project, run_dir) == 0
+
+    assert load_state(run_dir).cache_read_weight() == 0.5
+
+
+def test_resume_stamps_a_legacy_run_with_no_snapshot(project, monkeypatch):
+    """A run persisted before policy_snapshot existed carries `{}` and displays at
+    the hardcoded 0.1 default. Its first resume stamps it — and must not report
+    that as a policy *change*, since there is no prior policy to have changed."""
+    from bmad_loop.journal import load_state
+
+    run_dir = _paused_run_for_resume(project, monkeypatch, snapshot=None)
+    monkeypatch.setattr(cli, "Engine", _StubEngine)
+
+    assert cli._resume_paused_run(project.project, run_dir) == 0
+
+    state = load_state(run_dir)
+    assert state.policy_snapshot != {}
+    assert state.cache_read_weight() == 0.5
+    assert _resume_entry(run_dir)["policy_changed"] is False
+
+
+def test_status_after_resume_shows_the_edited_weight(project, monkeypatch, capsys):
+    """The user-visible bug, end to end: edit the weight, resume, and `status`
+    used to keep reporting the launch-time total (260) while the budget judged
+    the run at the edited one (660)."""
+    from bmad_loop.model import Phase, StoryTask, TokenUsage
+
+    task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    task.tokens = TokenUsage(
+        input_tokens=100, output_tokens=50, cache_creation_tokens=10, cache_read_tokens=1000
+    )
+    run_dir = _paused_run_for_resume(project, monkeypatch, tasks={"1-1-login": task})
+    monkeypatch.setattr(cli, "Engine", _StubEngine)
+    assert cli._resume_paused_run(project.project, run_dir) == 0
+    capsys.readouterr()
+
+    assert cli.main(["status", "--project", str(project.project)]) == 0
+    out = capsys.readouterr().out
+    assert "tokens: 660 weighted (1,160 raw incl. cache reads, cache_read_weight 0.5)" in out
+
+
+def test_resume_journals_the_weight_it_is_resuming_under(project, monkeypatch):
+    """Re-stamping re-weights the run's whole history, so `session-end` entries
+    written before the resume stop being reconstructible from the (now newer)
+    snapshot. Recording both weights on `run-resume` keeps them recoverable."""
+    run_dir = _paused_run_for_resume(project, monkeypatch)
+    monkeypatch.setattr(cli, "Engine", _StubEngine)
+
+    assert cli._resume_paused_run(project.project, run_dir) == 0
+
+    entry = _resume_entry(run_dir)
+    assert entry["cache_read_weight"] == 0.5
+    assert entry["cache_read_weight_was"] == 0.1
+    assert entry["policy_changed"] is True
+
+
+def test_resume_under_an_unchanged_policy_reports_no_change(project, monkeypatch):
+    """Load-bearing: Policy.to_dict() yields TUPLES for verify.commands,
+    extra_args and plugins.enabled, while the persisted snapshot round-trips them
+    back as LISTS. A plain `!=` between the two therefore reports "policy
+    changed" on every single resume, even an untouched one — so the comparison
+    has to normalize through JSON the way save_state does."""
+    from bmad_loop.journal import load_state
+
+    run_dir = _paused_run_for_resume(project, monkeypatch)
+    monkeypatch.setattr(cli, "Engine", _StubEngine)
+    # first resume stamps the live policy; the second resumes onto that stamp
+    # with policy.toml untouched, so nothing has changed by then.
+    assert cli._resume_paused_run(project.project, run_dir) == 0
+    stamped = load_state(run_dir).policy_snapshot
+    assert stamped["verify"]["commands"] == ["true"]  # a list on disk...
+    assert policy_mod.load(project.project / ".bmad-loop" / "policy.toml").verify.commands == (
+        "true",
+    )  # ...but a tuple in the live policy
+
+    assert cli._resume_paused_run(project.project, run_dir) == 0
+
+    entry = _resume_entries(run_dir)[-1]
+    assert entry["policy_changed"] is False
+    assert "cache_read_weight_was" not in entry  # unchanged -> omitted
+
+
 def test_resume_refuses_live_run(tmp_path, monkeypatch, capsys):
     from bmad_loop import runs
 

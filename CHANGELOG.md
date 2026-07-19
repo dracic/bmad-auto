@@ -180,6 +180,26 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
 
 ### Fixed
 
+- **Resumed runs display the policy they actually enforce (#189).** `policy_snapshot` was
+  stamped only at run creation. `resume` reloads `policy.toml` and enforces it — the
+  per-story budget, every `SessionSpec` — but left the launch-time snapshot in place, and
+  every display reads the snapshot: the run summary, `bmad-loop status`, the TUI, and the
+  `policy` block of the `diagnose` bundle, which claimed to describe the run that was
+  executed. Edit `limits.cache_read_weight` between launch and resume and the run enforced
+  at the new weight while every surface reported the old one, silently up to 10x apart at
+  the legal extremes (0.0–1.0). Resume now re-stamps the whole snapshot and persists it
+  before the engine starts, restoring the documented contract that policy edits apply to
+  resumes. A single `session-end` entry could likewise carry `tokens_weighted` at the
+  snapshot weight beside `budget_weighted` at the live one; the two now agree by
+  construction. Run scope and mode (`source`, `spec_folder`, `epic_filter`, …) stay pinned
+  at launch as before — a policy edit still cannot redirect a live run.
+  **Visible output change:** a run resumed across a weight edit re-weights its _whole_
+  history, not just post-resume sessions, since totals are recomputed from raw counts (this
+  is what the budget always did). A pre-0.8.2 run with no snapshot at all gets one on its
+  first resume, so it stops displaying at the hardcoded 0.1 default. `run-resume` journal
+  entries now carry `cache_read_weight`, `policy_changed`, and `cache_read_weight_was` when
+  it moved, keeping per-session totals written under the old weight reconstructible.
+
 - **Run summaries and `bmad-loop status` report weighted tokens, with both units labeled
   (#129).** The run-finished summary — stdout, the `ATTENTION` file, and the desktop
   notification all render from one place — reported the **raw** total, counting cache reads
