@@ -1419,6 +1419,72 @@ def cmd_decisions(args: argparse.Namespace) -> int:
     return 0
 
 
+STATUS_SCHEMA_VERSION = 1
+
+
+def _status_document(state: RunState) -> dict[str, object]:
+    """The `status --json` document: the stable machine-readable contract.
+
+    Unlike the human-readable status text (best-effort, free to change), this
+    shape is an API: changes must be additive; anything breaking bumps
+    STATUS_SCHEMA_VERSION (same convention as diagnostics.SCHEMA_VERSION).
+    Everything here is derived from state.json alone — never from live policy
+    or other project files — so a consumer can reproduce the document, and the
+    weight matches what the run actually enforced (see Engine.summary).
+    """
+    weight = state.cache_read_weight()
+    if state.finished:
+        status = "finished"
+    elif state.paused:
+        status = "paused"
+    elif state.crashed:
+        status = "crashed"
+    elif state.stopped:
+        status = "stopped"
+    else:
+        status = "in-progress"
+    tasks = []
+    for key, task in state.tasks.items():
+        tokens = task.tokens.to_dict()
+        tokens["raw"] = task.tokens.total
+        tokens["weighted"] = task.tokens.weighted_total(weight)
+        tasks.append(
+            {
+                "story_key": key,
+                "epic": task.epic,
+                "phase": str(task.phase),
+                "attempt": task.attempt,
+                "review_cycle": task.review_cycle,
+                "tokens": tokens,
+                "commit_sha": task.commit_sha,
+                "defer_reason": task.defer_reason,
+            }
+        )
+    return {
+        "schema_version": STATUS_SCHEMA_VERSION,
+        "run_id": state.run_id,
+        "run_type": state.run_type,
+        "source": state.source,
+        "started_at": state.started_at,
+        "status": status,
+        "finished": state.finished,
+        "stopped": state.stopped,
+        "crashed": state.crashed,
+        "crash_error": state.crash_error,
+        "paused_stage": state.paused_stage,
+        "paused_reason": state.paused_reason,
+        "paused_story_key": state.paused_story_key,
+        "cache_read_weight": weight,
+        "tokens": {
+            "raw": sum(t.tokens.total for t in state.tasks.values()),
+            # Per-task summation, same as Engine.summary: sum-of-rounds, never
+            # a weighted_total of the summed counters.
+            "weighted": sum(t.tokens.weighted_total(weight) for t in state.tasks.values()),
+        },
+        "tasks": tasks,
+    }
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     project = _project(args)
     if args.run_id:
@@ -1433,6 +1499,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("no runs found", file=sys.stderr)
         return 1
     state = load_state(run_dir)
+    if args.json:
+        print(json.dumps(_status_document(state), indent=2))
+        return 0
     kind = f" [{state.run_type}]" if state.run_type != "story" else ""
     print(f"run {state.run_id}{kind}  started {state.started_at}")
     if state.finished:
@@ -2115,6 +2184,11 @@ def main(argv: list[str] | None = None) -> int:
 
     status_p = add("status", cmd_status, "show run + sprint state")
     status_p.add_argument("run_id", nargs="?")
+    status_p.add_argument(
+        "--json",
+        action="store_true",
+        help="emit a machine-readable JSON document instead of text",
+    )
 
     diag_p = add(
         "diagnose",

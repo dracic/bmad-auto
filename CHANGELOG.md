@@ -9,6 +9,13 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **`bmad-loop status --json` (#190).** A stable, schema-versioned JSON document (run
+  id/type/source, derived status + pause fields, snapshot `cache_read_weight`, raw +
+  weighted token totals, and per-story phase/attempt/review-cycle/tokens/commit/defer
+  reason) replaces the text output when passed. This is the supported machine-readable
+  surface — the human text, whose layout #129 already changed once with no warning
+  path, is now explicitly best-effort.
+
 - **`session-end` journal entries carry `tokens_weighted` beside `tokens` (#129).** Only the
   raw scalar was persisted, and the weight cannot be backed out of it, so a session's
   cost-weighted spend was unreconstructible after the fact — the weighted figure existed

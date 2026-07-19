@@ -536,6 +536,169 @@ def test_status_stories_mode_bad_manifest_is_soft(project, capsys):
     assert "no stories.yaml found" in capsys.readouterr().out
 
 
+def _status_json(project, capsys, *extra_args):
+    """Run `status --json` and parse the WHOLE of stdout — parsing the full
+    stream (not a substring) is itself the assertion that nothing but the
+    document is printed."""
+    assert cli.main(["status", "--project", str(project.project), "--json", *extra_args]) == 0
+    out, err = capsys.readouterr()
+    assert err == ""
+    return json.loads(out)
+
+
+def test_status_json_emits_pure_document(project, capsys):
+    from bmad_loop.model import Phase, StoryTask, TokenUsage
+
+    task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    task.tokens = TokenUsage(
+        input_tokens=100, output_tokens=50, cache_creation_tokens=10, cache_read_tokens=1000
+    )
+    _make_run_with_tokens(project, {"1-1-login": task}, weight=0.5)
+
+    doc = _status_json(project, capsys)
+    assert doc["schema_version"] == cli.STATUS_SCHEMA_VERSION == 1
+    assert doc["run_id"] == "20260101-000000-aaaa"
+    assert doc["run_type"] == "story"
+    assert doc["source"] == "sprint-status"
+    assert doc["started_at"] == "2026-01-01T00:00:00"
+    assert doc["status"] == "finished"
+    assert doc["finished"] is True
+    assert doc["stopped"] is False
+    assert doc["crashed"] is False
+    assert doc["crash_error"] is None
+    assert doc["paused_stage"] is None
+    assert doc["paused_reason"] is None
+    assert doc["paused_story_key"] is None
+    (entry,) = doc["tasks"]
+    assert entry["story_key"] == "1-1-login"
+    assert entry["epic"] == 1
+    assert entry["phase"] == "done"
+    assert entry["attempt"] == 0
+    assert entry["review_cycle"] == 0
+    # same fixture numbers as the text test above (#129): weighted 660, raw 1160
+    assert entry["tokens"] == {
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cache_read_tokens": 1000,
+        "cache_creation_tokens": 10,
+        "raw": 1160,
+        "weighted": 660,
+    }
+
+
+def test_status_json_weight_from_snapshot_and_per_task_rounding(project, capsys):
+    """The run-level weighted total must be the sum of per-task weighted totals
+    (sum-of-rounds), never weighted_total of the summed counters: two tasks of
+    101 cache reads at weight 0.5 weigh 50 + 50 = 100, not round(101) = 101.
+    And weight 0.5 (not the 0.1 default) proves it came from the snapshot."""
+    from bmad_loop.model import Phase, StoryTask, TokenUsage
+
+    a = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    a.tokens = TokenUsage(input_tokens=10, cache_read_tokens=101)
+    b = StoryTask(story_key="1-2-logout", epic=1, phase=Phase.DONE)
+    b.tokens = TokenUsage(output_tokens=20, cache_read_tokens=101)
+    _make_run_with_tokens(project, {"1-1-login": a, "1-2-logout": b}, weight=0.5)
+
+    doc = _status_json(project, capsys)
+    assert doc["cache_read_weight"] == 0.5
+    entry_a, entry_b = doc["tasks"]
+    assert entry_a["tokens"]["weighted"] == 60
+    assert entry_b["tokens"]["weighted"] == 70
+    assert doc["tokens"] == {"raw": 232, "weighted": 130}
+
+
+def test_status_json_zero_weight_is_numeric_zero(project, capsys):
+    """JSON has no "-" placeholder: a cache-read-only task at weight 0 emits a
+    numeric 0 weighted next to its nonzero raw, so consumers can always tell
+    "weighs nothing" from "no usage data" by the raw counters."""
+    from bmad_loop.model import Phase, StoryTask, TokenUsage
+
+    task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    task.tokens = TokenUsage(cache_read_tokens=1000)
+    _make_run_with_tokens(project, {"1-1-login": task}, weight=0.0)
+
+    doc = _status_json(project, capsys)
+    (entry,) = doc["tasks"]
+    assert entry["tokens"]["weighted"] == 0
+    assert entry["tokens"]["raw"] == 1000
+    assert doc["tokens"] == {"raw": 1000, "weighted": 0}
+
+
+def test_status_json_paused_run(project, capsys):
+    from bmad_loop.journal import save_state
+    from bmad_loop.model import PAUSE_ESCALATION, Phase, RunState, StoryTask
+
+    run_id = "20260101-000000-aaaa"
+    run_dir = project.project / ".bmad-loop" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    save_state(
+        run_dir,
+        RunState(
+            run_id=run_id,
+            project=str(project.project),
+            started_at="2026-01-01T00:00:00",
+            paused_reason="dev session escalated",
+            paused_stage=PAUSE_ESCALATION,
+            paused_story_key="1-1-login",
+            tasks={"1-1-login": StoryTask(story_key="1-1-login", epic=1, phase=Phase.ESCALATED)},
+            policy_snapshot={"limits": {"cache_read_weight": 0.1}},
+        ),
+    )
+
+    doc = _status_json(project, capsys)
+    assert doc["status"] == "paused"
+    assert doc["paused_stage"] == "escalation"
+    assert doc["paused_reason"] == "dev session escalated"
+    assert doc["paused_story_key"] == "1-1-login"
+    assert doc["finished"] is False
+
+
+def test_status_json_defer_and_commit_are_separate_fields(project, capsys):
+    """The text line's trailing cell is `defer_reason or commit_sha` — ambiguous
+    free text, the core #190 complaint. The document keeps them apart."""
+    from bmad_loop.model import Phase, StoryTask
+
+    deferred = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DEFERRED)
+    deferred.defer_reason = "attempts exhausted: 3 dev sessions"
+    done = StoryTask(story_key="1-2-logout", epic=1, phase=Phase.DONE)
+    done.commit_sha = "abc1234"
+    _make_run_with_tokens(project, {"1-1-login": deferred, "1-2-logout": done}, weight=0.1)
+
+    doc = _status_json(project, capsys)
+    entry_deferred, entry_done = doc["tasks"]
+    assert entry_deferred["phase"] == "deferred"
+    assert entry_deferred["defer_reason"] == "attempts exhausted: 3 dev sessions"
+    assert entry_deferred["commit_sha"] is None
+    assert entry_done["phase"] == "done"
+    assert entry_done["commit_sha"] == "abc1234"
+    assert entry_done["defer_reason"] is None
+
+
+def test_status_json_stories_mode_is_pure_json(project, capsys):
+    """--json must skip every text trailer (stories board, backlog, decisions
+    nudge) — the stories-mode board would otherwise corrupt the document."""
+    _setup_stories_fixture(project, [_stories_entry("1"), _stories_entry("2")])
+    _make_stories_run(project)
+    doc = _status_json(project, capsys)
+    assert doc["source"] == "stories"
+    assert doc["tasks"] == []
+
+
+def test_status_json_error_paths_leave_stdout_empty(project, capsys):
+    """Exit 1 with an empty stdout: a consumer piping to a JSON parser sees the
+    failure in the exit code, never a partial or non-JSON document."""
+    assert cli.main(["status", "--project", str(project.project), "--json"]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "no runs found" in err
+
+    _make_run_with_decision(project, run_id="20260101-000000-aaaa")
+    assert cli.main(["status", "--project", str(project.project), "--json", "zzzz"]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "no such run: zzzz" in err
+
+
 def test_list_shows_short_refs(project, capsys):
     _make_run_with_decision(project, run_id="20260101-000000-aaaa")
     _make_run_with_decision(project, run_id="20260102-000000-bbbb")
