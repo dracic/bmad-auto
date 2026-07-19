@@ -183,7 +183,7 @@ See [README.md](../README.md) for the narrative overview and [setup-guide.md](se
 - `bmad-loop resolve <run-id>` — resolve a CRITICAL escalation, then re-arm + resume (`--story`, `--no-interactive`, `--restore-patch <path>` for intent-gap patch-restore, `--resume`/`--no-resume`).
 - `bmad-loop decisions` — answer deferred-work decisions past sweeps left unanswered (`--list` to just show them).
 - `bmad-loop list` (`ls`) — list every run/sweep with its short ref, type, and status.
-- `bmad-loop status [<run-id>]` — run + sprint summary with per-story token totals, cost-weighted with the raw count alongside.
+- `bmad-loop status [<run-id>]` — run + sprint summary with per-story token totals, cost-weighted with the raw count alongside. `--json` instead emits a stable machine-readable document (schema-versioned; run state, snapshot `cache_read_weight`, per-story phase/attempt/review-cycle/tokens/commit/defer-reason) — the supported surface for scripts; the text output is best-effort.
 - `bmad-loop diagnose [<run-id>]` (`diag`) — emit a sanitized diagnostic dump of a run/sweep to hand maintainers (histograms, counts, env, file sizes — no code/spec/prompts/paths/PII); a stray pseudonymized identifier is auto-substituted with its alias (disclosed in the report), while PII/secret hits still refuse to emit; defaults to the latest run (`--all`, `--out`, `--json`, `--max-journal-entries`).
 - `bmad-loop attach [<run-id>]` — tmux-attach to a run's live agent session.
 - `bmad-loop stop <run-id>` — stop a live run (engine + agent session).
