@@ -31,6 +31,7 @@ from bmad_loop.policy import (
     ReviewPolicy,
     ScmPolicy,
 )
+from bmad_loop.runs import STOP_REQUEST_FILE, graceful_stop_requested
 from bmad_loop.stories_engine import StoriesEngine
 from bmad_loop.verify import read_frontmatter, rev_parse_head, status_of
 
@@ -862,6 +863,37 @@ def test_story_checkpoint_skipped_when_last(project):
     assert not load_state(engine.run_dir).paused
     assert _kinds(engine.journal, "checkpoint-skip-last")
     assert not _kinds(engine.journal, "checkpoint-pause")
+
+
+def test_done_checkpoint_skipped_when_graceful_stop_pending(project):
+    """A pending graceful stop turns a done_checkpoint into a skip, not a pause: the
+    loop-head check ends the run `stopped` on the next iteration, so pausing here
+    would strand it `paused` instead. The skip is tagged reason=graceful-stop, and
+    the still-pending story is never dispatched."""
+    setup_stories(project, [entry("1", done_checkpoint=True), entry("2")])
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+
+    def dev_then_request_stop(spec) -> SessionResult:
+        result = stories_dev_effect()(spec)
+        (run_dir / STOP_REQUEST_FILE).write_text(
+            '{"requested_at": "2026-07-20T00:00:00", "mode": "graceful"}', encoding="utf-8"
+        )
+        return result
+
+    engine, _ = make_engine(project, [dev_then_request_stop])
+    summary = engine.run()
+
+    persisted = load_state(engine.run_dir)
+    assert summary.done == 1 and not summary.paused
+    assert persisted.stopped and not persisted.paused  # stop wins over the checkpoint pause
+    assert persisted.tasks["1"].phase == Phase.DONE
+    assert "2" not in persisted.tasks  # story 2 never dispatched
+    skips = _kinds(engine.journal, "checkpoint-skip-last")
+    assert skips and skips[-1]["reason"] == "graceful-stop"
+    assert not _kinds(engine.journal, "checkpoint-pause")
+    assert not graceful_stop_requested(run_dir)  # consumed at the loop head
+    stops = _kinds(engine.journal, "run-stop")
+    assert stops and stops[-1]["graceful"] is True
 
 
 def test_both_checkpoints_pause_twice(project):
