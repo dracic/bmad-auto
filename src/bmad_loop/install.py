@@ -24,6 +24,7 @@ from importlib import resources
 from pathlib import Path
 
 from .adapters.profile import ALIASES, CLIProfile, ProfileError, load_profiles
+from .checks import Finding
 from .policy import POLICY_TEMPLATE
 from .process_host import get_process_host
 
@@ -108,18 +109,23 @@ STORIES_PROBE_FILE = "step-01-clarify-and-route.md"
 STORIES_PROBE_TEXT = "folder+id dispatch"
 
 
-def missing_stories_support(project: Path, trees: Sequence[str]) -> list[str]:
+def missing_stories_support(project: Path, trees: Sequence[str]) -> list[Finding]:
     """Problems for stories mode's stricter bmad-dev-auto requirement.
 
     Sprint mode drives any bmad-dev-auto; stories mode needs the folder+id
     dispatch flow, which older skill versions lack. For each active CLI skill
     tree, confirm ``bmad-dev-auto/step-01-clarify-and-route.md`` exists and
-    carries the dispatch-protocol marker. Returns one human-readable problem per
-    tree lacking it (empty = OK). Callers gate this on stories mode only —
-    sprint-mode runs must not require the newer skill."""
-    problems: list[str] = []
+    carries the dispatch-protocol marker. Returns one problem :class:`Finding`
+    per tree lacking it (empty = OK). Callers gate this on stories mode only —
+    sprint-mode runs must not require the newer skill.
+
+    The two failures are separate check ids because they are separate conditions
+    with separate remediations: ``-missing`` is a half install (reinstall the
+    module), ``-stale`` is an install that is simply too old (update it)."""
+    problems: list[Finding] = []
     for tree in dict.fromkeys(trees):
         probe = project / tree / STORIES_PROBE_SKILL / STORIES_PROBE_FILE
+        detail = {"tree": tree, "skill": STORIES_PROBE_SKILL, "file": STORIES_PROBE_FILE}
         try:
             text = probe.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -128,46 +134,70 @@ def missing_stories_support(project: Path, trees: Sequence[str]) -> list[str]:
             # dispatch-protocol marker can't be confirmed, so report a problem rather
             # than letting the decode error escape and crash the whole preflight.
             problems.append(
-                f"{tree}/{STORIES_PROBE_SKILL}/{STORIES_PROBE_FILE} not found — stories "
-                f"mode needs folder+id dispatch; update the BMad Method (bmm) module"
+                Finding(
+                    "skills.stories-dispatch-missing",
+                    "problem",
+                    f"{tree}/{STORIES_PROBE_SKILL}/{STORIES_PROBE_FILE} not found — stories "
+                    f"mode needs folder+id dispatch; update the BMad Method (bmm) module",
+                    detail,
+                )
             )
             continue
         if STORIES_PROBE_TEXT not in text:
             problems.append(
-                f"{tree}/{STORIES_PROBE_SKILL} lacks folder+id dispatch (no "
-                f"{STORIES_PROBE_TEXT!r} in {STORIES_PROBE_FILE}) — stories mode needs a "
-                f"newer bmad-dev-auto; update the bmm module"
+                Finding(
+                    "skills.stories-dispatch-stale",
+                    "problem",
+                    f"{tree}/{STORIES_PROBE_SKILL} lacks folder+id dispatch (no "
+                    f"{STORIES_PROBE_TEXT!r} in {STORIES_PROBE_FILE}) — stories mode needs a "
+                    f"newer bmad-dev-auto; update the bmm module",
+                    {**detail, "marker": STORIES_PROBE_TEXT},
+                )
             )
     return problems
 
 
-def missing_base_skills(project: Path, trees: Sequence[str]) -> list[str]:
+def missing_base_skills(project: Path, trees: Sequence[str]) -> list[Finding]:
     """Problems for the upstream skills the orchestrator drives but doesn't bundle.
 
     The dev primitive (bmad-dev-auto) and the three review hunters it invokes
     inline — adversarial-general, edge-case-hunter, and verification-gap — are
     installed by the BMad Method module, not by `bmad-loop init`. Each must exist
-    in every active CLI skill tree and carry its marker files. Returns one
-    human-readable problem string per missing/incomplete skill; empty list means
-    OK. Run as a preflight so a missing skill fails loudly with remediation instead
-    of stalling as an `Unknown command` until the run times out.
+    in every active CLI skill tree and carry its marker files. Returns one problem
+    :class:`Finding` per missing/incomplete skill; empty list means OK. Run as a
+    preflight so a missing skill fails loudly with remediation instead of stalling
+    as an `Unknown command` until the run times out.
+
+    ``skills.base-incomplete`` carries ``missing_markers`` as a list — the message
+    joins it with ", " for the human line, which a consumer would otherwise have to
+    split back apart on a separator the message is free to change.
     """
     required = dict(DEV_BASE_SKILLS)
-    problems: list[str] = []
+    problems: list[Finding] = []
     for tree in dict.fromkeys(trees):
         for skill, markers in required.items():
             skill_dir = project / tree / skill
             if not (skill_dir / "SKILL.md").is_file():
                 problems.append(
-                    f"{tree}/{skill} not found — install the BMad Method (bmm) module "
-                    f"(the orchestrator drives this upstream skill directly)"
+                    Finding(
+                        "skills.base-missing",
+                        "problem",
+                        f"{tree}/{skill} not found — install the BMad Method (bmm) module "
+                        f"(the orchestrator drives this upstream skill directly)",
+                        {"tree": tree, "skill": skill},
+                    )
                 )
                 continue
             absent = [m for m in markers if not (skill_dir / m).is_file()]
             if absent:
                 problems.append(
-                    f"{tree}/{skill} is incomplete (missing {', '.join(absent)}) — "
-                    f"reinstall it from the bmm module"
+                    Finding(
+                        "skills.base-incomplete",
+                        "problem",
+                        f"{tree}/{skill} is incomplete (missing {', '.join(absent)}) — "
+                        f"reinstall it from the bmm module",
+                        {"tree": tree, "skill": skill, "missing_markers": absent},
+                    )
                 )
     return problems
 

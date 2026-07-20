@@ -606,7 +606,7 @@ def test_missing_base_skills_reports_absent_and_incomplete(tmp_path):
     # them on every run, regardless of the orchestrator's follow-up review)
     problems = missing_base_skills(tmp_path, [claude.skill_tree])
     assert len(problems) == 4
-    assert all("install the BMad Method" in p for p in problems)
+    assert all("install the BMad Method" in p.message for p in problems)
 
     # install everything → no problems
     _install_base_skills(tmp_path, claude.skill_tree)
@@ -616,8 +616,8 @@ def test_missing_base_skills_reports_absent_and_incomplete(tmp_path):
     (tmp_path / claude.skill_tree / "bmad-dev-auto" / "step-04-review.md").unlink()
     problems = missing_base_skills(tmp_path, [claude.skill_tree])
     assert len(problems) == 1
-    assert "incomplete" in problems[0]
-    assert "step-04-review.md" in problems[0]
+    assert "incomplete" in problems[0].message
+    assert "step-04-review.md" in problems[0].message
 
     # restore it, then drop customize.toml (the review-layer config marker,
     # BMAD-METHOD #2535/#2550) → a pre-July bmm install is caught as incomplete
@@ -625,8 +625,8 @@ def test_missing_base_skills_reports_absent_and_incomplete(tmp_path):
     (tmp_path / claude.skill_tree / "bmad-dev-auto" / "customize.toml").unlink()
     problems = missing_base_skills(tmp_path, [claude.skill_tree])
     assert len(problems) == 1
-    assert "incomplete" in problems[0]
-    assert "customize.toml" in problems[0]
+    assert "incomplete" in problems[0].message
+    assert "customize.toml" in problems[0].message
 
     # the newest review layer (verification-gap) reported by name when absent
     _install_base_skills(tmp_path, claude.skill_tree)  # re-complete everything
@@ -635,8 +635,8 @@ def test_missing_base_skills_reports_absent_and_incomplete(tmp_path):
     _shutil.rmtree(tmp_path / claude.skill_tree / "bmad-review-verification-gap")
     problems = missing_base_skills(tmp_path, [claude.skill_tree])
     assert len(problems) == 1
-    assert "bmad-review-verification-gap" in problems[0]
-    assert "install the BMad Method" in problems[0]
+    assert "bmad-review-verification-gap" in problems[0].message
+    assert "install the BMad Method" in problems[0].message
 
 
 def test_missing_stories_support_probes_step01_content(tmp_path):
@@ -652,17 +652,81 @@ def test_missing_stories_support_probes_step01_content(tmp_path):
 
     # step-01 absent → reported (older/half install)
     problems = missing_stories_support(tmp_path, [tree])
-    assert len(problems) == 1 and "not found" in problems[0]
+    assert len(problems) == 1 and "not found" in problems[0].message
 
     # present but WITHOUT the folder+id dispatch marker (a pre-#2549 skill)
     step01.parent.mkdir(parents=True, exist_ok=True)
     step01.write_text("# Step 1\nold clarify-and-route, no dispatch protocol\n", encoding="utf-8")
     problems = missing_stories_support(tmp_path, [tree])
-    assert len(problems) == 1 and "folder+id dispatch" in problems[0]
+    assert len(problems) == 1 and "folder+id dispatch" in problems[0].message
 
     # present WITH the marker → OK
     step01.write_text("route a **folder+id dispatch** invocation\n", encoding="utf-8")
     assert missing_stories_support(tmp_path, [tree]) == []
+
+
+def test_missing_base_skills_findings_carry_ids_and_detail(tmp_path):
+    """#205: the problems are Findings, so `validate --json` can key on the check id
+    rather than on remediation prose. The two failure modes are distinct ids, and
+    `missing_markers` is a list — the message's ", " join is a rendering of it, and
+    a consumer must not have to split a separator the message is free to change."""
+    from bmad_loop.checks import VALIDATE_CHECKS
+
+    claude = get_profile("claude")
+    absent = missing_base_skills(tmp_path, [claude.skill_tree])
+    assert {f.check for f in absent} == {"skills.base-missing"}
+    assert all(f.severity == "problem" for f in absent)
+    assert all(f.check in VALIDATE_CHECKS for f in absent)
+    assert {f.detail["skill"] for f in absent} == {
+        "bmad-dev-auto",
+        "bmad-review-adversarial-general",
+        "bmad-review-edge-case-hunter",
+        "bmad-review-verification-gap",
+    }
+    assert all(f.detail["tree"] == claude.skill_tree for f in absent)
+
+    _install_base_skills(tmp_path, claude.skill_tree)
+    (tmp_path / claude.skill_tree / "bmad-dev-auto" / "step-04-review.md").unlink()
+    (tmp_path / claude.skill_tree / "bmad-dev-auto" / "customize.toml").unlink()
+    incomplete = missing_base_skills(tmp_path, [claude.skill_tree])
+    assert len(incomplete) == 1
+    assert incomplete[0].check == "skills.base-incomplete"
+    # a LIST of markers, not the joined string the message renders
+    assert incomplete[0].detail["missing_markers"] == ["step-04-review.md", "customize.toml"]
+    for marker in incomplete[0].detail["missing_markers"]:
+        assert marker in incomplete[0].message
+
+
+def test_missing_stories_support_findings_split_absent_from_stale(tmp_path):
+    """#205: a half install and a too-old install are different conditions with
+    different remediations, so they get different check ids — a script pinning a
+    version bump must be able to tell "reinstall" from "update"."""
+    from bmad_loop.checks import VALIDATE_CHECKS
+    from bmad_loop.install import (
+        STORIES_PROBE_FILE,
+        STORIES_PROBE_SKILL,
+        STORIES_PROBE_TEXT,
+        missing_stories_support,
+    )
+
+    claude = get_profile("claude")
+    tree = claude.skill_tree
+    step01 = tmp_path / tree / STORIES_PROBE_SKILL / STORIES_PROBE_FILE
+
+    absent = missing_stories_support(tmp_path, [tree])
+    assert [f.check for f in absent] == ["skills.stories-dispatch-missing"]
+    assert absent[0].detail == {
+        "tree": tree,
+        "skill": STORIES_PROBE_SKILL,
+        "file": STORIES_PROBE_FILE,
+    }
+
+    step01.parent.mkdir(parents=True, exist_ok=True)
+    step01.write_text("old clarify-and-route, no dispatch protocol\n", encoding="utf-8")
+    stale = missing_stories_support(tmp_path, [tree])
+    assert [f.check for f in stale] == ["skills.stories-dispatch-stale"]
+    assert stale[0].detail["marker"] == STORIES_PROBE_TEXT
+    assert all(f.check in VALIDATE_CHECKS for f in (*absent, *stale))
 
 
 def test_missing_stories_support_reports_non_utf8_probe_without_crashing(tmp_path):
@@ -682,7 +746,7 @@ def test_missing_stories_support_reports_non_utf8_probe_without_crashing(tmp_pat
     step01.write_bytes(b"\xff\xfe\x00\x01 not utf-8 \x80\x81")  # invalid UTF-8
 
     problems = missing_stories_support(tmp_path, [tree])
-    assert len(problems) == 1 and "not found" in problems[0]
+    assert len(problems) == 1 and "not found" in problems[0].message
 
 
 def test_new_dev_auto_skill_is_additive_for_sprint_mode(tmp_path):

@@ -13,6 +13,19 @@ Errors never produce a partial or error document: the message goes to stderr,
 stdout stays empty, and the exit code is nonzero. Consumers may rely on
 "stdout is either one complete valid document or empty".
 
+An **error** is a command that could not do its job — no runs to dump, an
+unresolvable run ref, a policy that will not parse. A command whose job is to
+report a *verdict* is a different thing: it did its job, and it exits nonzero to
+carry the answer. ``validate --json`` is the case — a failing check is the
+finding it was asked for, and the document is still owed. So the rule for
+consumers is positive rather than inferred from the exit code: **parse non-empty
+stdout whatever the exit code, and take the verdict from the document's own
+field** (``ok`` on ``validate``). That field, unlike rc, separates "the checks
+failed" from "the command broke": rc 1 is both, ``ok: false`` is only the first,
+and a command that broke leaves nothing on stdout to read the field from. Note
+that every gate in ``cmd_validate`` runs inside a ``try``, so the command has no
+error path of its own — its rc ∈ {0, 1} is purely the verdict.
+
 **Success does not imply a document on stdout.** ``diagnose`` and
 ``probe-adapter`` also take ``--out FILE``; with both flags the document goes to
 the file and stdout is legitimately empty at exit 0, with only a confirmation on

@@ -9,6 +9,22 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **`bmad-loop validate --json` (#205).** A stable, schema-versioned JSON document of the
+  preflight: the `ok` verdict, the queue `mode`/`spec_folder`, per-severity `counts`, and every
+  check as a flat emission-ordered finding. Each finding carries a **stable `check` id** —
+  `hooks.registered`, `adapter.binary`, `skills.base-incomplete`, … — so CI can branch on a
+  particular failing gate instead of matching remediation prose, which is the part most likely
+  to be reworded. `detail` keeps what each check knew before it flattened itself into a
+  sentence: `mux.backends-detected` keeps every detected backend row rather than the text's
+  `tmux*, psmux (unavailable)` soup, whose trailing `*` a consumer had to parse to learn which
+  backend was selected, and `skills.base-incomplete` keeps `missing_markers` as a list rather
+  than a `", "`-joined string. **A failing check emits the whole document and still exits 1** —
+  the nonzero code is the verdict being reported, not a failure to produce one, so the existing
+  `bmad-loop validate || exit 1` in CI is untouched. `machine.py` gains the clause that makes
+  this well-defined: parse non-empty stdout whatever the exit code, and read the verdict from
+  the document's own `ok`, which unlike `rc` separates "the checks failed" from "the command
+  broke". The text output is byte-for-byte unchanged.
+
 - **`bmad-loop clean --json` / `bmad-loop cleanup --json` (#204).** Stable, schema-versioned
   JSON documents (one per command — they are separate contracts) reporting what a reclaim
   removed, or under `--dry-run` would remove: for `clean` the worktree paths, trimmed,
