@@ -3312,6 +3312,33 @@ def test_platform_preflight_selection_detail_keeps_the_raw_reason(mux_registry, 
     assert "forced by BMAD_LOOP_MUX_BACKEND" in selection.message  # prose stays in the message
 
 
+def test_external_backend_failure_is_a_warning_not_a_note(mux_registry, monkeypatch, capsys):
+    """A package the operator installed did not load — a real failure, so it carries
+    `warning`, matching what `cmd_mux` has always printed for the same condition.
+
+    It stays below `problem` on purpose: selection degraded past it, so the verdict
+    and rc must not flip. Held at `ok` until #210 only because promoting inserts
+    `  warning: ` into the text (render() keeps the double prefix by design) and the
+    TUI rendered that text verbatim; the second assert is that now-shipping line.
+    """
+    from bmad_loop.checks import ValidationReport
+
+    monkeypatch.setattr(mux_registry, "_EXTERNAL_ERRORS", {"brokenmux": "ImportError: no ghost"})
+    monkeypatch.setattr(mux_registry, "_EXTERNALS_LOADED", True)  # no rescan over the stub
+
+    finding = next(f for f in cli._platform_preflight() if f.check == "mux.external-backend")
+    assert finding.severity == "warning"
+    assert finding.detail == {"entry_point": "brokenmux", "error": "ImportError: no ghost"}
+
+    report = ValidationReport()
+    report.extend([finding])
+    report.render()
+    assert capsys.readouterr().out == (
+        "  ok:   warning: external mux backend 'brokenmux' failed to load: "
+        "ImportError: no ghost\n"
+    )
+
+
 def test_validate_without_a_json_attribute_still_renders_text(project, capsys):
     """cmd_validate reads `getattr(args, "json", False)`, not `args.json`: it is called
     directly with hand-built Namespaces that predate the flag (every validate test

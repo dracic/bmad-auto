@@ -201,6 +201,16 @@ breaking changes may land in a minor release.
   list of problems. An unrenderable document (a newer schema, unparseable stdout) re-runs
   validate in text mode and shows the old modal unchanged.
 
+- **`validate` reports a failed external mux backend as a warning, not a note (#210).** The
+  `mux.external-backend` finding has always read as a failure — "external mux backend 'x'
+  failed to load: …" — while carrying severity `ok`, so it counted as a passing check; it is
+  now `warning`, matching what `bmad-loop mux` has always printed for the same condition. It
+  stays below `problem` deliberately: selection degrades past a broken external, so the verdict
+  and exit code are unchanged. On an affected host `validate --json`'s `counts` shift by one
+  (`warning` +1, `ok` −1) while `ok` and rc do not; the schema version is deliberately
+  unchanged, since the document contracts each `check` id, not a given check's outcome. The
+  text line gains the doubled `ok:   warning:` prefix that `render()` preserves by design.
+
 - **BREAKING: `probe-adapter` now runs `diagnose`'s egress leak self-check, and captured hook
   payloads ship as a schema instead of scrubbed values (#199).** The rendered report re-scans
   itself before emitting (the guard moved to `sanitize.guard`, one audited implementation for
