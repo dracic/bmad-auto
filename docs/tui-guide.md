@@ -277,7 +277,7 @@ Journal kinds are styled by substring, first match wins:
 | `D`      | delete the selected run's directory (confirm modal)                        |
 | `A`      | archive the selected run to `.bmad-loop/archive` (confirm modal)           |
 | `c`      | clean up tmux sessions/windows for finished & stopped runs (confirm modal) |
-| `v`      | run `bmad-loop validate`, output in a modal                                |
+| `v`      | run `bmad-loop validate`, findings in a modal (`d` toggles detail)         |
 | `g`      | settings editor for `.bmad-loop/policy.toml`                               |
 | `M`      | toggle theme (light/dark mode)                                             |
 | `y`      | copy the active Log/Attention pane to the clipboard                        |
@@ -482,10 +482,25 @@ modal to leave that one for later. The same set is available on the CLI via
 
 ## Validate (`v`)
 
-Runs `bmad-loop validate --project <project>` in the background and shows the
-combined output in a scrollable modal titled `validate — ok` (or
-`exit <code>`). Same preflight as the CLI: config, sprint-status, git, tmux,
-CLI binary, hooks.
+Runs `bmad-loop validate --project <project> --json` in the background and
+renders the document in a scrollable modal: a verdict header with the
+per-severity counts and the queue mode, then one row per check — glyph, the
+stable `check` id, and the message. Same preflight as the CLI: config,
+sprint-status, git, tmux, CLI binary, hooks.
+
+The verdict is the document's own `ok`, not the exit code, which cannot tell
+"the checks failed" from "the command broke". A check's `detail` — the data it
+knew before flattening itself into a sentence, like every detected mux backend
+rather than the text mode's `tmux*, psmux (unavailable)` — shows inline for
+warnings and problems, and `d` toggles it on for everything. When anything
+failed, a footer notes that the gates are **chained**: a policy failure leaves
+the later gates emitting nothing at all, so a short findings list after a
+failure is not a short list of problems.
+
+If the document cannot be rendered — a schema newer than this TUI, or output
+that is not a document at all — `v` silently re-runs validate in text mode and
+shows the combined output in a modal titled `validate — ok` (or `exit <code>`),
+exactly as it did before.
 
 ## Settings editor (`g`)
 

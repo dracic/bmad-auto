@@ -310,14 +310,20 @@ def _platform_preflight() -> list[Finding]:
             )
         )
 
-    # Advisory, not a problem: selection already degraded past the broken
-    # package (a failed external can never be the selected backend), so the
-    # preflight outcome above is authoritative — this line explains the absence.
+    # A warning, not a problem and not a note: an installed package the operator
+    # asked for did not load, which is a real failure — but selection already
+    # degraded past it (a failed external can never be the selected backend), so
+    # the preflight outcome above is authoritative and the verdict must not flip.
+    # `cmd_mux` has always printed this same condition as `warning:`; validate was
+    # the outlier, pinned to "ok" because promoting inserts "  warning: " into the
+    # text (render() keeps the double prefix by design) and the TUI rendered that
+    # text verbatim. Since #210 the TUI reads `validate --json` and styles from the
+    # severity field, so the severity is free to say what the message already does.
     for ep_name, reason in sorted(external_backend_errors().items()):
         found.append(
             Finding(
                 "mux.external-backend",
-                "ok",
+                "warning",
                 f"external mux backend '{ep_name}' failed to load: {reason}",
                 {"entry_point": ep_name, "error": reason},
             )

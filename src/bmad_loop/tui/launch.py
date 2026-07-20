@@ -357,13 +357,45 @@ def start_resolve_detached(project: Path, run_id: str) -> str | None:
     )
 
 
+def run_captured_streams(argv_tail: list[str]) -> tuple[int, str, str]:
+    """Run a fast read-only command (validate, --dry-run) and capture its output
+    with the two streams kept **apart**.
+
+    Separation is the whole point of this seam. Anything parsing stdout as a
+    whole document — a ``--json`` command, whose contract in :mod:`bmad_loop.machine`
+    is that stdout is one JSON object and nothing else — cannot use the merged
+    form: :func:`run_captured` appends stderr *after* stdout, so a single
+    ``DeprecationWarning`` written to the child's stderr by any dependency turns
+    ``json.loads`` into ``Extra data:``. That failure is environment-dependent —
+    it needs the right interpreter, the right installed versions, the right
+    warning filters — so it would pass everywhere it was tested and silently
+    degrade the JSON path to the text one on a user's machine. A caller that
+    genuinely wants one blob merges them itself; a caller that parses must never
+    have been handed the option.
+
+    Decoding is pinned to UTF-8 with ``errors="replace"`` rather than
+    ``text=True``, which decodes with the *locale* encoding at ``errors="strict"``
+    — the #200 family of failure already fixed CLI-side in :mod:`bmad_loop.machine`.
+    A console in a non-UTF-8 code page must not turn a perfectly good document
+    into a ``UnicodeDecodeError`` on the way in.
+    """
+    proc = subprocess.run(
+        cli_argv(*argv_tail), capture_output=True, encoding="utf-8", errors="replace"
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
 def run_captured(argv_tail: list[str]) -> tuple[int, str]:
     """Run a fast read-only command (validate, --dry-run) and capture its
-    combined output for display."""
-    proc = subprocess.run(cli_argv(*argv_tail), capture_output=True, text=True)
-    out = proc.stdout
-    if proc.stderr:
+    combined output for display.
+
+    For text display only. Anything that parses the output must call
+    :func:`run_captured_streams` — see its docstring on why the merge is
+    unparseable.
+    """
+    rc, out, err = run_captured_streams(argv_tail)
+    if err:
         if out and not out.endswith("\n"):
             out += "\n"
-        out += proc.stderr
-    return proc.returncode, out
+        out += err
+    return rc, out

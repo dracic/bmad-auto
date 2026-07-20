@@ -8,12 +8,13 @@ bindings drive modals into tui.launch calls (monkeypatched — no real tmux)."""
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import tomllib
 from pathlib import Path
 
 import pytest
-from conftest import install_bmad_config, write_sprint
+from conftest import install_bmad_config, make_validate_document, write_sprint
 from rich.console import Console
 from rich.text import Text
 from textual.events import MouseMove
@@ -31,12 +32,13 @@ from textual.widgets import (
     TabbedContent,
 )
 
+from bmad_loop import documents
 from bmad_loop import policy as policy_mod
 from bmad_loop.adapters.multiplexer import MultiplexerError
 from bmad_loop.journal import Journal, save_state
 from bmad_loop.model import Phase, RunState, StoryTask, TokenUsage
 from bmad_loop.runs import RUNS_DIR
-from bmad_loop.tui import data, launch
+from bmad_loop.tui import data, launch, widgets
 from bmad_loop.tui.app import BmadLoopApp
 from bmad_loop.tui.screens.dashboard import (
     _MIN_DETAIL,
@@ -55,8 +57,12 @@ from bmad_loop.tui.screens.modals import (
     StartSweepModal,
     StoryCheckpointModal,
     TextOutputModal,
+    ValidateFindingsModal,
 )
 from bmad_loop.tui.widgets import (
+    _FINDING_CHECK_WIDTH,
+    _FINDING_COL_PAD,
+    _FINDING_GLYPH_WIDTH,
     _JOURNAL_CLOCK_WIDTH,
     _JOURNAL_COL_PAD,
     _JOURNAL_KIND_WIDTH,
@@ -363,6 +369,217 @@ def test_journal_line_wraps_fields_with_hanging_indent():
         assert line[:indent] == " " * indent
     # and the wrapped fields carry real content past the indent
     assert any(line[indent:].strip() for line in lines[1:])
+
+
+# ------------------------------------------------ #210: validate --json renderer
+#
+# The pure seams: parsing a validate document and rendering it. No app is
+# mounted here — these are the pieces the validate modal is built out of.
+
+# The width the modal is laid out for.
+_FINDING_WIDTH = 96
+
+
+def render(renderable, width: int = _FINDING_WIDTH) -> str:
+    """Rich renderable -> plain text, as journal_rows does for the journal."""
+    console = Console(width=width)
+    with console.capture() as capture:
+        console.print(renderable)
+    return capture.get()
+
+
+def test_renderer_pins_the_current_validate_schema_version():
+    """Deliberate duplication: the TUI renderer must NOT import
+    documents.VALIDATE_SCHEMA_VERSION — an import would auto-follow a CLI bump and
+    silently render a v2 document as v1. On failure, re-read the renderer against
+    the new document, then bump the literal."""
+    assert widgets._RENDERS_VALIDATE_SCHEMA == documents.VALIDATE_SCHEMA_VERSION
+
+
+def test_validate_document_accepts_a_real_document():
+    doc = make_validate_document([("git.worktree-clean", "ok", "git worktree clean", None)])
+    assert widgets.validate_document(json.dumps(doc)) == doc
+
+
+@pytest.mark.parametrize(
+    ("stdout", "why"),
+    [
+        ("", "empty stdout — the command produced no document at all"),
+        ("not json{", "unparseable"),
+        ("[]", "a JSON array is not a document"),
+        ('"a string"', "a JSON scalar is not a document"),
+        ('{"schema_version": 2, "ok": true, "counts": {}, "findings": []}', "a newer schema"),
+        ('{"ok": true, "counts": {}, "findings": []}', "no schema_version at all"),
+        (
+            '{"schema_version": 1, "ok": true, "counts": {}, "findings": "nope"}',
+            "findings not a list",
+        ),
+        ('{"schema_version": 1, "ok": true, "counts": [], "findings": []}', "counts not a dict"),
+    ],
+)
+def test_validate_document_returns_none_for_anything_undrawable(stdout, why):
+    """Never raises — the caller runs this on a worker thread, where an escaping
+    exception takes the app down. Undrawable is a value, so the degrade is an
+    `is None` check. A *newer* schema is the important row: it parses fine and its
+    fields resolve, so only the version pin catches it."""
+    assert widgets.validate_document(stdout) is None, why
+
+
+def test_validate_findings_renders_every_detail_shape():
+    """Depth-2 covers every shape the real check sites emit, and none of them
+    reach the renderer as a Python repr.
+
+    The shapes are taken from cli.py's validate gates and platform preflight and
+    install.py's skill probes; the ids are real, so ValidationReport.add's assert
+    would reject this fixture if one were invented."""
+    doc = make_validate_document(
+        [
+            # dict of scalars, and a str
+            ("bmad-config", "problem", "BMAD config OK", {"implementation_artifacts": "/a/b"}),
+            # NESTED dict — the passing path's shape, the one that breaks naive renderers
+            ("policy", "ok", "policy OK", {"gates_mode": "strict", "adapters": {"dev": "claude"}}),
+            # ints
+            ("queue.sprint-status", "ok", "sprint-status OK", {"stories": 4, "actionable": 2}),
+            # bool + str|None
+            (
+                "mux.backend",
+                "ok",
+                "mux ok",
+                {"backend": "Tmux", "available": True, "version": None},
+            ),
+            # list[dict], six keys per row
+            (
+                "mux.backends-detected",
+                "ok",
+                "mux backends: tmux*",
+                {
+                    "backends": [
+                        {
+                            "name": "tmux",
+                            "matches_platform": True,
+                            "available": True,
+                            "version": "3.4",
+                            "selected": True,
+                            "reason": "default",
+                        }
+                    ]
+                },
+            ),
+            # list[str]
+            ("skills.base-incomplete", "problem", "incomplete", {"missing_markers": ["a", "b"]}),
+            # None detail
+            ("git.probe", "problem", "git check failed", None),
+        ]
+    )
+    out = render(widgets.validate_findings(doc, details=True))
+
+    assert "{'" not in out, "a Python repr leaked — some shape was str()'d, not modelled"
+    assert "adapters: dev=claude" in out  # the nested dict, as readable pairs
+    assert "stories: 4" in out
+    assert "version: null" in out and "available: true" in out  # JSON's spelling, not Python's
+    assert "missing_markers: a, b" in out
+    assert "name=tmux" in out and "reason=default" in out  # list[dict], one line per entry
+    for finding in doc["findings"]:
+        assert finding["check"] in out
+
+
+def test_validate_findings_detail_is_gated_on_severity_not_check_id():
+    """Inline detail for warning/problem — what a reader opened the modal to act
+    on — and everything under `details`. One severity rule, zero id matching."""
+    doc = make_validate_document(
+        [
+            ("host.process", "ok", "process host: Posix", {"host": "PosixProcessHost"}),
+            ("adapter.binary", "problem", "codex not found", {"binary": "codex"}),
+            ("policy.model-qualified", "warning", "bare model", {"model": "haiku"}),
+        ]
+    )
+    inline = render(widgets.validate_findings(doc, details=False))
+    assert "binary: codex" in inline and "model: haiku" in inline
+    assert "host: PosixProcessHost" not in inline, "an ok finding's detail is not inline"
+
+    expanded = render(widgets.validate_findings(doc, details=True))
+    assert "host: PosixProcessHost" in expanded
+
+
+def test_validate_findings_survives_a_malformed_finding():
+    """One bad finding costs its own row, not the modal. The document arrives from
+    a subprocess, so 'this cannot happen' is not available."""
+    doc = make_validate_document([("git.worktree-clean", "ok", "git worktree clean", None)])
+    doc["findings"] = [
+        "not a dict",
+        None,
+        {"check": "policy", "severity": "made-up", "message": "unknown severity is neutral"},
+        *doc["findings"],
+    ]
+    out = render(widgets.validate_findings(doc, details=True))
+
+    assert out.count("(unreadable finding)") == 2  # the string and the None
+    assert "unknown severity is neutral" in out  # rendered, just without a style
+    assert "git worktree clean" in out, "a good finding after a bad one still renders"
+
+
+def test_validate_findings_multiline_message_keeps_column_alignment():
+    """The fold trap: several problems are a bare str(e) carrying a PyYAML
+    MarkedYAMLError, so `message` is multi-line. In a flat Text an embedded
+    newline returns to column 0 and destroys every row below it; folding inside
+    the message column is what keeps the grid a grid."""
+    doc = make_validate_document(
+        [
+            ("policy", "problem", "while parsing a block\n  in policy.toml, line 3\n    ^", None),
+            ("git.worktree-clean", "ok", "git worktree clean", None),
+        ]
+    )
+    lines = render(widgets.validate_findings(doc, details=False)).splitlines()
+
+    indent = _FINDING_GLYPH_WIDTH + _FINDING_COL_PAD + _FINDING_CHECK_WIDTH + _FINDING_COL_PAD
+    body = [ln for ln in lines if "in policy.toml" in ln or "^" in ln]
+    assert body, "the continuation lines rendered"
+    for line in body:
+        assert line[:indent] == " " * indent
+        assert line[indent:].strip()
+    # the row after the multi-line message is still in its own columns
+    assert any(ln[indent:].startswith("git worktree clean") for ln in lines)
+
+
+def test_validate_header_verdict_comes_from_ok_with_the_chained_gates_note():
+    """The verdict is doc["ok"], never an exit code — rc conflates 'checks failed'
+    with 'the command broke'. The chained-gates footer appears only when something
+    failed, because that is when absence stops meaning 'passed'."""
+    passing = make_validate_document([("git.worktree-clean", "ok", "clean", None)])
+    failing = make_validate_document([("adapter.binary", "problem", "codex not found", None)])
+
+    good = render(widgets.validate_header(passing))
+    assert "validate passed" in good
+    assert "1 ok" in good and "0 problem" in good
+    assert "gates are chained" not in good
+
+    bad = render(widgets.validate_header(failing))
+    assert "validate failed" in bad
+    assert "gates are chained" in bad
+
+
+def test_validate_header_shows_mode_and_spec_folder_without_markup():
+    """spec_folder is user-controlled and reaches a Static that defaults to
+    markup=True, so it must arrive as Text. A folder with brackets would be a
+    MarkupError if it were ever interpolated into a markup string."""
+    doc = make_validate_document(
+        [("git.worktree-clean", "ok", "clean", None)],
+        stories_on=True,
+        spec_folder="docs/[wip]-epic-3",
+    )
+    header = widgets.validate_header(doc)
+    assert isinstance(header, Text)
+    out = render(header)
+    assert "mode: stories" in out
+    assert "docs/[wip]-epic-3" in out, "brackets survive verbatim — nothing interpreted them"
+
+
+def test_validate_header_tolerates_a_gutted_document():
+    """validate_document gates the shape, but the header still never raises on a
+    field that is present and of the wrong type."""
+    out = render(widgets.validate_header({"ok": None, "counts": {"problem": "lots"}}))
+    assert "verdict unknown" in out
+    assert "gates are chained" not in out  # a non-int count is not a problem count
 
 
 async def test_log_pane_shows_emulated_content(project):
@@ -1240,16 +1457,201 @@ async def test_dry_run_shows_captured_output(project, monkeypatch):
         await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
 
 
-async def test_validate_shows_output_modal(project, monkeypatch):
-    monkeypatch.setattr(launch, "run_captured", lambda tail: (1, "FAIL: no policy\n"))
+async def test_dry_run_worker_survives_a_raising_subprocess(project, monkeypatch):
+    """The twin of test_validate_worker_survives_a_raising_subprocess: this worker
+    is a @work(thread=True) body too, so a subprocess that cannot be spawned takes
+    the whole app down unless run_captured is guarded. Both go through
+    _run_captured_guarded, and this is the leg that proves the shared guard."""
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
+    monkeypatch.setattr(
+        launch,
+        "run_captured_streams",
+        lambda tail: (_ for _ in ()).throw(OSError("no such file")),
+    )
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        await pilot.press("r")
+        await until(pilot, lambda: isinstance(app.screen, StartRunModal))
+        await ready(pilot, "#ok")
+        app.screen.query_one("#dry-run", Checkbox).value = True
+        await pilot.click("#ok")
+        await until(pilot, lambda: isinstance(app.screen, TextOutputModal))
+        await ready(pilot, "#output Static")
+        body = render(app.screen.query_one("#output Static").content)
+        assert "no such file" in body, "the modal carries the reason, not a blank panel"
+        assert app.is_running, "the app survived a dry run it could not spawn"
+
+
+# ---------------------------------------------------------- #210: validate wiring
+#
+# `v` renders the --json document; anything undrawable degrades to the text modal.
+# These tests mix real documents (via the conftest builder, for what actually gets
+# rendered) with hand-rolled stdout strings (for the degrades) on purpose, not out
+# of inconsistency: the builder goes through ValidationReport, so it can only ever
+# produce a *valid* document, and every degrade case is by definition one it cannot
+# express.
+
+
+def stub_validate(monkeypatch, *, stdout: str = "", rc: int = 0, text: str = "FAIL: no policy\n"):
+    """Stub **both** legs and record which ran.
+
+    Stubbing only run_captured_streams leaves the degrade's run_captured live, so
+    every degrade test would spawn a real `bmad-loop validate` subprocess — slow,
+    and asserting the host's preflight rather than the code under test."""
+    seen: dict[str, list[str]] = {}
+
+    def fake_streams(tail):
+        seen["json_tail"] = tail
+        return rc, stdout, ""
+
+    def fake_captured(tail):
+        seen["text_tail"] = tail
+        return rc, text
+
+    monkeypatch.setattr(launch, "run_captured_streams", fake_streams)
+    monkeypatch.setattr(launch, "run_captured", fake_captured)
+    return seen
+
+
+def grid_text(app: BmadLoopApp) -> str:
+    """The findings grid as it draws at the modal's width."""
+    return render(app.screen.query_one("#grid", Static).content)
+
+
+async def test_validate_shows_findings_modal(project, monkeypatch):
+    """The migrated test_validate_shows_output_modal. `v` renders the document
+    now, so the old run_captured stub is dead — and a dead stub is a real
+    subprocess, not a failure."""
+    doc = make_validate_document(
+        [
+            ("git.worktree-clean", "ok", "git worktree clean", None),
+            ("adapter.binary", "problem", "codex not found on PATH", {"binary": "codex"}),
+        ]
+    )
+    seen = stub_validate(monkeypatch, stdout=json.dumps(doc), rc=1)
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        await pilot.press("v")
+        await until(pilot, lambda: isinstance(app.screen, ValidateFindingsModal))
+        await ready(pilot, "#grid")
+        assert "--json" in seen["json_tail"]
+        assert "text_tail" not in seen, "the JSON leg drew it; nothing re-ran in text mode"
+
+        body = grid_text(app)
+        assert "git.worktree-clean" in body and "adapter.binary" in body
+        assert "binary: codex" in body, "a problem's detail is inline"
+        header = str(app.screen.query_one(".title", Static).content)
+        assert "validate failed" in header
+
+        await pilot.press("escape")
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+
+
+async def test_validate_detail_toggle_expands_every_finding(project, monkeypatch):
+    """`d` re-renders the same document with detail on."""
+    doc = make_validate_document(
+        [("host.process", "ok", "process host: Posix", {"host": "PosixProcessHost"})]
+    )
+    stub_validate(monkeypatch, stdout=json.dumps(doc))
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        await pilot.press("v")
+        await until(pilot, lambda: isinstance(app.screen, ValidateFindingsModal))
+        await ready(pilot, "#grid")
+        assert "host: PosixProcessHost" not in grid_text(app), "an ok detail starts collapsed"
+
+        await pilot.press("d")
+        await until(pilot, lambda: "host: PosixProcessHost" in grid_text(app))
+        await pilot.press("d")
+        await until(pilot, lambda: "host: PosixProcessHost" not in grid_text(app))
+
+
+async def test_validate_verdict_comes_from_the_document_not_the_exit_code(project, monkeypatch):
+    """rc conflates "checks failed" with "the command broke"; the document's `ok`
+    does not. Both legs are rendered here with rc deliberately disagreeing with
+    what the old code would have inferred from it."""
+    failing = make_validate_document([("adapter.binary", "problem", "codex not found", None)])
+    stub_validate(monkeypatch, stdout=json.dumps(failing), rc=1)
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        await pilot.press("v")
+        await until(pilot, lambda: isinstance(app.screen, ValidateFindingsModal))
+        await ready(pilot, "#grid")
+        header = str(app.screen.query_one(".title", Static).content)
+        assert "validate failed" in header
+        assert "gates are chained" in header, "a failure says the later gates may not have run"
+
+    # A passing document at rc 0 — same wiring, opposite verdict, and the header
+    # says so without the modal ever seeing the exit code.
+    passing = make_validate_document([("git.worktree-clean", "ok", "git worktree clean", None)])
+    stub_validate(monkeypatch, stdout=json.dumps(passing), rc=0)
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        await pilot.press("v")
+        await until(pilot, lambda: isinstance(app.screen, ValidateFindingsModal))
+        await ready(pilot, "#grid")
+        header = str(app.screen.query_one(".title", Static).content)
+        assert "validate passed" in header
+        assert "gates are chained" not in header
+
+
+@pytest.mark.parametrize(
+    ("stdout", "why"),
+    [
+        ("", "the command produced no document at all"),
+        ("not json{", "unparseable stdout"),
+        ('{"schema_version": 2, "ok": true, "counts": {}, "findings": []}', "a newer schema"),
+        ('{"schema_version": 1, "ok": true, "counts": {}, "findings": "nope"}', "wrong shape"),
+    ],
+)
+async def test_validate_degrades_to_the_text_modal(project, monkeypatch, stdout, why):
+    """Every undrawable document RE-RUNS validate in text mode. Showing the
+    captured JSON instead would hand the reader a wall of `{"schema_version": ...}`
+    at the exact moment the structural rendering failed; re-running costs one
+    subprocess and makes the degrade byte-for-byte the pre-#210 behavior."""
+    seen = stub_validate(monkeypatch, stdout=stdout, rc=1)
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        await pilot.press("v")
+        await until(pilot, lambda: isinstance(app.screen, TextOutputModal), timeout=10.0)
+        await ready(pilot, "Label")  # body mounts a tick after the screen swaps
+        labels = app.screen.query("Label")
+        assert any("exit 1" in str(label.content) for label in labels), why
+        assert "--json" not in seen["text_tail"], "the text re-run is the plain command"
+
+
+async def test_validate_worker_survives_a_raising_subprocess(project, monkeypatch):
+    """@work(thread=True) defaults to exit_on_error=True, so anything escaping the
+    worker body takes the whole app down rather than this one modal. The guard is
+    an except, not a set of condition checks — the raise here is not a shape the
+    checks could have caught.
+
+    Only run_captured_streams is stubbed, on purpose: run_captured *calls* it, so
+    a spawn failure is not a JSON-leg failure that the text re-run recovers from
+    — it is the same failure twice. Stubbing the two legs to opposite outcomes
+    would model a split production cannot produce, and would leave the degrade's
+    own raise escaping the worker unnoticed. It raises in place of the spawn, so
+    no real subprocess runs either."""
+    monkeypatch.setattr(
+        launch,
+        "run_captured_streams",
+        lambda tail: (_ for _ in ()).throw(OSError("no such file")),
+    )
     app = BmadLoopApp(project.project)
     async with app.run_test() as pilot:
         await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
         await pilot.press("v")
         await until(pilot, lambda: isinstance(app.screen, TextOutputModal))
-        await ready(pilot, "Label")  # body mounts a tick after the screen swaps
-        labels = app.screen.query("Label")
-        assert any("exit 1" in str(label.content) for label in labels)
+        await ready(pilot, "#output Static")
+        body = render(app.screen.query_one("#output Static").content)
+        assert "no such file" in body, "the modal carries the reason, not a blank panel"
+        assert app.is_running, "the app survived a failure BOTH legs hit"
 
 
 async def test_resume_confirm_launches(project, monkeypatch):

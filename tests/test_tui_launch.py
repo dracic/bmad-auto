@@ -9,6 +9,7 @@ path still shells out from ``launch`` itself."""
 
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 import sys
@@ -595,7 +596,12 @@ def test_run_captured_merges_streams(monkeypatch):
     def fake(argv, **kwargs):
         assert argv[:3] == [sys.executable, "-m", "bmad_loop.cli"]
         assert argv[3:] == ["validate", "--project", "/p"]
-        assert kwargs.get("capture_output") and kwargs.get("text")
+        # encoding= puts subprocess in text mode without setting the `text`
+        # kwarg, so assert on the decoding that is actually pinned. UTF-8 at
+        # errors="replace" is the point: text=True would decode with the
+        # locale encoding at errors="strict" (the #200 failure family).
+        assert kwargs.get("capture_output")
+        assert kwargs.get("encoding") == "utf-8" and kwargs.get("errors") == "replace"
         return subprocess.CompletedProcess(argv, 1, stdout="ok line", stderr="FAIL line\n")
 
     monkeypatch.setattr(launch.subprocess, "run", fake)
@@ -604,8 +610,40 @@ def test_run_captured_merges_streams(monkeypatch):
     assert out == "ok line\nFAIL line\n"
 
 
+def test_run_captured_streams_keeps_stderr_off_stdout(monkeypatch):
+    """The reason the seam exists: a caller parsing stdout as one JSON document
+    must not receive a dependency's stderr warning appended to it. Merged, this
+    is exactly the input that makes json.loads raise "Extra data"."""
+    payload = '{"schema_version": 1, "ok": true}'
+
+    def fake(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=payload, stderr="DeprecationWarning: whatever\n"
+        )
+
+    monkeypatch.setattr(launch.subprocess, "run", fake)
+    rc, out, err = launch.run_captured_streams(["validate", "--project", "/p", "--json"])
+    assert rc == 0
+    assert out == payload
+    assert "DeprecationWarning" in err
+    assert json.loads(out) == {"schema_version": 1, "ok": True}
+    # and the merging caller still gets the blob it wants, from the same call
+    assert launch.run_captured(["validate", "--project", "/p"])[1] == (
+        payload + "\nDeprecationWarning: whatever\n"
+    )
+
+
 def test_run_captured_real_subprocess():
     """End-to-end: the module really is invocable as `python -m bmad_loop.cli`."""
     rc, out = launch.run_captured(["--version"])
     assert rc == 0
     assert "bmad-loop" in out
+
+
+def test_run_captured_streams_real_subprocess():
+    """The separated form against the real CLI: a `--json` document parses off
+    stdout alone, with stderr empty (the machine.py purity contract)."""
+    rc, out, err = launch.run_captured_streams(["--version"])
+    assert rc == 0
+    assert "bmad-loop" in out
+    assert err == ""

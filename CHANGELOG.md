@@ -191,6 +191,26 @@ breaking changes may land in a minor release.
 
 ### Changed
 
+- **The TUI's validate modal (`v`) renders `validate --json` instead of the text output (#210).**
+  One row per check — glyph, stable `check` id, message — with the verdict taken from the
+  document's `ok` rather than the exit code, which cannot tell "the checks failed" from "the
+  command broke". A check's `detail` is now reachable at all: inline for warnings and problems,
+  and `d` toggles it on for everything, so `mux.backends-detected` expands to a row per backend
+  instead of the text's `tmux*, psmux (unavailable)`. A failure adds a footer noting the gates
+  are chained — the later gates emit nothing after one fails, so a short list is not a short
+  list of problems. An unrenderable document (a newer schema, unparseable stdout) re-runs
+  validate in text mode and shows the old modal unchanged.
+
+- **`validate` reports a failed external mux backend as a warning, not a note (#210).** The
+  `mux.external-backend` finding has always read as a failure — "external mux backend 'x'
+  failed to load: …" — while carrying severity `ok`, so it counted as a passing check; it is
+  now `warning`, matching what `bmad-loop mux` has always printed for the same condition. It
+  stays below `problem` deliberately: selection degrades past a broken external, so the verdict
+  and exit code are unchanged. On an affected host `validate --json`'s `counts` shift by one
+  (`warning` +1, `ok` −1) while `ok` and rc do not; the schema version is deliberately
+  unchanged, since the document contracts each `check` id, not a given check's outcome. The
+  text line gains the doubled `ok:   warning:` prefix that `render()` preserves by design.
+
 - **BREAKING: `probe-adapter` now runs `diagnose`'s egress leak self-check, and captured hook
   payloads ship as a schema instead of scrubbed values (#199).** The rendered report re-scans
   itself before emitting (the guard moved to `sanitize.guard`, one audited implementation for
@@ -269,6 +289,13 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
   the three `_escalated_run` fixtures collapse into one parameterized conftest builder. (closes #84)
 
 ### Fixed
+
+- **A dry run the TUI cannot spawn opens a modal instead of taking the app down (#210).** The
+  `run --dry-run` / `sweep --dry-run` workers called `run_captured` unguarded, and
+  `@work(thread=True)` defaults to `exit_on_error=True` — so an `OSError` from the spawn itself
+  (a venv deleted out from under `sys.executable`, `EAGAIN` off a loaded process table) escaped
+  the worker and killed the whole app rather than the one modal. Both workers and the validate
+  degrade now share a guard that reports the reason in the modal body.
 
 - **`--json` output survives a console that cannot encode it (#200).** A JSON document is not
   necessarily ASCII: `diagnostics.render_json` serializes with `ensure_ascii=False` so its leak

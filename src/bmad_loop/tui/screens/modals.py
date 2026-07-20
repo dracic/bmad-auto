@@ -21,7 +21,7 @@ from textual.widgets import Button, Checkbox, Input, Label, Select, Static
 
 from ... import stories
 from ...model import RunState
-from .. import data
+from .. import data, widgets
 
 
 def _int_or_none(value: str) -> int | None:
@@ -626,8 +626,72 @@ class EscalationModal(BaseDialog):
         self.dismiss(bid[len("act-") :] if bid.startswith("act-") else None)
 
 
+class ValidateFindingsModal(BaseDialog):
+    """`validate --json` rendered structurally: verdict, then one row per finding.
+
+    The text mode this replaces made severity a string prefix and the verdict an
+    exit code, and had already flattened away what each check knew. Here the
+    verdict is the document's own ``ok`` — which, unlike ``rc``, separates "the
+    checks failed" from "the command broke" — severities are styled, and
+    ``detail`` is renderable: inline for warnings and problems, and one ``d``
+    away for everything else.
+
+    Everything user-controlled (a ``spec_folder``, a check's ``message``) arrives
+    as rich ``Text`` built in :mod:`bmad_loop.tui.widgets`, never as markup: both
+    ``Static`` and ``Label`` default to ``markup=True``, so a spec folder named
+    ``docs/[wip]-epic-3`` interpolated into an f-string title would be a
+    ``MarkupError``.
+
+    ``__init__`` deliberately does nothing but store the document. The worker
+    that builds this screen runs on a **thread**; composing is the app's job, on
+    the main thread. ``TextOutputModal`` is the precedent.
+    """
+
+    DEFAULT_CSS = """
+    ValidateFindingsModal #dialog {
+        width: 96;
+        height: 80%;
+    }
+    ValidateFindingsModal #findings {
+        height: 1fr;
+    }
+    """
+
+    # BaseDialog's escape binding is inherited: Textual collects BINDINGS from
+    # the whole MRO, so this list adds to it rather than replacing it.
+    BINDINGS = [Binding("d", "toggle_detail", "detail")]
+
+    def __init__(self, doc: dict):
+        super().__init__()
+        self._doc = doc
+        self._details = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Static(widgets.validate_header(self._doc), classes="title")
+            with VerticalScroll(id="findings"):
+                yield Static(widgets.validate_findings(self._doc, details=self._details), id="grid")
+            yield Static(Text("d — toggle detail on every finding", style="dim"))
+            with Horizontal(classes="buttons"):
+                yield Button("close", variant="primary", id="ok")
+
+    def action_toggle_detail(self) -> None:
+        self._details = not self._details
+        self.query_one("#grid", Static).update(
+            widgets.validate_findings(self._doc, details=self._details)
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(None)
+
+
 class TextOutputModal(BaseDialog):
-    """Scrollable captured command output (validate, dry runs)."""
+    """Scrollable captured command output (dry runs, and the validate degrade).
+
+    Still the validate path's fallback: when the JSON document is unrenderable,
+    the app re-runs validate in text mode and shows it here, byte-for-byte the
+    pre-#210 behavior. See ``BmadLoopApp._show_validate``.
+    """
 
     DEFAULT_CSS = """
     TextOutputModal #dialog {

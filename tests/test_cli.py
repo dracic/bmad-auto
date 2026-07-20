@@ -3223,6 +3223,53 @@ def test_validate_json_every_emitted_check_is_registered(project, capsys, monkey
     assert emitted <= VALIDATE_CHECKS
 
 
+@pytest.mark.parametrize("passing", [True, False], ids=["rc-0", "rc-1"])
+def test_tui_renderer_draws_every_detail_shape_a_real_validate_emits(
+    project, capsys, monkeypatch, passing
+):
+    """The bridge between the `--json` document and the TUI's renderer (#210), run
+    against a REAL validate rather than a fixture.
+
+    It lives in this file, not test_tui_app.py, because everything that produces a
+    real document — _make_validate_pass and the failure setups — is here; the
+    renderer is the thing imported. Its value is zero fixture maintenance: it draws
+    whatever shapes validate actually emits today, so a check site that starts
+    carrying a new `detail` shape is covered the moment it ships, rather than when
+    someone remembers to update a fixture.
+
+    Both legs matter: `ok`-severity detail shapes never appear on a failing run.
+    """
+    from rich.console import Console
+
+    from bmad_loop.tui import widgets
+
+    if passing:
+        _make_validate_pass(project, monkeypatch, capsys)
+        doc = machine_json(["validate", "--project", str(project.project), "--json"], capsys)
+    else:
+        _write_policy(project.project, CLAUDE_ONLY_POLICY)  # no BMAD config -> real problems
+        doc = machine_json(["validate", "--project", str(project.project), "--json"], capsys, rc=1)
+    assert doc["findings"], "the leg under test emitted findings"
+
+    console = Console(width=96)  # the width the modal is laid out for
+    with console.capture() as capture:
+        console.print(widgets.validate_findings(doc, details=True))
+    rendered = capture.get()
+
+    for finding in doc["findings"]:
+        assert finding["check"] in rendered
+    # The nested-dict trap: `policy`'s detail is {"adapters": {"dev": ...}}, emitted
+    # on the *passing* path. A renderer that str()s a shape it did not model prints
+    # a Python repr, and this is the tell.
+    assert "{'" not in rendered
+    policy = next(f for f in doc["findings"] if f["check"] == "policy")
+    assert policy["detail"]["adapters"], "policy still carries the nested adapters dict"
+    assert "adapters: dev=claude" in rendered
+
+    # and the document the CLI just emitted is one this renderer accepts at all
+    assert widgets.validate_document(json.dumps(doc)) == doc
+
+
 def test_validate_json_mux_detail_keeps_the_rows_the_text_flattens(mux_registry, capsys):
     """The text line ("alpha*, beta (unavailable)") makes a consumer parse a trailing
     `*` to learn which backend is selected. The detail keeps all six MuxBackendInfo
@@ -3263,6 +3310,33 @@ def test_platform_preflight_selection_detail_keeps_the_raw_reason(mux_registry, 
     selection = next(f for f in cli._platform_preflight() if f.check == "mux.selection")
     assert selection.detail == {"backend": "alpha", "reason": "env"}
     assert "forced by BMAD_LOOP_MUX_BACKEND" in selection.message  # prose stays in the message
+
+
+def test_external_backend_failure_is_a_warning_not_a_note(mux_registry, monkeypatch, capsys):
+    """A package the operator installed did not load — a real failure, so it carries
+    `warning`, matching what `cmd_mux` has always printed for the same condition.
+
+    It stays below `problem` on purpose: selection degraded past it, so the verdict
+    and rc must not flip. Held at `ok` until #210 only because promoting inserts
+    `  warning: ` into the text (render() keeps the double prefix by design) and the
+    TUI rendered that text verbatim; the second assert is that now-shipping line.
+    """
+    from bmad_loop.checks import ValidationReport
+
+    monkeypatch.setattr(mux_registry, "_EXTERNAL_ERRORS", {"brokenmux": "ImportError: no ghost"})
+    monkeypatch.setattr(mux_registry, "_EXTERNALS_LOADED", True)  # no rescan over the stub
+
+    finding = next(f for f in cli._platform_preflight() if f.check == "mux.external-backend")
+    assert finding.severity == "warning"
+    assert finding.detail == {"entry_point": "brokenmux", "error": "ImportError: no ghost"}
+
+    report = ValidationReport()
+    report.extend([finding])
+    report.render()
+    assert capsys.readouterr().out == (
+        "  ok:   warning: external mux backend 'brokenmux' failed to load: "
+        "ImportError: no ghost\n"
+    )
 
 
 def test_validate_without_a_json_attribute_still_renders_text(project, capsys):
