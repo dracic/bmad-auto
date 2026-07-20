@@ -245,7 +245,7 @@ breaking changes may land in a minor release.
   from #190 — one JSON object on stdout, inline `schema_version`, additive-only evolution,
   errors → stderr with empty stdout — now live in one module with shared `emit`/`add_json_flag`
   helpers; `status --json` uses them (output byte-identical) and the duplicated token-total math
-  folded into `_run_token_totals`. All four `--json` commands share the contract (#195); `--json`
+  folded into `run_token_totals`. All four `--json` commands share the contract (#195); `--json`
   adoption on more commands is tracked in #196.
 - **Backend-neutral naming for the seam-backed helpers and operator messages.** The multiplexer
   seam has non-tmux backends now, so the helpers that wrap it drop their legacy tmux names —

@@ -174,7 +174,7 @@ def make_validate_document(findings, *, stories_on: bool = False, spec_folder: s
     document (a specific severity mix, a specific detail shape) and no
     subprocess.
 
-    It is built by driving the same ValidationReport -> _validate_document path
+    It is built by driving the same ValidationReport -> validate_document path
     the CLI drives, so the shape cannot drift from the contract by being
     hand-written. Going through ValidationReport.add also means its assert
     (checks.py) rejects invented check ids: a test cannot quietly pin behaviour
@@ -183,7 +183,7 @@ def make_validate_document(findings, *, stories_on: bool = False, spec_folder: s
     report = ValidationReport()
     for check, severity, message, detail in findings:
         report.add(check, severity, message, detail)
-    return documents._validate_document(report, stories_on, spec_folder)
+    return documents.validate_document(report, stories_on, spec_folder)
 
 
 @pytest.fixture(scope="session")

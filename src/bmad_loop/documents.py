@@ -24,6 +24,16 @@ document another few hundred lines of accretion in the dispatch module.
 So: add a new command's builder here, not in ``cli.py``. ``cli.py`` re-imports
 these names, which is what keeps ``cli.STATUS_SCHEMA_VERSION`` and friends
 resolving for existing callers and tests.
+
+Every name in this module is public, and a new builder must be too: the
+projection surface *is* the API, so a leading underscore would say "do not
+import this" about the one thing the module exists to be imported for. The
+builders carried one until #212 only because they were born private inside
+``cli.py``. ``run_token_totals`` is public for the same reason even though it
+projects no document of its own — ``cmd_status`` calls it across the module
+boundary to render text, and a private name imported by another module is the
+contradiction this module is meant not to have. Keep genuinely intra-module
+helpers private, as :mod:`bmad_loop.probe` and :mod:`bmad_loop.diagnostics` do.
 """
 
 from __future__ import annotations
@@ -43,7 +53,7 @@ if TYPE_CHECKING:
 VALIDATE_SCHEMA_VERSION = 1
 
 
-def _validate_document(report: ValidationReport, stories_on: bool, spec_folder: str) -> dict:
+def validate_document(report: ValidationReport, stories_on: bool, spec_folder: str) -> dict:
     """The `validate --json` document: the verdict plus every check that produced it.
 
     Obeys the pure-document contract in machine.py (additive-only evolution;
@@ -76,7 +86,7 @@ def _validate_document(report: ValidationReport, stories_on: bool, spec_folder: 
         "ok": report.passed,
         "mode": "stories" if stories_on else "sprint",
         # "" rather than null in sprint mode, where a spec folder is inapplicable —
-        # the same convention as _list_document's paused_stage.
+        # the same convention as list_document's paused_stage.
         "spec_folder": spec_folder if stories_on else "",
         "counts": report.counts(),
         "findings": [
@@ -94,7 +104,7 @@ def _validate_document(report: ValidationReport, stories_on: bool, spec_folder: 
 DECISIONS_SCHEMA_VERSION = 1
 
 
-def _decisions_document(pending: list[Decision]) -> dict[str, object]:
+def decisions_document(pending: list[Decision]) -> dict[str, object]:
     """The `decisions --json` document: every pending decision, in DW order.
 
     Obeys the pure-document contract in machine.py (additive-only evolution;
@@ -140,7 +150,7 @@ def _decisions_document(pending: list[Decision]) -> dict[str, object]:
 STATUS_SCHEMA_VERSION = 1
 
 
-def _run_token_totals(state: RunState) -> tuple[int, int, float]:
+def run_token_totals(state: RunState) -> tuple[int, int, float]:
     """Run-level token totals as ``(raw, weighted, weight)``.
 
     The weight is the run's persisted snapshot — never live policy — so the
@@ -156,7 +166,7 @@ def _run_token_totals(state: RunState) -> tuple[int, int, float]:
     return raw, weighted, weight
 
 
-def _status_document(state: RunState) -> dict[str, object]:
+def status_document(state: RunState) -> dict[str, object]:
     """The `status --json` document: the stable machine-readable contract.
 
     Obeys the pure-document contract in machine.py (additive-only evolution;
@@ -164,9 +174,9 @@ def _status_document(state: RunState) -> dict[str, object]:
     status text, which is best-effort and free to change. Everything here is
     derived from state.json alone — never from live policy or other project
     files — so a consumer can reproduce the document, and the weight matches
-    what the run actually enforced (see _run_token_totals).
+    what the run actually enforced (see run_token_totals).
     """
-    raw_total, weighted_total, weight = _run_token_totals(state)
+    raw_total, weighted_total, weight = run_token_totals(state)
     if state.finished:
         status = "finished"
     elif state.paused:
@@ -220,7 +230,7 @@ def _status_document(state: RunState) -> dict[str, object]:
 LIST_SCHEMA_VERSION = 1
 
 
-def _list_document(infos: list[RunInfo]) -> dict[str, object]:
+def list_document(infos: list[RunInfo]) -> dict[str, object]:
     """The `list --json` document: one entry per run, oldest first.
 
     Obeys the pure-document contract in machine.py (additive-only evolution;
@@ -252,7 +262,7 @@ def _list_document(infos: list[RunInfo]) -> dict[str, object]:
 CLEANUP_SCHEMA_VERSION = 1
 
 
-def _cleanup_document(
+def cleanup_document(
     *,
     dry_run: bool,
     killed: list[str],
@@ -290,7 +300,7 @@ def _cleanup_document(
 CLEAN_SCHEMA_VERSION = 1
 
 
-def _clean_document(
+def clean_document(
     *,
     dry_run: bool,
     retain: int,
