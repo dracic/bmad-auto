@@ -1779,6 +1779,44 @@ def cmd_archive(args: argparse.Namespace) -> int:
     return 0
 
 
+CLEANUP_SCHEMA_VERSION = 1
+
+
+def _cleanup_document(
+    *,
+    dry_run: bool,
+    killed: list[str],
+    live: list[str],
+    unknown: set[str],
+    windows: list[str],
+) -> dict[str, object]:
+    """The `cleanup --json` document: the multiplexer artifacts this invocation
+    removed, or — under ``--dry-run`` — would remove.
+
+    Obeys the pure-document contract in machine.py (additive-only evolution;
+    anything breaking bumps CLEANUP_SCHEMA_VERSION). Plan and outcome share one
+    shape: the lists mean the same thing either way and `dry_run` alone says
+    whether it happened, so a caller can diff a preview against the real run.
+    `sessions.removed` holds run ids (the session name is `bmad-loop-<id>`),
+    `ctl_windows.removed` holds window names. `unverifiable_pid` is the subset
+    of `sessions.removed` whose engine liveness could not be proven — the text
+    mode's stderr warning, carried in the document so JSON mode leaves stderr
+    empty. It never blocks cleanup: pruning kills the tmux session, never the
+    engine pid. Nothing to clean up is a valid document of empty lists at
+    exit 0, never an error.
+    """
+    return {
+        "schema_version": CLEANUP_SCHEMA_VERSION,
+        "dry_run": dry_run,
+        "sessions": {
+            "removed": list(killed),
+            "live": list(live),
+            "unverifiable_pid": sorted(unknown),
+        },
+        "ctl_windows": {"removed": list(windows)},
+    }
+
+
 def cmd_cleanup(args: argparse.Namespace) -> int:
     from .tui import launch  # pure stdlib; no textual import
 
@@ -1786,13 +1824,24 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     # one partition sample drives the prune and every message below, so the
     # warnings and live count always match what was actually killed/skipped
     killed, live, unknown = runs.prune_sessions(project, dry_run=args.dry_run)
-    for run_id in sorted(unknown):
-        # warn-only: unknown never blocks cleanup (same wording as delete/archive).
-        # Pruning kills the tmux session, never the engine pid, so the warning
-        # holds after the fact too.
-        print(f"run {run_id}: engine may still be live (unverifiable pid)", file=sys.stderr)
+    if not args.json:
+        for run_id in sorted(unknown):
+            # warn-only: unknown never blocks cleanup (same wording as delete/archive).
+            # Pruning kills the tmux session, never the engine pid, so the warning
+            # holds after the fact too. In JSON mode this lives in the document
+            # instead (sessions.unverifiable_pid), leaving stderr empty.
+            print(f"run {run_id}: engine may still be live (unverifiable pid)", file=sys.stderr)
+    windows = (
+        launch.prunable_ctl_windows(project) if args.dry_run else launch.prune_ctl_windows(project)
+    )
+    if args.json:
+        machine.emit(
+            _cleanup_document(
+                dry_run=args.dry_run, killed=killed, live=live, unknown=unknown, windows=windows
+            )
+        )
+        return 0
     if args.dry_run:
-        windows = launch.prunable_ctl_windows(project)
         if not killed and not windows:
             print("nothing to clean up")
         else:
@@ -1803,7 +1852,6 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         if live:
             print(f"leaving {len(live)} live session(s) untouched")
         return 0
-    windows = launch.prune_ctl_windows(project)
     print(f"removed {len(killed)} session(s), {len(windows)} ctl window(s)")
     if live:
         print(f"left {len(live)} live session(s) untouched")
@@ -1831,6 +1879,68 @@ def _human_bytes(n: int) -> str:
     return f"{size:.1f}TB"
 
 
+CLEAN_SCHEMA_VERSION = 1
+
+
+def _clean_document(
+    *,
+    dry_run: bool,
+    retain: int,
+    cleanup_policy: policy_mod.CleanupPolicy,
+    freed_bytes: int,
+    worktrees: list[str],
+    trimmed: list[str],
+    archived: list[str],
+    deleted: list[str],
+    protected: list[str],
+    unverifiable_pid: list[str],
+) -> dict[str, object]:
+    """The `clean --json` document: the disk this invocation reclaimed, or —
+    under ``--dry-run`` — would reclaim.
+
+    Obeys the pure-document contract in machine.py (additive-only evolution;
+    anything breaking bumps CLEAN_SCHEMA_VERSION). Plan and outcome share one
+    shape: the lists mean the same thing either way and `dry_run` alone says
+    whether it happened, so a caller can diff a preview against the real run.
+
+    `freed_bytes` is a raw integer — the text mode's `~1.2MB` is a rendering of
+    this number, and formatting is the renderer's job. It is the same estimate
+    the text prints: measured before mutating (so it holds under --dry-run) and
+    approximate by construction, since it sums whole run dirs for archive/delete
+    but only the `worktrees/` tree for a trim.
+
+    Every list names items the text enumerates or counts: `worktrees` holds
+    absolute worktree paths, the rest hold run ids. `protected` is the runs left
+    untouched — `--keep`-listed or non-terminal — which the text reports only as
+    a count. `unverifiable_pid` is the subset of touched runs whose engine
+    liveness could not be proven; it is the text mode's stderr warning, carried
+    in the document so JSON mode leaves stderr empty, and it never blocks
+    reclamation.
+
+    `policy.retain` is the *effective* window — `--retain` when given, else
+    `[cleanup] run_retention`. The other three are the configured policy as
+    loaded. Note `--hard` overrides `archive_old` for this invocation only, so
+    it does not change the reported value; the outcome shows in `deleted`.
+    """
+    return {
+        "schema_version": CLEAN_SCHEMA_VERSION,
+        "dry_run": dry_run,
+        "policy": {
+            "retain": retain,
+            "retention_days": cleanup_policy.retention_days,
+            "archive_old": cleanup_policy.archive_old,
+            "trim_artifacts": cleanup_policy.trim_artifacts,
+        },
+        "freed_bytes": freed_bytes,
+        "worktrees": list(worktrees),
+        "trimmed": list(trimmed),
+        "archived": list(archived),
+        "deleted": list(deleted),
+        "protected": list(protected),
+        "unverifiable_pid": list(unverifiable_pid),
+    }
+
+
 def cmd_clean(args: argparse.Namespace) -> int:
     """Reclaim disk from concluded runs: tear down worktrees leaked by a
     mid-flight stop, trim heavy scaffolding from runs kept for history, and
@@ -1846,14 +1956,14 @@ def cmd_clean(args: argparse.Namespace) -> int:
     dry = args.dry_run
 
     reclaimable: list[Path] = []
-    protected = 0
+    protected: list[str] = []
     for run_dir in runs.list_run_dirs(project):
         if run_dir.name in keep:
-            protected += 1
+            protected.append(run_dir.name)
         elif runs.reclaimable(run_dir):
             reclaimable.append(run_dir)
         else:
-            protected += 1
+            protected.append(run_dir.name)
 
     past = {
         p.name
@@ -1863,24 +1973,32 @@ def cmd_clean(args: argparse.Namespace) -> int:
     }
 
     freed = 0
-    worktrees = 0
+    worktrees: list[str] = []
     trimmed: list[str] = []
     archived: list[str] = []
     deleted: list[str] = []
+    unverifiable: list[str] = []
     for run_dir in reclaimable:
         if runs.engine_liveness(run_dir) == "unknown":
-            # warn-only: unknown never blocks cleanup, but say so before removal
-            print(
-                f"run {run_dir.name}: engine may still be live (unverifiable pid)",
-                file=sys.stderr,
-            )
+            # warn-only: unknown never blocks cleanup, but say so before removal.
+            # In JSON mode this lives in the document instead (unverifiable_pid),
+            # leaving stderr empty.
+            unverifiable.append(run_dir.name)
+            if not args.json:
+                print(
+                    f"run {run_dir.name}: engine may still be live (unverifiable pid)",
+                    file=sys.stderr,
+                )
         # measure before mutating so the reclaim estimate holds for --dry-run too
         wt_dir = run_dir / "worktrees"
         wt_bytes = _dir_size(wt_dir) if wt_dir.is_dir() else 0
         run_bytes = _dir_size(run_dir)
+        # collect, never print-as-you-mutate: the document is emitted once at the
+        # end, so every per-item line has to survive the loop as data
         for wt in runs.reconcile_orphan_worktrees(repo, run_dir, dry_run=dry):
-            worktrees += 1
-            print(f"{'would remove' if dry else 'removed'} worktree {wt}")
+            worktrees.append(str(wt))
+            if not args.json:
+                print(f"{'would remove' if dry else 'removed'} worktree {wt}")
         if run_dir.name in past:
             freed += run_bytes
             runs.trim_run_dir(run_dir, dry_run=dry)  # shrink before archiving
@@ -1897,12 +2015,28 @@ def cmd_clean(args: argparse.Namespace) -> int:
                 freed += wt_bytes
                 trimmed.append(run_dir.name)
 
+    if args.json:
+        machine.emit(
+            _clean_document(
+                dry_run=dry,
+                retain=retain,
+                cleanup_policy=pol.cleanup,
+                freed_bytes=freed,
+                worktrees=worktrees,
+                trimmed=trimmed,
+                archived=archived,
+                deleted=deleted,
+                protected=protected,
+                unverifiable_pid=unverifiable,
+            )
+        )
+        return 0
     if not worktrees and not trimmed and not archived and not deleted:
         print("nothing to reclaim")
     else:
         head = "would reclaim" if dry else "reclaimed"
         print(
-            f"{head} ~{_human_bytes(freed)}: {worktrees} worktree(s), "
+            f"{head} ~{_human_bytes(freed)}: {len(worktrees)} worktree(s), "
             f"{len(trimmed)} run(s) trimmed, {len(archived)} archived, {len(deleted)} deleted"
         )
         for name in archived:
@@ -1910,7 +2044,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
         for name in deleted:
             print(f"  deleted {name}")
     if protected:
-        print(f"left {protected} live/resumable run(s) untouched")
+        print(f"left {len(protected)} live/resumable run(s) untouched")
     return 0
 
 
@@ -2393,6 +2527,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="list what would be removed without killing anything",
     )
+    machine.add_json_flag(cleanup_p, "sessions and ctl windows removed, or that would be")
 
     clean_p = add(
         "clean",
@@ -2421,6 +2556,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="permanently delete runs past the retention window instead of archiving them",
     )
+    machine.add_json_flag(clean_p, "what was reclaimed, or would be")
 
     tui_p = add(
         "tui",

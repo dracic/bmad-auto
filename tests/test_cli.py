@@ -2206,6 +2206,74 @@ def test_cleanup_warns_per_unknown_session(tmp_path, monkeypatch, capsys):
     assert "removed 2 session(s), 0 ctl window(s)" in captured.out
 
 
+def test_cleanup_json_dry_run_plans_without_pruning(tmp_path, monkeypatch, capsys):
+    from bmad_loop import runs
+    from bmad_loop.tui import launch
+
+    monkeypatch.setattr(launch, "prunable_ctl_windows", lambda _proj: ["sweep-fin-1"])
+    # a real prune would have to go through prune_ctl_windows; leaving it
+    # unpatched proves --dry-run never reaches it
+    dry_runs: list[bool] = []
+    monkeypatch.setattr(
+        runs,
+        "prune_sessions",
+        lambda _proj, dry_run=False: dry_runs.append(dry_run) or (["fin-1"], ["live-1"], set()),
+    )
+
+    doc = machine_json(["cleanup", "--project", str(tmp_path), "--dry-run", "--json"], capsys)
+
+    assert doc["schema_version"] == cli.CLEANUP_SCHEMA_VERSION
+    assert doc["dry_run"] is True
+    assert doc["sessions"] == {"removed": ["fin-1"], "live": ["live-1"], "unverifiable_pid": []}
+    assert doc["ctl_windows"] == {"removed": ["sweep-fin-1"]}
+    assert dry_runs == [True]  # the kill stayed suppressed
+
+
+def test_cleanup_json_real_run_reports_what_it_did(tmp_path, monkeypatch, capsys):
+    from bmad_loop import runs
+    from bmad_loop.tui import launch
+
+    monkeypatch.setattr(runs, "prune_sessions", lambda _proj, dry_run=False: (["fin-1"], [], set()))
+    monkeypatch.setattr(launch, "prune_ctl_windows", lambda _proj: ["sweep-fin-1"])
+
+    doc = machine_json(["cleanup", "--project", str(tmp_path), "--json"], capsys)
+
+    assert doc["dry_run"] is False
+    assert doc["sessions"]["removed"] == ["fin-1"]
+    assert doc["ctl_windows"]["removed"] == ["sweep-fin-1"]
+
+
+def test_cleanup_json_carries_unverifiable_pid_with_empty_stderr(tmp_path, monkeypatch, capsys):
+    # the text mode's per-session stderr warning becomes a document field;
+    # machine_json's default asserts stderr is empty, which is what is tested.
+    from bmad_loop import runs
+    from bmad_loop.tui import launch
+
+    monkeypatch.setattr(
+        runs, "prune_sessions", lambda _proj, dry_run=False: (["fin-1", "odd-1"], [], {"odd-1"})
+    )
+    monkeypatch.setattr(launch, "prune_ctl_windows", lambda _proj: [])
+
+    doc = machine_json(["cleanup", "--project", str(tmp_path), "--json"], capsys)
+
+    assert doc["sessions"]["removed"] == ["fin-1", "odd-1"]
+    assert doc["sessions"]["unverifiable_pid"] == ["odd-1"]  # only unknown ids
+
+
+def test_cleanup_json_nothing_to_clean_up_is_a_valid_empty_document(tmp_path, monkeypatch, capsys):
+    from bmad_loop import runs
+    from bmad_loop.tui import launch
+
+    monkeypatch.setattr(runs, "prune_sessions", lambda _proj, dry_run=False: ([], [], set()))
+    monkeypatch.setattr(launch, "prune_ctl_windows", lambda _proj: [])
+
+    doc = machine_json(["cleanup", "--project", str(tmp_path), "--json"], capsys)
+
+    assert doc["schema_version"] == cli.CLEANUP_SCHEMA_VERSION
+    assert doc["sessions"] == {"removed": [], "live": [], "unverifiable_pid": []}
+    assert doc["ctl_windows"] == {"removed": []}
+
+
 def test_resume_kills_stale_session_before_running(project, monkeypatch):
     from conftest import install_base_skills
 

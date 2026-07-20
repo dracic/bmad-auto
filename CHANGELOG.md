@@ -9,6 +9,22 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **`bmad-loop clean --json` / `bmad-loop cleanup --json` (#204).** Stable, schema-versioned
+  JSON documents (one per command — they are separate contracts) reporting what a reclaim
+  removed, or under `--dry-run` would remove: for `clean` the worktree paths, trimmed,
+  archived, deleted and protected run ids, the effective retention policy, and `freed_bytes`
+  as a raw integer — the text's `~1.2MB` is a rendering of that number, and formatting is the
+  renderer's job; for `cleanup` the run ids whose sessions went, the live ids left alone, and
+  the ctl windows closed. Plan and outcome share one schema — same fields, same meanings, with
+  `dry_run` saying which one you are holding — so a script can pre-flight and then compare
+  against what actually happened. The values are each invocation's own sample rather than a
+  promise the two agree: `freed_bytes` is re-measured, and the world can move between the
+  preview and the commit. **The real paths are now scriptable at all** — they previously discarded
+  the per-item data and printed only a summary line, and `protected` was a bare count. Both
+  commands printed progress as they mutated, and both warned mid-loop about an unverifiable
+  engine pid; under `--json` that warning becomes a document field, so stderr stays empty and
+  stdout stays one pure document.
+
 - **`bmad-loop decisions --json` (#203).** A stable, schema-versioned JSON document of the
   pending deferred-work decisions, so a script can select an option by policy and pre-answer
   it rather than scraping the numbered text. It is strictly richer than that text, which drops

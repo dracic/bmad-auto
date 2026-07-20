@@ -4,7 +4,7 @@ artifact trim, and the `clean` CLI command."""
 import argparse
 import subprocess
 
-from conftest import install_bmad_config
+from conftest import install_bmad_config, machine_json
 
 from bmad_loop import cli, runs, verify
 from bmad_loop.journal import save_state
@@ -180,7 +180,7 @@ def test_trim_run_dir_keeps_run_viewable(tmp_path):
 
 
 def _clean_args(project, **kw):
-    base = dict(project=str(project), dry_run=False, keep=None, retain=None, hard=False)
+    base = dict(project=str(project), dry_run=False, keep=None, retain=None, hard=False, json=False)
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -263,3 +263,112 @@ def test_cmd_clean_hard_deletes_past_retention(project):
     assert rc == 0
     assert not run_dir.exists()
     assert not (repo / ".bmad-loop" / "archive").exists()
+
+
+# -------------------------------------------------------- cmd_clean --json
+
+
+def _clean_json(repo, capsys, *extra):
+    return machine_json(["clean", "--project", str(repo), "--json", *extra], capsys)
+
+
+def test_cmd_clean_json_dry_run_plans_without_mutating(project, capsys):
+    # the whole point of --dry-run --json: a caller inspects the plan before
+    # committing, so the document must name the work AND leave the disk alone.
+    install_bmad_config(project)
+    repo = project.project
+    run_dir = repo / ".bmad-loop" / "runs" / "20260101-000000-aaaa"
+    wt = run_dir / "worktrees" / "u"
+    wt.parent.mkdir(parents=True)
+    verify.worktree_add(repo, wt, "fb", "main")
+    save_state(run_dir, RunState(run_id="r", project=str(repo), started_at="x", stopped=True))
+
+    doc = _clean_json(repo, capsys, "--dry-run")
+
+    assert doc["schema_version"] == cli.CLEAN_SCHEMA_VERSION
+    assert doc["dry_run"] is True
+    assert doc["worktrees"] == [str(wt)]
+    assert doc["trimmed"] == ["20260101-000000-aaaa"]
+    assert wt.exists() and run_dir.is_dir()  # provably non-mutating
+    assert (run_dir / "worktrees").is_dir()
+
+
+def test_cmd_clean_json_real_run_reports_what_it_did(project, capsys):
+    install_bmad_config(project)
+    repo = project.project
+    run_dir = repo / ".bmad-loop" / "runs" / "20260101-000000-aaaa"
+    wt = run_dir / "worktrees" / "u"
+    wt.parent.mkdir(parents=True)
+    verify.worktree_add(repo, wt, "fb", "main")
+    (wt / "big").write_bytes(b"x" * 4096)
+    save_state(run_dir, RunState(run_id="r", project=str(repo), started_at="x", stopped=True))
+
+    doc = _clean_json(repo, capsys)
+
+    assert doc["dry_run"] is False
+    assert doc["worktrees"] == [str(wt)]
+    assert doc["trimmed"] == ["20260101-000000-aaaa"]
+    assert not wt.exists()  # the real path really ran
+    # a raw int, never the _human_bytes string the text mode renders
+    assert isinstance(doc["freed_bytes"], int)
+    assert doc["freed_bytes"] >= 4096
+
+
+def test_cmd_clean_json_names_every_item_the_text_enumerates(project, capsys):
+    # protected is a bare count in the text ("left N ... untouched") and
+    # archived/deleted are per-line; the document names all of them.
+    install_bmad_config(project)
+    repo = project.project
+    old = repo / ".bmad-loop" / "runs" / "20260101-000000-aaaa"
+    save_state(old, RunState(run_id="r1", project=str(repo), started_at="x", finished=True))
+    kept = repo / ".bmad-loop" / "runs" / "20260101-000001-bbbb"
+    save_state(kept, RunState(run_id="r2", project=str(repo), started_at="x", finished=True))
+    live = repo / ".bmad-loop" / "runs" / "20260101-000002-cccc"
+    save_state(live, RunState(run_id="r3", project=str(repo), started_at="x"))  # not terminal
+
+    doc = _clean_json(repo, capsys, "--retain", "0", "--keep", "20260101-000001-bbbb")
+
+    assert doc["archived"] == ["20260101-000000-aaaa"]
+    # --keep-listed and non-terminal runs alike
+    assert sorted(doc["protected"]) == ["20260101-000001-bbbb", "20260101-000002-cccc"]
+    assert doc["policy"]["retain"] == 0  # the effective value: --retain wins over policy
+    assert doc["policy"]["archive_old"] is True
+
+
+def test_cmd_clean_json_hard_deletes_and_keeps_policy_archive_old(project, capsys):
+    install_bmad_config(project)
+    repo = project.project
+    run_dir = repo / ".bmad-loop" / "runs" / "20260101-000000-aaaa"
+    save_state(run_dir, RunState(run_id="r", project=str(repo), started_at="x", finished=True))
+
+    doc = _clean_json(repo, capsys, "--retain", "0", "--hard")
+
+    assert doc["deleted"] == ["20260101-000000-aaaa"]
+    assert doc["archived"] == []
+    # --hard overrides per invocation; the configured policy is reported as-is
+    assert doc["policy"]["archive_old"] is True
+
+
+def test_cmd_clean_json_carries_unverifiable_pid_with_empty_stderr(project, monkeypatch, capsys):
+    # the text mode's stderr warning becomes a document field; machine_json's
+    # default asserts stderr is empty, which is the contract being tested.
+    install_bmad_config(project)
+    repo = project.project
+    run_dir = repo / ".bmad-loop" / "runs" / "20260101-000000-aaaa"
+    save_state(run_dir, RunState(run_id="r", project=str(repo), started_at="x", stopped=True))
+    monkeypatch.setattr(runs, "engine_liveness", lambda _rd: "unknown")
+
+    doc = _clean_json(repo, capsys)
+
+    assert doc["unverifiable_pid"] == ["20260101-000000-aaaa"]
+
+
+def test_cmd_clean_json_nothing_to_reclaim_is_a_valid_empty_document(project, capsys):
+    install_bmad_config(project)
+
+    doc = _clean_json(project.project, capsys)
+
+    assert doc["schema_version"] == cli.CLEAN_SCHEMA_VERSION
+    assert doc["freed_bytes"] == 0
+    for key in ("worktrees", "trimmed", "archived", "deleted", "protected", "unverifiable_pid"):
+        assert doc[key] == [], key
