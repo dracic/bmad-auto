@@ -7,9 +7,11 @@ swaps only the shell dialect (PowerShell instead of POSIX sh) via the base's
 hooks, plus the handful of behaviors where psmux diverges from tmux:
 window-level ``-e`` is accepted but silently dropped, an attaching
 ``new-session`` is refused by a nesting guard when run from inside a psmux
-pane, ``kill-session`` ignores the ``=name`` exact-match form, and a quoted
+pane, ``kill-session`` ignores the ``=name`` exact-match form, a quoted
 command string does not survive psmux's outer re-parse (so shell source
-travels as ``pwsh -EncodedCommand``). ``available()`` additionally gates on
+travels as ``pwsh -EncodedCommand``), and ``pipe-pane`` strips every
+dash-flag token from the piped command (so the log sink travels as a
+positional sidecar ``.ps1``). ``available()`` additionally gates on
 the reported version: psmux releases up to 3.3.6 kill recycled PIDs during
 pane/session teardown without a process-identity check, which can take down
 an unrelated long-lived process mid-run. See :mod:`.multiplexer` for the
@@ -170,24 +172,44 @@ class PsmuxMultiplexer(BaseTmuxBackend):
             pass
 
     def pipe_pane(self, window_id: str, log_file: Path) -> None:
-        # The base's POSIX `cat >>` sink assumes a POSIX host shell; psmux runs
-        # the pipe command on the host shell, so ship a pwsh append sink instead.
-        # A raw stream copy is byte-exact like `cat >>`: no console decode of the
-        # pane bytes, no Add-Content re-encode, no CRLF normalization.
+        # The base's POSIX `cat >>` sink assumes a POSIX host shell, and psmux
+        # strips every dash-flag token from the piped command before spawning it
+        # (psmux/psmux#482) — any `pwsh -EncodedCommand` transport dies on launch
+        # — so the sink source lives in a sidecar .ps1 invoked positionally. The
+        # sink is byte-exact like `cat >>` (raw stream copy: no console decode of
+        # the pane bytes, no re-encode, no CRLF normalization) and flushes per
+        # chunk: the run log is live-tailed for activity detection, and a
+        # buffered copy never surfaces bytes — pipe EOF is unreliable on psmux.
+        # Known ceilings until upstream restores a flag transport: whether a
+        # spaced or $-bearing path survives psmux's quote re-parse is untested,
+        # an AllSigned/Restricted execution policy refuses the unsigned .ps1,
+        # and a spawn race that exits 0 still yields a silent empty log — the
+        # warning below covers surfaced failures only.
+        sink_file = log_file.with_name(log_file.name + ".sink.ps1")
+        if any(char in str(sink_file) for char in ("$", "`")):
+            print(
+                f"warning: pipe-pane log capture failed for {window_id}: "
+                "sidecar path contains PowerShell interpolation syntax",
+                file=sys.stderr,
+            )
+            return
         sink = (
+            "$in = [System.Console]::OpenStandardInput()\n"
             f"$out = [System.IO.File]::Open({_pwsh_quote(str(log_file))}, "
-            "'Append', 'Write', 'Read'); "
-            "[System.Console]::OpenStandardInput().CopyTo($out); $out.Dispose()"
+            "'Append', 'Write', 'Read')\n"
+            "$buf = New-Object byte[] 4096\n"
+            "while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) "
+            "{ $out.Write($buf, 0, $n); $out.Flush() }\n"
+            "$out.Dispose()\n"
         )
-        wrapped = self._shell_wrap(sink)
-        # base64 has no quoting to lose, so a plain join survives psmux's re-parse
-        # — valid only while no wrapped arg contains a space.
-        assert all(" " not in part for part in wrapped)
         try:
-            self._tmux("pipe-pane", "-t", window_id, "-o", " ".join(wrapped))
-        except TmuxError as exc:
-            # Best-effort, as the base: a window that died on launch is not a
-            # setup failure — but say so, or an empty run log is unexplainable.
+            sink_file.write_text(sink, encoding="utf-8")
+            self._tmux("pipe-pane", "-t", window_id, "-o", f'pwsh "{sink_file}"')
+        except (TmuxError, OSError, UnicodeEncodeError) as exc:
+            # Best-effort, as the base: a window that died on launch (or psmux's
+            # first-pipe-after-new-window spawn race, noted in psmux/psmux#482)
+            # is not a setup failure — but say so, or an empty run log is
+            # unexplainable.
             print(
                 f"warning: pipe-pane log capture failed for {window_id}: {exc}",
                 file=sys.stderr,
