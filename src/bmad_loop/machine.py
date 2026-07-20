@@ -44,11 +44,10 @@ Two ways in, by what the caller already holds:
 
 - :func:`emit` takes a ``dict`` and serializes it — ``status`` and ``list``.
 - :func:`emit_document` takes an already-serialized ``str`` — ``diagnose`` and
-  ``probe-adapter``, whose renderers return text. Their reasons differ, and only
-  one is a constraint: ``probe.render_json`` simply *returns a string*, so there
-  is nothing to re-encode, whereas ``diagnostics.render_json`` serializes
-  *before* running its leak self-check, making those exact bytes the ones the
-  check verified — re-encoding them here would emit bytes nothing verified.
+  ``probe-adapter``, whose renderers return text. For both this is a hard
+  constraint: each serializes *before* running the shared leak self-check
+  (``sanitize.guard``), making those exact bytes the ones the check verified —
+  re-encoding them here would emit bytes nothing verified.
 
 :func:`write_document` is the ``--out`` sibling of :func:`emit_document`, taking
 the same already-serialized string to a file instead of stdout.
@@ -56,8 +55,8 @@ the same already-serialized string to a file instead of stdout.
 The serializer flags differ by family on purpose and are not to be unified: the
 renderers behind :func:`emit_document` sort their keys (a diff-stable dump is
 worth more than field order there) while :func:`emit`'s dicts are built in the
-order they are meant to be read, and ``diagnostics.render_json`` alone passes
-``ensure_ascii=False`` because its leak guard has to scan the values unescaped.
+order they are meant to be read, and the two guarded renderers pass
+``ensure_ascii=False`` because the leak guard has to scan the values unescaped.
 """
 
 from __future__ import annotations
@@ -77,8 +76,9 @@ def _validated(rendered: str) -> str:
     """Return ``rendered`` unchanged, or raise if it is not a whole JSON document.
 
     Parse to assert, never to re-serialize: the caller's exact bytes are what gets
-    written. ``diagnostics.render_json`` runs its leak self-check *before* handing
-    the string over, so re-encoding here would ship bytes nothing checked.
+    written. The ``diagnose``/``probe-adapter`` renderers run their leak self-check
+    *before* handing the string over, so re-encoding here would ship bytes nothing
+    checked.
     """
     try:
         json.loads(rendered)
@@ -93,16 +93,16 @@ def emit_document(rendered: str) -> None:
     Verifies well-formedness before writing, then writes the ORIGINAL string —
     never a re-serialization of the parsed result. Half the commands reach stdout
     through here rather than through :func:`emit`, so without this the contract
-    would hold for them by convention only; but ``diagnostics.render_json``
-    validated these exact bytes with its leak self-check, so emitting anything
-    re-derived would ship bytes nothing checked. Parse to assert, print verbatim.
+    would hold for them by convention only; but the guarded renderers validated
+    these exact bytes with their leak self-check, so emitting anything re-derived
+    would ship bytes nothing checked. Parse to assert, print verbatim.
 
     Raises :class:`ValueError` on a malformed document — a bug in the caller's
     renderer, and far better surfaced as a crash with empty stdout (which the
     contract permits) than as a half-parsable stream a consumer has to diagnose.
 
     stdout is switched to UTF-8 first, because a document is not necessarily
-    ASCII — ``diagnostics.render_json`` dumps with ``ensure_ascii=False`` so its
+    ASCII — the guarded renderers dump with ``ensure_ascii=False`` so the
     leak guard can scan the values unescaped, which lets a non-sensitive
     non-ASCII field (a localized ``platform.release()``, say) through to here
     verbatim. Encoding it for a legacy non-UTF-8 console then raised

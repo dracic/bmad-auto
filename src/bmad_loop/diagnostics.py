@@ -17,7 +17,8 @@ directly; every value that could carry content is dropped, reduced to a boolean,
 **pseudonymized** (story keys/branches/SHAs are identifier-shaped and would
 otherwise survive verbatim), or scrubbed. Unknown/future fields default to a
 ``scrub_json`` pass, never raw. As a final backstop the rendered bytes are run
-through :func:`sanitize.assert_no_leak`. A stray pseudonymized original (a
+through :func:`sanitize.guard` — the fail-closed egress self-check shared with
+``probe-adapter`` since #199. A stray pseudonymized original (a
 per-field routing gap — the value is in the legend, so its safe alias is known)
 is **repaired** by substituting the alias, re-verified, and disclosed in the
 dump itself — a "Backstop repairs" section in the markdown report, an optional
@@ -42,6 +43,14 @@ from typing import Any
 from . import __version__, sanitize
 from .journal import Journal, load_state
 from .model import RunState, StoryTask
+
+# The guard machinery (fail-closed egress self-check + alias-substitution
+# repair) moved to sanitize.py so probe-adapter shares the single audited
+# implementation (#199). LeakDetected stays importable from here — cli.py and
+# external callers resolve `diagnostics.LeakDetected` — so it carries a noqa:
+# without it ruff F401 autofixes the re-export away and the except clause in
+# cmd_diagnose breaks.
+from .sanitize import LeakDetected  # noqa: F401 — re-export
 
 # Deliberately NOT bumped when `--json` stopped being a fenced ```json block
 # inside the markdown report and became a pure document (machine.py contract):
@@ -525,7 +534,7 @@ def render_json(
     # real non-ASCII is safe — and it must be identical in both dumps below, or
     # the bytes we verified would not be the bytes we emit.
     rendered = json.dumps(_to_jsonable(d), indent=2, sort_keys=True, ensure_ascii=False)
-    rendered, reps = _guard(rendered, pseudo)
+    rendered, reps = sanitize.guard(rendered, pseudo)
     if reps:
         # Disclose the repair in the dump itself so the routing gap surfaces as
         # a reportable bug. Substitution preserved JSON validity — a leaked
@@ -535,7 +544,7 @@ def render_json(
         data = json.loads(rendered)
         data["backstop_repairs"] = dict(reps)
         rendered = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False)
-        _assert_clean(rendered, pseudo)
+        sanitize.assert_clean(rendered, pseudo)
     if repairs is not None:
         repairs.extend(reps)
     return rendered
@@ -637,7 +646,7 @@ def render_markdown(
         out.append("")
 
     rendered = "\n".join(out)
-    rendered, reps = _guard(rendered, pseudo)
+    rendered, reps = sanitize.guard(rendered, pseudo)
     if reps:
         note = [
             "",
@@ -654,7 +663,7 @@ def render_markdown(
         rendered += "\n".join(note)
         # The note is appended after the repair loop verified the body, so
         # re-check the whole thing: the note must sit inside the verified bytes.
-        _assert_clean(rendered, pseudo)
+        sanitize.assert_clean(rendered, pseudo)
     if repairs is not None:
         repairs.extend(reps)
     return rendered
@@ -664,91 +673,3 @@ def _dict_inline(d: dict) -> str:
     if not d:
         return "—"
     return ", ".join(f"{k}={v}" for k, v in sorted(d.items()))
-
-
-_MAX_REPAIR_PASSES = 3
-
-
-def _repair_candidates(pseudo: sanitize.Pseudonymizer | None) -> list[tuple[str, str, str]]:
-    """``(original, alias, label)`` triples for the leak check and repair.
-
-    Filtered to assert_no_leak's ≥4-char detection threshold (repair must never
-    rewrite an occurrence detection would not fire on) and deduped by original
-    (a value aliased under two namespaces gets one deterministic label — the
-    first insertion's). Labels are ``ns:alias`` — safe to print by construction,
-    never the original."""
-    if pseudo is None:
-        return []
-    candidates: list[tuple[str, str, str]] = []
-    seen: set[str] = set()
-    for ns, original, alias in pseudo.entries():
-        if len(original) >= 4 and original not in seen:
-            seen.add(original)
-            candidates.append((original, alias, f"{ns}:{alias}"))
-    return candidates
-
-
-def _assert_clean(rendered: str, pseudo: sanitize.Pseudonymizer | None) -> None:
-    """One plain, no-repair re-check — run after a repair note is appended so
-    the note itself sits inside the verified bytes."""
-    extras = [(orig, label) for orig, _alias, label in _repair_candidates(pseudo)]
-    fired = sanitize.assert_no_leak(rendered, extra=extras)
-    if fired:
-        raise LeakDetected(fired)
-
-
-def _guard(
-    rendered: str, pseudo: sanitize.Pseudonymizer | None
-) -> tuple[str, list[tuple[str, int]]]:
-    """Verify the rendered bytes; repair stray pseudonymized originals; fail closed.
-
-    When the pseudonymizer is supplied, its legend's original values (the real
-    story keys/branches/SHAs) are fed into the self-check too, so any that
-    slipped through the per-field routing are caught here in the final bytes.
-    Unlike a hard-rule hit, such a miss is repairable: the backstop knows the
-    original's safe alias, so it substitutes it and re-verifies instead of
-    refusing outright. Returns ``(text, [(label, count), ...])`` of applied
-    repairs. Raises :class:`LeakDetected` on any hard rule (email / secret /
-    home-path / url-creds / username — genuine PII never auto-repairs) or if
-    repair does not converge within the pass bound."""
-    candidates = _repair_candidates(pseudo)
-    extras = [(orig, label) for orig, _alias, label in candidates]
-    # Longest-first: a branch embedding a story slug at a "-" boundary must be
-    # replaced whole, not spliced into a half-alias mongrel by the inner slug.
-    by_length = sorted(candidates, key=lambda c: len(c[0]), reverse=True)
-
-    tally: dict[str, int] = {}
-    for _ in range(_MAX_REPAIR_PASSES):
-        fired = sanitize.assert_no_leak(rendered, extra=extras)
-        if not fired:
-            return rendered, sorted(tally.items())
-        if any(not rule.startswith("sensitive[") for rule in fired):
-            raise LeakDetected(fired)
-        # A repair pass replaces every standalone occurrence of every candidate,
-        # so pass 2 is reachable only if a substitution manufactured a NEW
-        # standalone occurrence of a different original — a hash-output
-        # coincidence (the alias alphabet is [A-Za-z0-9-] and "-" is itself a
-        # boundary char). The bound turns a pathological substitution cycle
-        # into a fail-closed refusal instead of a loop.
-        for original, alias, label in by_length:
-            rendered, n = sanitize.replace_standalone(rendered, original, alias)
-            if n:
-                tally[label] = tally.get(label, 0) + n
-    fired = sanitize.assert_no_leak(rendered, extra=extras)
-    if fired:
-        raise LeakDetected(fired)
-    return rendered, sorted(tally.items())
-
-
-class LeakDetected(Exception):
-    """The rendered dump tripped sanitize.assert_no_leak — emission is refused.
-
-    Raised only for hard rules (email/secret/home-path/url-creds/username) or a
-    ``sensitive[*]`` repair that did not converge; a plain stray-original hit is
-    repaired by alias substitution instead. ``rules`` carries the fired rule
-    names — ``sensitive[<ns>:<alias>]`` for pseudonymizer originals, printable
-    because the label never contains the original value."""
-
-    def __init__(self, rules: list[str]):
-        self.rules = rules
-        super().__init__("diagnostic dump tripped leak self-check: " + ", ".join(rules))

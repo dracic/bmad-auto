@@ -191,6 +191,19 @@ breaking changes may land in a minor release.
 
 ### Changed
 
+- **BREAKING: `probe-adapter` now runs `diagnose`'s egress leak self-check, and captured hook
+  payloads ship as a schema instead of scrubbed values (#199).** The rendered report re-scans
+  itself before emitting (the guard moved to `sanitize.guard`, one audited implementation for
+  both commands): an email / secret / home path / username in the final bytes makes the command
+  refuse to emit — message on stderr, empty stdout, exit ≠ 0, no `--out` file — and a stray
+  occurrence of the pseudonymized project directory name is repaired to its alias and disclosed.
+  Each captured event now reports dotted key paths with leaf types (`tool_input.command:str`),
+  never payload values, so the `--json` document's `schema_version` bumps to 2
+  (`captured_events[].payload` removed, `payload_schema` added; `payload_keys` stays, now
+  identifier-gated). Collection hardening rides along: transcript-location components that embed
+  the username are redacted, the project dir name is aliased in locations, a home-rooted
+  `--binary` hint renders `~`-relative, and a credential-shaped dict key can no longer surface
+  in the token key paths.
 - **BREAKING: `diagnose --json` and `probe-adapter --json` now emit a pure JSON document
   (#195).** Both used to print their human-readable report with a fenced ` ```json ` block
   appended, so a consumer had to scrape the fence out of prose. `--json` now emits the

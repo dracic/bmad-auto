@@ -8,11 +8,12 @@ rendering; nothing is displayed raw.
 
 Guarantees:
 - token *counts* are non-PII, so numbers/bools/null pass through verbatim;
-- dict **keys** are kept verbatim — field names/casing are the whole point of a
-  payload probe — but every leaf **string** is `$HOME`-redacted and then kept
-  ONLY if it matches a conservative identifier shape (a short slug with no
-  spaces / `@` / `/`, e.g. ``claude-opus-4-8`` or ``session-abc_123``);
-  anything else (prose, code, paths, emails) becomes ``<redacted:str>``;
+- dict **keys** get the same scrub as leaf strings (a home-path or
+  credential-shaped key can't leak where the equivalent value would be caught);
+  every leaf **string** is `$HOME`-redacted and then kept ONLY if it matches a
+  conservative identifier shape (a short slug with no spaces / `@` / `/`, e.g.
+  ``claude-opus-4-8`` or ``session-abc_123``); anything else (prose, code,
+  paths, emails) becomes ``<redacted:str>``;
 - an identifier-shaped string that looks like a **secret** (a known credential
   prefix such as ``ghp_``/``sk-``/``AKIA``, a JWT, or a long high-entropy blob)
   becomes ``<redacted:secret>`` even though it would otherwise pass — the one
@@ -20,17 +21,18 @@ Guarantees:
 - list lengths are preserved (the count is structural, the contents aren't);
 - recursion is depth-guarded so a pathological payload can't blow the stack.
 
-It also offers two helpers the dump leans on but the probe does not need:
-:class:`Pseudonymizer` (stable, irreversible per-dump aliases for proprietary
-identifiers — story keys, branches, SHAs — that *are* identifier-shaped and so
-would otherwise survive verbatim) and :func:`assert_no_leak` (a final-output
-self-check the dump runs over its own rendered bytes before writing, so a
-routing bug or a future field can never silently ship a secret/PII/path).
-`assert_no_leak` accepts labeled extras (``(value, label)``) so a hit can be
-reported by a printable label instead of an opaque index, and its companion
-:func:`replace_standalone` substitutes a leaked value under identical
-word-boundary semantics — the check stays the authority; whether a caller
-repairs-and-rechecks or refuses outright is the caller's policy.
+It also owns the shared egress backstop both commands run over their own
+rendered bytes before emitting: :class:`Pseudonymizer` (stable, irreversible
+per-report aliases for proprietary identifiers — story keys, branches, SHAs,
+project names — that *are* identifier-shaped and so would otherwise survive
+verbatim), :func:`assert_no_leak` (the raw re-scan; accepts labeled extras
+``(value, label)`` so a hit is reported by a printable label instead of an
+opaque index), and :func:`guard` / :func:`assert_clean` (the fail-closed
+policy around it: hard-rule hits — email/secret/home-path/url-creds/username —
+refuse outright by raising :class:`LeakDetected`, while a stray pseudonymizer
+original is repaired via :func:`replace_standalone` under identical
+word-boundary semantics, re-verified, and disclosed to the caller). A routing
+bug or a future field can therefore never silently ship a secret/PII/path.
 """
 
 from __future__ import annotations
@@ -312,6 +314,21 @@ class Pseudonymizer:
         return [(ns, value, alias) for (ns, value), alias in self._map.items()]
 
 
+def embeds_current_username(s: str) -> bool:
+    """True when the current username (≥5 chars — the :func:`assert_no_leak`
+    hard rule's threshold) appears anywhere in ``s``. Collection-time callers
+    redact such values pre-emptively — e.g. a kept-verbatim path component like
+    ``pytest-of-alice`` — so the guard's username rule (standalone semantics,
+    strictly narrower than this substring check) can never fire on them."""
+    try:
+        user = getpass.getuser()
+    except Exception:
+        # No passwd entry / no USER env (minimal containers): same degradation
+        # as the assert_no_leak username rule.
+        return False
+    return len(user) >= 5 and user in s
+
+
 def assert_no_leak(text: str, *, extra: Iterable[str | tuple[str, str]] = ()) -> list[str]:
     """Re-scan already-rendered output for anything that must not ship.
 
@@ -361,3 +378,94 @@ def assert_no_leak(text: str, *, extra: Iterable[str | tuple[str, str]] = ()) ->
         if len(value) >= 4 and _contains_standalone(text, value):
             fired.append(f"sensitive[{label}]")
     return fired
+
+
+class LeakDetected(Exception):
+    """The rendered report tripped :func:`assert_no_leak` — emission is refused.
+
+    Raised only for hard rules (email/secret/home-path/url-creds/username) or a
+    ``sensitive[*]`` repair that did not converge; a plain stray-original hit is
+    repaired by alias substitution instead. ``rules`` carries the fired rule
+    names — ``sensitive[<ns>:<alias>]`` for pseudonymizer originals, printable
+    because the label never contains the original value."""
+
+    def __init__(self, rules: list[str]):
+        self.rules = rules
+        super().__init__("rendered report tripped leak self-check: " + ", ".join(rules))
+
+
+_MAX_REPAIR_PASSES = 3
+
+
+def _repair_candidates(pseudo: Pseudonymizer | None) -> list[tuple[str, str, str]]:
+    """``(original, alias, label)`` triples for the leak check and repair.
+
+    Filtered to assert_no_leak's ≥4-char detection threshold (repair must never
+    rewrite an occurrence detection would not fire on) and deduped by original
+    (a value aliased under two namespaces gets one deterministic label — the
+    first insertion's). Labels are ``ns:alias`` — safe to print by construction,
+    never the original."""
+    if pseudo is None:
+        return []
+    candidates: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for ns, original, alias in pseudo.entries():
+        if len(original) >= 4 and original not in seen:
+            seen.add(original)
+            candidates.append((original, alias, f"{ns}:{alias}"))
+    return candidates
+
+
+def assert_clean(rendered: str, pseudo: Pseudonymizer | None = None) -> None:
+    """One plain, no-repair re-check — run after a repair note is appended so
+    the note itself sits inside the verified bytes."""
+    extras = [(orig, label) for orig, _alias, label in _repair_candidates(pseudo)]
+    fired = assert_no_leak(rendered, extra=extras)
+    if fired:
+        raise LeakDetected(fired)
+
+
+def guard(
+    rendered: str,
+    pseudo: Pseudonymizer | None = None,
+    *,
+    max_passes: int = _MAX_REPAIR_PASSES,
+) -> tuple[str, list[tuple[str, int]]]:
+    """Verify the rendered bytes; repair stray pseudonymized originals; fail closed.
+
+    When the pseudonymizer is supplied, its legend's original values (the real
+    story keys/branches/project names) are fed into the self-check too, so any
+    that slipped through the per-field routing are caught here in the final
+    bytes. Unlike a hard-rule hit, such a miss is repairable: the backstop knows
+    the original's safe alias, so it substitutes it and re-verifies instead of
+    refusing outright. Returns ``(text, [(label, count), ...])`` of applied
+    repairs. Raises :class:`LeakDetected` on any hard rule (email / secret /
+    home-path / url-creds / username — genuine PII never auto-repairs) or if
+    repair does not converge within the pass bound."""
+    candidates = _repair_candidates(pseudo)
+    extras = [(orig, label) for orig, _alias, label in candidates]
+    # Longest-first: a branch embedding a story slug at a "-" boundary must be
+    # replaced whole, not spliced into a half-alias mongrel by the inner slug.
+    by_length = sorted(candidates, key=lambda c: len(c[0]), reverse=True)
+
+    tally: dict[str, int] = {}
+    for _ in range(max_passes):
+        fired = assert_no_leak(rendered, extra=extras)
+        if not fired:
+            return rendered, sorted(tally.items())
+        if any(not rule.startswith("sensitive[") for rule in fired):
+            raise LeakDetected(fired)
+        # A repair pass replaces every standalone occurrence of every candidate,
+        # so pass 2 is reachable only if a substitution manufactured a NEW
+        # standalone occurrence of a different original — a hash-output
+        # coincidence (the alias alphabet is [A-Za-z0-9-] and "-" is itself a
+        # boundary char). The bound turns a pathological substitution cycle
+        # into a fail-closed refusal instead of a loop.
+        for original, alias, label in by_length:
+            rendered, n = replace_standalone(rendered, original, alias)
+            if n:
+                tally[label] = tally.get(label, 0) + n
+    fired = assert_no_leak(rendered, extra=extras)
+    if fired:
+        raise LeakDetected(fired)
+    return rendered, sorted(tally.items())

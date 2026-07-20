@@ -318,3 +318,84 @@ def test_pseudonymizer_entries_expose_ns():
     ]
     # legend keeps its shape: alias -> original, ns discarded
     assert p.legend() == {a_story: "1.2-secret", a_branch: "feat/secret"}
+
+
+# ------------------------------------------------- guard / assert_clean
+# The fail-closed egress policy shared by diagnose and probe-adapter (#199).
+# STORY_KEY embeds a proprietary product name as a substring, so "the original
+# never appears in the exception" is asserted against the nastiest shape.
+
+STORY_KEY = "1.2-AcmeQuantumBillingEngine"
+
+
+def test_guard_clean_text_is_returned_verbatim():
+    pseudo = sanitize.Pseudonymizer()
+    pseudo.alias(STORY_KEY, ns="story", epic=1)
+    assert sanitize.guard("nothing sensitive here", pseudo) == ("nothing sensitive here", [])
+    # and a missing pseudonymizer still runs the hard rules
+    with pytest.raises(sanitize.LeakDetected) as exc:
+        sanitize.guard("contact victim.canary@example.com")
+    assert exc.value.rules == ["email"]
+
+
+def test_guard_repairs_stray_original_and_tallies():
+    pseudo = sanitize.Pseudonymizer()
+    alias = pseudo.alias(STORY_KEY, ns="story", epic=1)
+    text = f"path a/{STORY_KEY}/b and again {STORY_KEY}"
+    out, reps = sanitize.guard(text, pseudo)
+    assert STORY_KEY not in out
+    assert out.count(alias) == 2
+    assert reps == [(f"story:{alias}", 2)]
+    # the repaired text passes the same check that fired on the input
+    assert sanitize.assert_no_leak(out, extra=[STORY_KEY]) == []
+
+
+def test_guard_hard_rules_never_auto_repair():
+    pseudo = sanitize.Pseudonymizer()
+    with pytest.raises(sanitize.LeakDetected) as exc:
+        sanitize.guard("contact victim.canary@example.com", pseudo)
+    assert "email" in exc.value.rules
+    # a hard rule alongside a repairable one: refuse immediately, and the
+    # sensitive rule rides along under its printable ns:alias label
+    key_alias = pseudo.alias(STORY_KEY, ns="story", epic=1)
+    with pytest.raises(sanitize.LeakDetected) as exc:
+        sanitize.guard(f"{STORY_KEY} contact victim.canary@example.com", pseudo)
+    assert "email" in exc.value.rules
+    assert f"sensitive[story:{key_alias}]" in exc.value.rules
+    assert STORY_KEY not in str(exc.value)
+
+
+class _CyclicPseudo(sanitize.Pseudonymizer):
+    """Adversarial stand-in: each alias embeds the OTHER original at a "-"
+    boundary, so every substitution reintroduces the other value — a cycle a
+    real Pseudonymizer could only produce by hash-output coincidence."""
+
+    def entries(self):
+        return [
+            ("story", "alpha-key", "s1-beta-key"),
+            ("branch", "beta-key", "branch-alpha-key"),
+        ]
+
+
+def test_guard_repair_bound_terminates_and_fails_closed():
+    with pytest.raises(sanitize.LeakDetected):
+        sanitize.guard("ref alpha-key end", _CyclicPseudo())
+
+
+def test_assert_clean_raises_and_never_repairs():
+    pseudo = sanitize.Pseudonymizer()
+    alias = pseudo.alias(STORY_KEY, ns="story", epic=1)
+    with pytest.raises(sanitize.LeakDetected) as exc:
+        sanitize.assert_clean(f"stray {STORY_KEY} here", pseudo)
+    assert exc.value.rules == [f"sensitive[story:{alias}]"]
+    sanitize.assert_clean("all clean", pseudo)  # no raise on clean input
+
+
+def test_embeds_current_username(monkeypatch):
+    monkeypatch.setattr(sanitize.getpass, "getuser", lambda: "alice")
+    assert sanitize.embeds_current_username("pytest-of-alice")
+    assert sanitize.embeds_current_username("alice")
+    assert not sanitize.embeds_current_username("someone-else")
+    # below the ≥5 threshold shared with the assert_no_leak username rule
+    monkeypatch.setattr(sanitize.getpass, "getuser", lambda: "bob")
+    assert not sanitize.embeds_current_username("bob-dir")
