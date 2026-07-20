@@ -1,7 +1,9 @@
 """CLI command tests — init policy-derived profiles and per-stage dry-run."""
 
 import argparse
+import io
 import json
+import sys
 
 import pytest
 import yaml
@@ -720,6 +722,47 @@ def test_emit_document_verifies_without_altering_the_bytes(capsys):
     with pytest.raises(ValueError, match="malformed JSON document"):
         machine.emit_document('{"truncated": ')
     assert capsys.readouterr().out == ""  # refused before writing anything
+
+
+def test_emit_document_writes_utf8_to_a_console_that_cannot_encode_the_document():
+    """A document is not necessarily ASCII: `diagnostics.render_json` dumps with
+    ensure_ascii=False so its leak guard can scan values unescaped, which lets a
+    non-sensitive non-ASCII field through to stdout verbatim. On a console that
+    cannot encode it — a legacy non-UTF-8 Windows one — that used to take the
+    whole command down with UnicodeEncodeError before a byte was written (#200).
+
+    The stream is widened to fit the document, not the document narrowed to fit
+    the stream: re-dumping with ensure_ascii=True would emit bytes the leak
+    check never saw, which is the one thing emit_document exists to prevent."""
+    from bmad_loop import machine
+
+    raw = io.BytesIO()
+    # newline="" so the assertion below is byte-exact on Windows too, where the
+    # default would translate print's \n to \r\n. Matches pytest's own CaptureIO.
+    ascii_console = io.TextIOWrapper(raw, encoding="ascii", newline="")
+    original = '{\n  "os_release": "5.15-café"\n}'
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(sys, "stdout", ascii_console)
+        machine.emit_document(original)
+        ascii_console.flush()
+
+    written = raw.getvalue().decode("utf-8")
+    assert written == original + "\n"  # verbatim, as on any other stream
+    assert json.loads(written)["os_release"] == "5.15-café"
+
+
+def test_emit_document_survives_a_stdout_that_cannot_be_reconfigured(capsys):
+    """The UTF-8 switch is hasattr-guarded: a substituted stdout need not be a
+    TextIOWrapper, and StringIO — no reconfigure, and no encoding to fail on —
+    is the shape that proves the guard does not itself become the crash."""
+    from bmad_loop import machine
+
+    sink = io.StringIO()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(sys, "stdout", sink)
+        machine.emit_document('{"a": "café"}')
+    assert sink.getvalue() == '{"a": "café"}\n'
+    assert capsys.readouterr().out == ""  # nothing leaked to the real stdout
 
 
 def test_write_document_matches_the_stdout_bytes_and_validates(tmp_path, capsys):

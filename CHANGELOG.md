@@ -257,6 +257,19 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
 
 ### Fixed
 
+- **`--json` output survives a console that cannot encode it (#200).** A JSON document is not
+  necessarily ASCII: `diagnostics.render_json` serializes with `ensure_ascii=False` so its leak
+  guard can scan values unescaped (#195, below), which lets a _non_-sensitive non-ASCII field —
+  a localized `platform.release()`, say — reach stdout verbatim. Printing it to a console whose
+  encoding could not carry it raised `UnicodeEncodeError`, in practice a legacy non-UTF-8
+  Windows one. It failed safe rather than silently — the encode runs before any write, so
+  stdout stayed empty instead of half-written — but `diagnose --json` still died on a machine
+  where `--out FILE` would have worked. `machine.emit_document` now switches stdout to UTF-8
+  before writing. Re-serializing the document as escaped ASCII would have been the smaller
+  change and the wrong one: the leak check verified the unescaped bytes, and emitting anything
+  re-derived from them is what that helper exists to prevent. `--out FILE` was never affected;
+  it has always written `encoding="utf-8"`.
+
 - **Leak self-check now matches JSON-escaped values (#195).** Two evasions became reachable
   the moment `diagnose --json` stopped also rendering the markdown report, since that raw-text
   pass was what had been catching them: `json.dumps` doubles backslashes, so a Windows home
