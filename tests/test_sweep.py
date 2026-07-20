@@ -2111,3 +2111,153 @@ def test_stranded_bundle_task_warns_loudly(project):
     )
     engine._warn_stranded_bundles()
     assert len([e for e in engine.journal.entries() if e["kind"] == "sweep-inflight-stranded"]) == 1
+
+
+# ------------------------------------------------------------- graceful stop
+#
+# A graceful stop is delivered out-of-band via the stop-request.json control
+# file (Phase 1's runs helpers). SweepEngine overrides _loop, so it carries its
+# own boundary checks: the first statement of the while body, and before every
+# _run_bundle. These tests lodge the control file directly (an existence read is
+# all the engine checks) so the request lands at a chosen boundary, then prove
+# the in-flight item still runs to completion and the next never starts.
+
+
+def _lodge_stop_request(run_dir: Path) -> None:
+    (run_dir / runs.STOP_REQUEST_FILE).write_text(
+        '{"requested_at": "2026-07-20T00:00:00", "mode": "graceful"}', encoding="utf-8"
+    )
+
+
+def _lodge_after(inner, run_dir: Path):
+    """Wrap a scripted effect so the graceful-stop request lands as ``inner``
+    returns — proving the in-flight item still runs to completion, because the
+    boundary check only fires at the next loop head / next bundle."""
+
+    def effect(spec):
+        result = inner(spec)
+        _lodge_stop_request(run_dir)
+        return result
+
+    return effect
+
+
+def test_graceful_stop_between_bundles_finishes_current_then_stops(project):
+    """A request lodged while bundle 1 runs lets it finish through commit; the
+    boundary check before bundle 2 raises, so bundle 2 never starts and the run
+    ends `stopped` + resumable. A re-run completes bundle 2."""
+    write_ledger(project, {"DW-1": "open", "DW-2": "open"})
+    run_dir = project.project / ".bmad-loop" / "runs" / "sweep-run"
+    plan = triage_result(
+        ["DW-1", "DW-2"],
+        bundles=[
+            {"name": "first-fix", "dw_ids": ["DW-1"], "intent": "a"},
+            {"name": "second-fix", "dw_ids": ["DW-2"], "intent": "b"},
+        ],
+    )
+    engine, _ = make_sweep(
+        project,
+        [
+            triage_effect(plan),
+            bundle_dev_effect(project, "first-fix", ["DW-1"]),
+            _lodge_after(bundle_review_effect(project, "first-fix"), run_dir),
+        ],
+    )
+    summary = engine.run()
+
+    assert not summary.paused
+    tasks = engine.state.tasks
+    assert tasks["dw-first-fix"].phase == Phase.DONE and tasks["dw-first-fix"].commit_sha
+    assert "dw-second-fix" not in tasks  # bundle 2 never dispatched
+    saved = load_state(engine.run_dir)
+    assert saved.stopped is True and saved.finished is False
+    assert not runs.graceful_stop_requested(engine.run_dir)  # control file consumed
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "run-complete" not in kinds
+    stops = [e for e in engine.journal.entries() if e["kind"] == "run-stop"]
+    assert stops and stops[-1]["graceful"] is True
+    assert stops[-1]["remaining"] == 1  # DW-2 still open, never bundled
+
+    entries = ledger_entries(project)
+    assert entries["DW-1"].status.startswith("done") and entries["DW-2"].open
+
+    # resume: bundle 2 runs to completion and the run finishes
+    resumed, adapter = resume_sweep(
+        project,
+        engine,
+        [
+            bundle_dev_effect(project, "second-fix", ["DW-2"]),
+            bundle_review_effect(project, "second-fix"),
+        ],
+    )
+    summary = resumed.run()
+    assert not summary.paused
+    assert resumed.state.tasks["dw-second-fix"].phase == Phase.DONE
+    assert len(adapter.sessions) == 2  # triage reloaded from cache, bundle 1 skipped
+    assert ledger_entries(project)["DW-2"].status.startswith("done")
+    assert worktree_clean(project.project)
+
+
+def test_graceful_stop_during_triage_runs_zero_bundles(project):
+    """A request landing during the triage session completes triage (artifacts
+    written, resolved entries closed) but the very first bundle-loop check raises,
+    so zero bundles run."""
+    write_ledger(project, {"DW-1": "open", "DW-2": "open"})
+    run_dir = project.project / ".bmad-loop" / "runs" / "sweep-run"
+    plan = triage_result(
+        ["DW-1", "DW-2"],
+        already_resolved=[{"id": "DW-1", "evidence": "already guarded at src.txt:1"}],
+        bundles=[{"name": "fix-it", "dw_ids": ["DW-2"], "intent": "fix"}],
+    )
+    engine, _ = make_sweep(project, [_lodge_after(triage_effect(plan), run_dir)])
+    summary = engine.run()
+
+    assert not summary.paused
+    tasks = engine.state.tasks
+    assert tasks["sweep-triage"].phase == Phase.DONE
+    assert (engine.run_dir / "triage.json").is_file()  # triage completed
+    assert "dw-fix-it" not in tasks  # zero bundles started
+    saved = load_state(engine.run_dir)
+    assert saved.stopped is True and saved.finished is False
+    assert not runs.graceful_stop_requested(engine.run_dir)
+    stops = [e for e in engine.journal.entries() if e["kind"] == "run-stop"]
+    assert stops and stops[-1]["graceful"] is True
+    entries = ledger_entries(project)
+    assert entries["DW-1"].status.startswith("done")  # resolved-close still ran
+    assert entries["DW-2"].open
+    assert stops[-1]["remaining"] == 1  # only DW-2 left open
+
+
+def test_graceful_stop_between_cycles_skips_next_triage(project):
+    """In repeat mode a request lodged during cycle 1 lets that cycle finish, then
+    the while-head check fires before cycle 2 re-triages — cycle 2 never runs."""
+    write_ledger(project, {"DW-1": "open"})
+    run_dir = project.project / ".bmad-loop" / "runs" / "sweep-run"
+    plan1 = triage_result(
+        ["DW-1"], bundles=[{"name": "first-fix", "dw_ids": ["DW-1"], "intent": "a"}]
+    )
+    engine, _ = make_sweep(
+        project,
+        [
+            triage_effect(plan1),
+            appending_dev(project, bundle_dev_effect(project, "first-fix", ["DW-1"]), "DW-2"),
+            _lodge_after(bundle_review_effect(project, "first-fix"), run_dir),
+        ],
+        policy=repeat_policy(),
+    )
+    summary = engine.run()
+
+    assert not summary.paused
+    tasks = engine.state.tasks
+    assert tasks["dw-first-fix"].phase == Phase.DONE
+    assert "sweep-triage-2" not in tasks  # cycle 2 never triaged
+    saved = load_state(engine.run_dir)
+    assert saved.stopped is True and saved.finished is False
+    assert not runs.graceful_stop_requested(engine.run_dir)
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "sweep-cycle" not in kinds  # the cycle-2 header never printed
+    stops = [e for e in engine.journal.entries() if e["kind"] == "run-stop"]
+    assert stops and stops[-1]["graceful"] is True
+    entries = ledger_entries(project)
+    assert entries["DW-1"].status.startswith("done") and entries["DW-2"].open
+    assert stops[-1]["remaining"] == 1  # DW-2, generated in cycle 1, still open

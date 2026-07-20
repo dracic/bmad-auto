@@ -407,6 +407,18 @@ class SweepEngine(Engine):
     def _today(self) -> str:
         return time.strftime("%Y-%m-%d")
 
+    def _remaining_estimate(self) -> int | None:
+        """Sweep override of the graceful-stop hint: how many deferred-work
+        entries are still open in the ledger — the work a resume would pick up.
+        Like the base, a hint only: the whole body is guarded so an
+        unreadable/invalid ledger returns None rather than derailing the stop."""
+        try:
+            ledger = self.workspace.paths.deferred_work
+            text = ledger.read_text(encoding="utf-8") if ledger.is_file() else ""
+            return len(deferredwork.open_ids(text))
+        except Exception:  # noqa: BLE001 - a hint must never break the stop
+            return None
+
     # ------------------------------------------------------------ main loop
 
     def _loop(self) -> None:
@@ -418,6 +430,12 @@ class SweepEngine(Engine):
             # a non-empty pass so a fresh sweep never commits the user's dirt.
             self._commit_ledger("chore(sweep): commit ledger after recovering in-flight bundles")
         while True:
+            # First statement of the loop body: covers the boundary right after
+            # _finish_inflight_bundles on resume and between repeat cycles. A
+            # request during a cycle is caught before the next _run_bundle (see
+            # _cycle); one landing between cycles stops here before cycle N+1
+            # re-triages.
+            self._check_graceful_stop()
             self.state.sweep_cycle = cycle
             self._save()
             text = ledger.read_text(encoding="utf-8") if ledger.is_file() else ""
@@ -534,6 +552,13 @@ class SweepEngine(Engine):
             self._emit("post_sweep_cycle", phase=str(cycle))
             return False
         for bundle in bundles:
+            # Item boundary: a request during bundle N lets N finish through
+            # commit; bundle N+1 never starts. A request landing during triage
+            # reaches the first iteration here, so triage completes but zero
+            # bundles run. Mid-cycle stop is resume-safe: sweep_cycle is
+            # persisted, triage.json is cached, closes are idempotent, and
+            # terminal tasks are skipped on re-drive.
+            self._check_graceful_stop()
             self._run_bundle(bundle, cycle)
         bundles_done = sum(
             1
