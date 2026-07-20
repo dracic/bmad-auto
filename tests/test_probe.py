@@ -672,3 +672,21 @@ def test_redact_location_strikes_username_components(monkeypatch):
     loc = probe._redact_location(Path("/var/tmp/build-of-canaryuser/session-1/t.jsonl"))
     assert "canaryuser" not in loc
     assert loc == "/var/tmp/<redacted>/session-1/t.jsonl"
+
+
+def test_redact_location_drops_the_root_anchor_on_every_flavour(monkeypatch):
+    """The root separator is structure, not a component. Windows spells it
+    ``\\`` rather than ``/``, and letting it reach the identifier gate prepended
+    a phantom ``<redacted>`` to every non-home absolute path (a Windows-only CI
+    failure). Driven through both flavours so either platform catches it."""
+    monkeypatch.setattr(sanitize.getpass, "getuser", lambda: "canaryuser")
+    from pathlib import PureWindowsPath
+
+    # A rooted path carries no drive: the anchor vanishes on both flavours.
+    assert probe._redact_location(PureWindowsPath("/var/tmp/s-1/t.jsonl")) == (
+        "/var/tmp/s-1/t.jsonl"
+    )
+    # A drive anchor is content, not structure, so it is judged and struck.
+    assert probe._redact_location(PureWindowsPath("C:/build/s-1/t.jsonl")) == (
+        "/<redacted>/build/s-1/t.jsonl"
+    )

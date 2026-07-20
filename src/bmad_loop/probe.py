@@ -230,8 +230,15 @@ def _redact_location(path: Path, aliases: dict[str, str] | None = None) -> str:
         rel = path.relative_to(home)
         return "/".join(["~", *(comp(c) for c in rel.parts)])
     except ValueError:
-        parts = [comp(c) for c in path.parts if c not in ("/", "")]
-        return "/" + "/".join(parts)
+        # ``parts[0]`` is the anchor on an absolute path. A bare root separator
+        # ("/" on POSIX, "\\" for a rooted path on Windows) is structure, not a
+        # component: drop it, or the identifier gate turns the separator itself
+        # into a phantom leading ``<redacted>``. A drive or UNC anchor ("C:\\",
+        # "\\\\server\\share\\") does carry content, so it stays and is judged.
+        parts = list(path.parts)
+        if parts and parts[0] in ("/", "\\"):
+            parts.pop(0)
+        return "/" + "/".join(comp(c) for c in parts if c)
 
 
 def _describe_transcript(
