@@ -1563,6 +1563,118 @@ def test_stop_already_finished(tmp_path, monkeypatch, capsys):
     assert "already finished" in capsys.readouterr().err
 
 
+# --- graceful stop: `stop --graceful` / `--cancel-graceful` + the status field ---
+
+
+def _pending_graceful_run(tmp_path, run_id="r1", **state_kwargs):
+    """A run with a graceful-stop control file already on disk. Written directly,
+    not via runs.request_graceful_stop: that helper refuses without a live pid the
+    test process can't fake, and the engine only ever checks the file's existence."""
+    from bmad_loop import runs
+
+    run_dir = _make_run_with_state(tmp_path, run_id, **state_kwargs)
+    (run_dir / runs.STOP_REQUEST_FILE).write_text(
+        '{"requested_at": "now", "mode": "graceful"}', encoding="utf-8"
+    )
+    return run_dir
+
+
+def test_stop_graceful_requests_and_names_current_item(tmp_path, monkeypatch, capsys):
+    from bmad_loop import runs
+    from bmad_loop.model import Phase, StoryTask
+
+    monkeypatch.setattr(runs, "engine_liveness", lambda _rd: "alive")
+    run_dir = _make_run_with_state(
+        tmp_path,
+        "r1",
+        tasks={
+            "1-1-done": StoryTask(story_key="1-1-done", epic=1, phase=Phase.DONE),
+            "1-2-live": StoryTask(story_key="1-2-live", epic=1, phase=Phase.DEV_RUNNING),
+        },
+    )
+    assert cli.main(["stop", "--project", str(tmp_path), "r1", "--graceful"]) == 0
+    out = capsys.readouterr().out
+    assert "graceful stop requested" in out
+    assert "current item: 1-2-live" in out  # first non-terminal task, not the DONE one
+    assert "bmad-loop resume r1" in out
+    assert (run_dir / runs.STOP_REQUEST_FILE).is_file()
+
+
+def test_stop_graceful_refuses_dead_engine(tmp_path, monkeypatch, capsys):
+    from bmad_loop import runs
+
+    monkeypatch.setattr(runs, "engine_liveness", lambda _rd: "dead")
+    run_dir = _make_run_with_state(tmp_path, "r1")
+    assert cli.main(["stop", "--project", str(tmp_path), "r1", "--graceful"]) == 1
+    assert "no live engine" in capsys.readouterr().err
+    assert not (run_dir / runs.STOP_REQUEST_FILE).exists()  # a refusal writes nothing
+
+
+def test_stop_graceful_is_idempotent(tmp_path, monkeypatch, capsys):
+    from bmad_loop import runs
+
+    monkeypatch.setattr(runs, "engine_liveness", lambda _rd: "alive")
+    run_dir = _pending_graceful_run(tmp_path)  # request already on disk
+    before = (run_dir / runs.STOP_REQUEST_FILE).read_text()
+    assert cli.main(["stop", "--project", str(tmp_path), "r1", "--graceful"]) == 0
+    assert "already has a graceful stop pending" in capsys.readouterr().out
+    # left untouched — the original request's timestamp stands
+    assert (run_dir / runs.STOP_REQUEST_FILE).read_text() == before
+
+
+def test_stop_cancel_graceful_clears_pending(tmp_path, capsys):
+    from bmad_loop import runs
+
+    run_dir = _pending_graceful_run(tmp_path)
+    assert cli.main(["stop", "--project", str(tmp_path), "r1", "--cancel-graceful"]) == 0
+    assert "cancelled" in capsys.readouterr().out
+    assert not (run_dir / runs.STOP_REQUEST_FILE).exists()
+
+
+def test_stop_cancel_graceful_without_pending_errors(tmp_path, capsys):
+    _make_run_with_state(tmp_path, "r1")  # nothing on disk to cancel
+    assert cli.main(["stop", "--project", str(tmp_path), "r1", "--cancel-graceful"]) == 1
+    assert "no graceful stop pending" in capsys.readouterr().err
+
+
+def test_stop_graceful_and_cancel_are_mutually_exclusive(tmp_path):
+    # argparse rejects the pair at parse time, before cmd_stop runs — no run needed.
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["stop", "--project", str(tmp_path), "r1", "--graceful", "--cancel-graceful"])
+    assert exc.value.code == 2  # argparse usage error
+
+
+def test_status_text_flags_graceful_stop_pending(tmp_path, monkeypatch, capsys):
+    from bmad_loop import runs
+    from bmad_loop.model import Phase, StoryTask
+
+    monkeypatch.setattr(runs, "engine_liveness", lambda _rd: "alive")
+    _pending_graceful_run(
+        tmp_path,
+        tasks={"1-1-live": StoryTask(story_key="1-1-live", epic=1, phase=Phase.DEV_RUNNING)},
+    )
+    assert cli.main(["status", "--project", str(tmp_path), "r1"]) == 0
+    assert "graceful stop pending" in capsys.readouterr().out
+
+
+def test_status_json_graceful_stop_pending_true(tmp_path, monkeypatch, capsys):
+    from bmad_loop import runs
+
+    monkeypatch.setattr(runs, "engine_liveness", lambda _rd: "alive")
+    _pending_graceful_run(tmp_path)
+    doc = machine_json(["status", "--project", str(tmp_path), "r1", "--json"], capsys)
+    assert doc["graceful_stop_pending"] is True
+    assert doc["schema_version"] == 1  # additive field — no schema bump
+
+
+def test_status_json_graceful_stop_pending_false_without_request(tmp_path, capsys):
+    # no control file -> the cheap existence check short-circuits the liveness probe
+    _make_run_with_state(tmp_path, "r1")
+    doc = machine_json(["status", "--project", str(tmp_path), "r1", "--json"], capsys)
+    assert doc["graceful_stop_pending"] is False
+    assert doc["schema_version"] == 1
+
+
 def test_delete_refuses_live_run_without_force(tmp_path, monkeypatch, capsys):
     from bmad_loop import runs
 
@@ -2636,6 +2748,25 @@ def test_resume_under_an_unchanged_policy_reports_no_change(project, monkeypatch
     entry = _resume_entries(run_dir)[-1]
     assert entry["policy_changed"] is False
     assert "cache_read_weight_was" not in entry  # unchanged -> omitted
+
+
+def test_resume_discards_stale_graceful_stop_request(project, monkeypatch, capsys):
+    """A resume is fresh user intent: a graceful-stop request left over from the
+    prior stopped-gracefully run must be cleared before write_pid re-arms the
+    engine, or the re-driven loop would consume it at the first item boundary and
+    immediately re-stop. The clear is noted on stderr."""
+    from bmad_loop import runs
+
+    run_dir = _paused_run_for_resume(project, monkeypatch)
+    (run_dir / runs.STOP_REQUEST_FILE).write_text(
+        '{"requested_at": "old", "mode": "graceful"}', encoding="utf-8"
+    )
+    monkeypatch.setattr(cli, "Engine", _StubEngine)
+
+    assert cli._resume_paused_run(project.project, run_dir) == 0
+
+    assert not (run_dir / runs.STOP_REQUEST_FILE).exists()  # consumed before the engine ran
+    assert "discarded a stale graceful-stop request" in capsys.readouterr().err
 
 
 def test_resume_refuses_live_run(tmp_path, monkeypatch, capsys):
