@@ -7,6 +7,7 @@ interpreted as markup.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -258,6 +259,281 @@ class JournalEntryOption(Option):
 def _short(value: Any, limit: int = 60) -> str:
     s = str(value)
     return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+# --------------------------------------------------------- validate findings
+#
+# A structural rendering of the `validate --json` document (documents.py), for
+# the TUI's validate modal. The text mode's severities are string prefixes and
+# its verdict is an exit code; here both are fields, and the `detail` each check
+# carried before it flattened itself into a sentence is renderable.
+
+# The document schema version this renderer was written against — a HAND-WRITTEN
+# literal, deliberately *not* an import of documents.VALIDATE_SCHEMA_VERSION.
+#
+# This is load-bearing. An import would auto-follow a CLI schema bump, and the
+# fields read below would very likely still resolve against a v2 document, so
+# the result would not be a refusal — it would be a quietly wrong modal in a
+# user's terminal, with the suite green. Pinning the literal makes a bump a
+# deliberate edit *here*, after re-reading this renderer against the new
+# document, and a tripwire test fails the moment the two diverge.
+_RENDERS_VALIDATE_SCHEMA = 1
+
+# Finding severities (checks.py: ok/warning/problem). A DIFFERENT vocabulary
+# from _SEVERITY_STYLES further down, which styles deferred-work items
+# (critical/high/medium/low) — separate maps on purpose, no reuse. Both are
+# read through .get() with a fallback: severity arrives from a subprocess
+# document, so an unrecognised string must render neutrally, never KeyError.
+_FINDING_STYLES = {
+    "ok": "green",
+    "warning": "yellow",
+    "problem": "bold red",
+}
+
+_FINDING_GLYPHS = {
+    "ok": "✓",
+    "warning": "!",
+    "problem": "✖",
+}
+
+# Row-grid geometry, mirroring the journal's. The check column is wide enough
+# for the longest id in checks.VALIDATE_CHECKS ("queue.sprint-status-unknown-keys")
+# so ids do not fold in practice; it folds rather than truncates if one grows.
+# The message column's left edge is the sum of everything before it, and the
+# alignment test derives its indent from these same constants so the two cannot
+# silently drift apart.
+_FINDING_GLYPH_WIDTH = 1
+_FINDING_CHECK_WIDTH = 32
+_FINDING_COL_PAD = 1  # per-column right pad in the row grid
+
+
+def validate_document(stdout: str) -> dict | None:
+    """Parse `validate --json` stdout into a document this renderer can draw.
+
+    Returns ``None`` — **never raises** — for anything undrawable: unparseable
+    stdout, a schema version this renderer was not written against, or a
+    document whose shape is not the one the renderer walks. The caller's
+    degrade is then a value check rather than an exception, which matters
+    because the caller runs on a worker thread where an escaping exception
+    takes the app down.
+
+    The version check is an equality, not a ``>=``: a *newer* document is
+    exactly the case that must degrade rather than be half-rendered.
+    """
+    try:
+        doc = json.loads(stdout)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    if doc.get("schema_version") != _RENDERS_VALIDATE_SCHEMA:
+        return None
+    if not isinstance(doc.get("findings"), list):
+        return None
+    if not isinstance(doc.get("counts"), dict):
+        return None
+    return doc
+
+
+def _is_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _detail_scalar(value: Any) -> str:
+    """One leaf as text, in JSON's spelling — ``true``/``null``, not Python's
+    ``True``/``None`` — so a rendered detail reads as the document it came from."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _detail_pairs(mapping: dict) -> str:
+    return ", ".join(f"{k}={_detail_scalar(v)}" for k, v in mapping.items())
+
+
+def _json_leaf(value: Any) -> str:
+    """A value too deep or too odd for the depth-2 walk, as JSON.
+
+    Never ``str()``: that prints a Python repr (``{'dev': 'claude'}``) at the
+    user, which is the exact tell that a renderer met a shape it did not model.
+    """
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):  # unreachable for json.loads output; this renders, never raises
+        return str(value)
+
+
+def _detail_lines(detail: Any) -> list[str]:
+    """A finding's ``detail`` as flat text rows: **depth-2, not recursive.**
+
+    The real shapes, enumerated from every check site (cli.py's validate gates
+    and platform preflight, install.py's skill probes): ``detail`` is one dict
+    whose values are a scalar (``str``/``int``/``bool``/``None`` — ``mux.backend``'s
+    ``version`` is ``str | None``), a list of scalars (``missing_markers``,
+    ``unknown_keys``, ``trees``), a dict of scalars (``policy``'s ``adapters`` —
+    a nested dict, on the *passing* path, in every successful validate), or a
+    list of dicts of scalars (``mux.backends-detected``, six keys per backend).
+    Two levels covers all of them.
+
+    Anything deeper or otherwise unmodelled falls back to :func:`_json_leaf`
+    rather than recursing: recursion is more machinery than this data justifies
+    and is unbounded for a payload nobody has written yet, whereas the fallback
+    is correct for any depth and still legible.
+    """
+    if not isinstance(detail, dict):
+        # detail is `dict | None` by contract; anything else still renders.
+        return [] if detail is None else [_json_leaf(detail)]
+    lines: list[str] = []
+    for key, value in detail.items():
+        if _is_scalar(value):
+            lines.append(f"{key}: {_detail_scalar(value)}")
+        elif isinstance(value, list) and all(_is_scalar(v) for v in value):
+            lines.append(f"{key}: {', '.join(_detail_scalar(v) for v in value) or '—'}")
+        elif isinstance(value, dict) and all(_is_scalar(v) for v in value.values()):
+            lines.append(f"{key}: {_detail_pairs(value) or '—'}")
+        elif isinstance(value, list) and all(
+            isinstance(v, dict) and all(_is_scalar(x) for x in v.values()) for v in value
+        ):
+            # list[dict] gets a line per entry, so six-key backend rows stay
+            # readable instead of becoming one unreadable joined string.
+            lines.append(f"{key}:")
+            lines.extend(f"  {_detail_pairs(v) or '—'}" for v in value)
+        else:
+            lines.append(f"{key}: {_json_leaf(value)}")
+    return lines
+
+
+def _finding_rows(finding: Any, *, details: bool) -> list[tuple[Text, Text, Text]]:
+    """One finding as its grid rows: the finding itself, then its detail lines.
+
+    Detail shows inline for ``warning`` and ``problem`` — the findings someone
+    opened the modal to act on — and for everything when ``details``. One
+    severity rule, and zero matching on ``check`` ids: ids are the contracted
+    identity, but keying layout off them would make every new check a renderer
+    edit.
+    """
+    if not isinstance(finding, dict):
+        raise TypeError("finding is not a dict")
+    severity = finding.get("severity")
+    if not isinstance(severity, str):
+        severity = ""
+    style = _FINDING_STYLES.get(severity, "")
+    check = finding.get("check")
+    rows = [
+        (
+            Text(_FINDING_GLYPHS.get(severity, "?"), style=style),
+            Text("?" if check is None else str(check), style=style),
+            Text(str(finding.get("message", ""))),
+        )
+    ]
+    if details or severity in ("warning", "problem"):
+        rows += [
+            (Text(""), Text(""), Text(line, style="dim"))
+            for line in _detail_lines(finding.get("detail"))
+        ]
+    return rows
+
+
+def validate_findings(doc: dict, *, details: bool) -> Table:
+    """Every finding as **one** grid: glyph, ``check`` id, message + detail rows.
+
+    One grid for all findings rather than one per finding, which is what buys
+    column alignment *across* findings — the check ids line up into a readable
+    column instead of each row sizing itself. (journal_line builds a grid per
+    row for the mirror-image reason: there each row is alone and only its own
+    columns need to align.)
+
+    Two separate mechanisms keep it legible, both load-bearing:
+
+    - **The grid itself** handles multi-line messages. ``message`` may carry
+      newlines — the config, sprint-status and stories loaders put a PyYAML
+      ``MarkedYAMLError`` straight into ``str(e)`` — and in a flat ``Text`` an
+      embedded newline returns to column 0, destroying the alignment of every
+      row below it. In a cell it stays inside its column.
+    - **``overflow="fold"``** handles the long *unbroken* runs that wrapping
+      cannot break: absolute paths, joined marker lists, a ``check`` id longer
+      than its column. Folding wraps them; the default would truncate with an
+      ellipsis, silently dropping the end of a path someone needs to read.
+
+    Defensive **per finding**: a finding that is not a dict, or whose fields
+    are not what this walks, costs its own placeholder row and nothing more.
+    One malformed entry must not blank the modal a reader is using to find out
+    what is wrong.
+    """
+    grid = Table.grid(padding=(0, _FINDING_COL_PAD, 0, 0))
+    grid.add_column(width=_FINDING_GLYPH_WIDTH)
+    grid.add_column(width=_FINDING_CHECK_WIDTH, overflow="fold")
+    grid.add_column(overflow="fold")
+    findings = doc.get("findings")
+    if not isinstance(findings, list):
+        findings = []
+    for finding in findings:
+        try:
+            rows = _finding_rows(finding, details=details)
+        except Exception:  # noqa: BLE001 — a bad finding costs its row, never the modal
+            rows = [
+                (
+                    Text("?", style="dim"),
+                    Text("?", style="dim"),
+                    Text("(unreadable finding)", style="dim"),
+                )
+            ]
+        for row in rows:
+            grid.add_row(*row)
+    return grid
+
+
+def validate_header(doc: dict) -> Text:
+    """The verdict line, built from the document's ``ok`` — never from the
+    subprocess exit code, which conflates "checks failed" with "the command
+    broke". The document is the thing that actually knows which happened.
+
+    When any problem is present, a dim footer says the gates are chained. That
+    puts documents.py's "absence is not a pass" on screen: a policy failure
+    leaves the binary, hook and skill gates emitting *nothing at all*, so a
+    short findings list after a failure is not a short list of problems. It is
+    the one thing this rendering can teach that the text mode cannot.
+    """
+    ok = doc.get("ok")
+    text = Text()
+    if ok is True:
+        text.append("✓ validate passed", style="green")
+    elif ok is False:
+        text.append("✖ validate failed", style="bold red")
+    else:
+        text.append("? validate verdict unknown", style="dim")
+
+    counts = doc.get("counts")
+    if not isinstance(counts, dict):
+        counts = {}
+    tallies = [
+        f"{counts[severity]} {severity}"
+        for severity in ("ok", "warning", "problem")
+        if isinstance(counts.get(severity), int) and not isinstance(counts.get(severity), bool)
+    ]
+    if tallies:
+        text.append("  " + " · ".join(tallies), style="dim")
+
+    meta = []
+    mode = doc.get("mode")
+    if isinstance(mode, str) and mode:
+        meta.append(f"mode: {mode}")
+    # spec_folder is user-controlled; it goes into a Text, never into markup.
+    spec_folder = doc.get("spec_folder")
+    if isinstance(spec_folder, str) and spec_folder:
+        meta.append(f"spec: {spec_folder}")
+    if meta:
+        text.append("\n" + " · ".join(meta), style="dim")
+
+    problems = counts.get("problem")
+    if isinstance(problems, int) and not isinstance(problems, bool) and problems > 0:
+        text.append(
+            "\ngates are chained — checks after a failure may not have run",
+            style="dim italic",
+        )
+    return text
 
 
 # ------------------------------------------------------------- sprint tree

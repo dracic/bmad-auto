@@ -13,9 +13,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from bmad_loop import cli
+from bmad_loop import cli, documents
 from bmad_loop.adapters.base import SessionResult, SessionSpec
 from bmad_loop.bmadconfig import ProjectPaths
+from bmad_loop.checks import ValidationReport
 from bmad_loop.journal import save_state
 from bmad_loop.model import PAUSE_ESCALATION, Phase, RunState, SessionRecord, StoryTask
 from bmad_loop.verify import finalize_commit, rev_parse_head
@@ -161,6 +162,28 @@ def machine_json(argv, capsys, *, rc: int = 0, err_contains: str | None = None):
     else:
         assert err_contains in err
     return json.loads(out)
+
+
+def make_validate_document(findings, *, stories_on: bool = False, spec_folder: str = ""):
+    """Build a REAL `validate --json` document from (check, severity, message,
+    detail) tuples, for tests that need to *stub* one rather than run validate.
+
+    A sibling of machine_json, not an extension of it: that helper drives
+    cli.main + capsys to assert stdout purity, so it can only ever produce the
+    document a real run happens to emit on the host. Callers here need a chosen
+    document (a specific severity mix, a specific detail shape) and no
+    subprocess.
+
+    It is built by driving the same ValidationReport -> _validate_document path
+    the CLI drives, so the shape cannot drift from the contract by being
+    hand-written. Going through ValidationReport.add also means its assert
+    (checks.py) rejects invented check ids: a test cannot quietly pin behaviour
+    to a check that does not exist.
+    """
+    report = ValidationReport()
+    for check, severity, message, detail in findings:
+        report.add(check, severity, message, detail)
+    return documents._validate_document(report, stories_on, spec_folder)
 
 
 @pytest.fixture(scope="session")
