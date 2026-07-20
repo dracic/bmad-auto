@@ -316,19 +316,11 @@ def test_no_repairs_on_fully_routed_run(project):
     assert "backstop_repairs" not in js
 
 
-def test_guard_hard_rules_still_fail_closed():
-    pseudo = sanitize.Pseudonymizer()
-    with pytest.raises(diagnostics.LeakDetected) as exc:
-        diagnostics._guard("contact victim.canary@example.com", pseudo)
-    assert "email" in exc.value.rules
-    # a hard rule alongside a repairable one: refuse immediately, and the
-    # sensitive rule rides along under its printable ns:alias label
-    key_alias = pseudo.alias(STORY_KEY, ns="story", epic=1)
-    with pytest.raises(diagnostics.LeakDetected) as exc:
-        diagnostics._guard(f"{STORY_KEY} contact victim.canary@example.com", pseudo)
-    assert "email" in exc.value.rules
-    assert f"sensitive[story:{key_alias}]" in exc.value.rules
-    assert STORY_KEY not in str(exc.value)
+def test_leakdetected_is_the_shared_sanitize_exception():
+    """The re-export must stay importable as diagnostics.LeakDetected — cli.py's
+    except clause resolves it here, and ruff's F401 autofix deletes a bare
+    re-export (the noqa carries it; this pin catches the regression)."""
+    assert diagnostics.LeakDetected is sanitize.LeakDetected
 
 
 def test_repair_note_is_inside_verified_bytes(project):
@@ -397,18 +389,6 @@ def test_non_ascii_survives_the_utf8_round_trip(tmp_path, monkeypatch):
     assert json.loads(path.read_text(encoding="utf-8"))["note"] == "café — naïve ✓"
 
 
-class _CyclicPseudo(sanitize.Pseudonymizer):
-    """Adversarial stand-in: each alias embeds the OTHER original at a "-"
-    boundary, so every substitution reintroduces the other value — a cycle a
-    real Pseudonymizer could only produce by hash-output coincidence."""
-
-    def entries(self):
-        return [
-            ("story", "alpha-key", "s1-beta-key"),
-            ("branch", "beta-key", "branch-alpha-key"),
-        ]
-
-
-def test_repair_loop_bound_terminates_and_fails_closed():
-    with pytest.raises(diagnostics.LeakDetected):
-        diagnostics._guard("ref alpha-key end", _CyclicPseudo())
+# The pure guard-mechanics tests (hard-rule refusal, repair tally, cyclic
+# termination) live in tests/test_sanitize.py since #199 made guard shared API;
+# this file keeps the integration surface: real collectors, real renders.

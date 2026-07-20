@@ -1929,6 +1929,7 @@ def cmd_tui(args: argparse.Namespace) -> int:
 
 def cmd_probe(args: argparse.Namespace) -> int:
     from . import probe as probe_mod
+    from . import sanitize
     from .adapters.profile import ProfileError, get_profile
 
     project = _project(args)
@@ -1965,6 +1966,20 @@ def cmd_probe(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # Pseudonymize the one identifier-shaped value the probe KNOWS is the
+    # user's (diagnose aliases the same value, ns="project"): the project
+    # directory name, which would otherwise pass the location redaction's
+    # identifier gate verbatim. Registration is skipped when the name collides
+    # with a token that legitimately appears in the report (the CLI or binary
+    # name) — otherwise the guard's repair pass would rewrite every occurrence
+    # of that legitimate token into the alias and mangle the report.
+    pseudo = sanitize.Pseudonymizer()
+    legit_tokens = {args.cli, Path(args.binary).name if args.binary else ""}
+    if profile is not None:
+        legit_tokens.add(Path(profile.binary).name)
+    if project.name not in legit_tokens:
+        pseudo.alias(project.name, ns="project")
+
     if args.probe:
         if profile is None:
             print("FAIL: --probe needs a known profile (its hook dialect/events)", file=sys.stderr)
@@ -1976,16 +1991,49 @@ def cmd_probe(args: argparse.Namespace) -> int:
             hints=hints,
             timeout_s=args.timeout,
             keep_temp=args.keep_temp,
+            pseudo=pseudo,
         )
     else:
-        finding = probe_mod.scan(cli=args.cli, profile=profile, project=project, hints=hints)
+        finding = probe_mod.scan(
+            cli=args.cli, profile=profile, project=project, hints=hints, pseudo=pseudo
+        )
 
     # One or the other, never both: --json selects the pure JSON document
     # (machine.py contract), otherwise the human-readable markdown report.
-    if args.json:
-        report = probe_mod.render_json(finding)
-    else:
-        report = probe_mod.render_markdown(finding)
+    # Either way the renderer runs the egress self-check over its own rendered
+    # bytes and raises instead of returning tainted output.
+    repairs: list[tuple[str, int]] = []
+    try:
+        if args.json:
+            report = probe_mod.render_json(finding, pseudo=pseudo, repairs=repairs)
+        else:
+            report = probe_mod.render_markdown(finding, pseudo=pseudo, repairs=repairs)
+    except probe_mod.LeakDetected as e:
+        # Fail closed BEFORE any egress: message → stderr, stdout stays empty,
+        # no partial --out file, exit != 0 (the machine.py error shape).
+        print(
+            f"FAIL: refusing to emit — leak self-check fired: {', '.join(e.rules)}",
+            file=sys.stderr,
+        )
+        print(
+            "hint: sensitive[project:<alias>] is your project directory name; any "
+            "other rule means PII/secret-shaped content reached the report — please "
+            "report the rule names above as a bmad-loop bug",
+            file=sys.stderr,
+        )
+        return 1
+
+    if repairs:
+        merged: dict[str, int] = {}
+        for label, count in repairs:
+            merged[label] = merged.get(label, 0) + count
+        summary = ", ".join(f"{label} x{count}" for label, count in sorted(merged.items()))
+        print(
+            f"warning: leak backstop pseudonymized {sum(merged.values())} stray "
+            f"occurrence(s) ({summary}) — a per-field routing gap in bmad-loop; "
+            "please include this line in your bug report",
+            file=sys.stderr,
+        )
 
     # Every `ok:` trailer is human-facing chatter, so in JSON mode it goes to
     # stderr — stdout is the document alone, or empty when --out took it.

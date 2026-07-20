@@ -194,15 +194,23 @@ If `tmux` or the binary is missing, probe degrades gracefully to a scan.
 The report is built to be **safe to paste into an issue or PR**. A single audited
 sanitizer (`src/bmad_loop/sanitize.py`) is the only chokepoint:
 
-- **numbers, booleans, and `null` pass through** — token _counts_ are not PII;
-- **dict keys are kept verbatim** — field names and casing are the whole point of
-  a payload probe;
-- every **leaf string** is `$HOME`→`~` redacted and then kept **only if** it looks
-  like a short machine identifier (e.g. `claude-opus-4-8`, `session-abc_123`);
-  anything else — prose, code, paths, emails — becomes `<redacted:str>`;
-- **list lengths are preserved**, contents are scrubbed element by element;
+- **captured hook payloads ship as a schema, never as values** — per event you
+  get the field names and the dotted key paths with leaf _types_
+  (`tool_input.command:str`); no payload value of any kind reaches the report,
+  and a dynamic or credential-shaped key collapses to `<key>`;
+- **numbers, booleans, and `null` pass through** elsewhere — token _counts_ are
+  not PII;
+- **transcript locations are redacted per component** — home → `~`, anything
+  that isn't a plain machine identifier (or that embeds your username) →
+  `<redacted>`, and your project directory name → a salted alias
+  (`project-3f2a9c…`), the same pseudonymization `diagnose` uses;
 - `--help` / `--version` text and log tails have the home dir and any emails
-  redacted, with a line cap.
+  redacted, with a line cap;
+- **the rendered report re-scans itself before emitting** — the same
+  `sanitize.guard` egress backstop as `diagnose`. A stray occurrence of the
+  aliased project name is repaired and disclosed; an email / secret / home path /
+  username in the final bytes makes the command **refuse to emit** (message on
+  stderr, empty stdout, exit ≠ 0, no `--out` file) rather than ship it.
 
 In PROBE mode the raw capture exists **only transiently** inside the temp dir,
 which is `rmtree`'d in a `finally` (even on exception or Ctrl-C). The CLI's own
@@ -247,9 +255,9 @@ bmad-loop probe-adapter <cli> --probe --project /tmp/scratch
 ```
 
 The **Hook payload shape** section now shows, per captured event, the native→
-canonical pairing, the payload keys, and the scrubbed payload — so you can confirm
-`session_id` / `transcript_path` casing and that the CLI accepted the hook config
-for your dialect. If the CLI rejects the config or never fires a hook, the report
+canonical pairing, the payload keys, and the payload **schema** (key paths + leaf
+types, never values) — so you can confirm `session_id` / `transcript_path` casing
+and that the CLI accepted the hook config for your dialect. If the CLI rejects the config or never fires a hook, the report
 says so (with a scrubbed log tail) instead of silently producing nothing.
 
 ### 4. Write the `usage_parser`

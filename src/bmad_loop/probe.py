@@ -26,14 +26,18 @@ stdout, nothing else). The document carries :data:`SCHEMA_VERSION` as a top-leve
 ``schema_version``; do not confuse it with the document's ``version`` key, which
 holds the *probed CLI's* own ``--version`` output.
 
-Safety model — note how it differs from :mod:`bmad_loop.diagnostics`. Both route
-captured data through :mod:`bmad_loop.sanitize` at COLLECTION time, but only
-diagnostics adds an egress self-check (``assert_no_leak`` over its own rendered
-bytes, refusing to write on a hit). This module has **no such final backstop**:
-its safety rests entirely on the collection-time scrubbing being complete, so a
-new field that forgets to scrub would ship. That gap is real and tracked in
-https://github.com/bmad-code-org/bmad-loop/issues/199 — deliberately not fixed
-here, since a guard needs the pseudonymizer/repair machinery to be useful.
+Safety model — the same two layers as :mod:`bmad_loop.diagnostics` (closed by
+#199). Captured data is scrubbed/reduced at COLLECTION time (captured payloads
+ship as key-path:type *schema*, never values; paths are per-component redacted
+with the project basename routed through a :class:`sanitize.Pseudonymizer`
+alias), and both renderers run :func:`sanitize.guard` over their own rendered
+bytes before returning — a hard-rule hit (email/secret/home-path/url-creds/
+username) refuses to emit, while a stray occurrence of a registered alias
+original is repaired, re-verified, and disclosed. The residual is stated
+honestly: identifier-shaped proprietary values the probe cannot know about
+(an arbitrary slug in a dynamic key, say) match no hard rule and no registered
+extra, so the guard cannot see them — which is why collection reduces payloads
+to shape instead of trying to enumerate what might be sensitive.
 """
 
 from __future__ import annotations
@@ -56,12 +60,19 @@ from .adapters.multiplexer import MultiplexerError, get_multiplexer
 from .adapters.profile import CLIProfile
 from .install import merge_hooks, relay_registered
 from .process_host import get_process_host
+
+# cmd_probe catches `probe.LeakDetected` around the renderers, mirroring
+# diagnostics — the noqa keeps ruff's F401 autofix from deleting the re-export.
+from .sanitize import LeakDetected  # noqa: F401 — re-export
 from .signals import SignalWatcher
 from .tokens import _jsonl_entries, read_usage
 
 # Version of the `--json` document (machine.py contract). Distinct from the
 # document's `version` key, which holds the *probed CLI's* `--version` output.
-SCHEMA_VERSION = 1
+# v2: `captured_events[].payload` (scrubbed values) was removed in favor of
+# `payload_schema` (key paths + leaf types, never values) — a field removal,
+# which the additive-only contract says must bump the version (#199).
+SCHEMA_VERSION = 2
 
 # Per-parser transcript-location conventions (from tokens.py docstrings).
 TRANSCRIPT_GLOBS = {
@@ -136,8 +147,8 @@ class TokenSchema:
 class EventCapture:
     native_event: str
     canonical_event: str | None
-    payload_keys: list[str]
-    payload: dict  # scrubbed
+    payload_keys: list[str]  # top-level field names, identifier-gated
+    payload_schema: list[str]  # dotted key paths + leaf TYPES only, never values
 
 
 @dataclass
@@ -195,13 +206,24 @@ def run_version_help(binary: str, timeout_s: float = 10) -> FlagFinding:
 # ------------------------------------------------------ transcript discovery
 
 
-def _redact_location(path: Path) -> str:
-    """Redact a path to a paste-safe form: home -> ``~``, and any path component
-    that isn't a plain machine identifier (e.g. a munged-cwd dir that embeds a
-    username) -> ``<redacted>``. The session-id filename usually survives."""
+def _redact_location(path: Path, aliases: dict[str, str] | None = None) -> str:
+    """Redact a path to a paste-safe form: home -> ``~``, any known-sensitive
+    component (e.g. the project directory name, which is identifier-shaped and
+    would pass the gate below verbatim) -> its pseudonymizer alias, and any
+    other component that isn't a plain machine identifier (e.g. a munged-cwd
+    dir that embeds a username) -> ``<redacted>``. The session-id filename
+    usually survives."""
 
     def comp(c: str) -> str:
-        return c if sanitize.looks_like_identifier(c) else "<redacted>"
+        if aliases and c in aliases:
+            return aliases[c]
+        # The username check closes a hole the identifier gate leaves open:
+        # a component like `pytest-of-alice` (or a $TMPDIR under /var/folders
+        # named after the user) is identifier-shaped yet names the user — and
+        # the egress guard's username hard rule would refuse the whole report.
+        if not sanitize.looks_like_identifier(c) or sanitize.embeds_current_username(c):
+            return "<redacted>"
+        return c
 
     home = Path(os.path.expanduser("~"))
     try:
@@ -212,7 +234,13 @@ def _redact_location(path: Path) -> str:
         return "/" + "/".join(parts)
 
 
-def _describe_transcript(path: Path, *, glob_pat: str | None, multiple: bool) -> TranscriptFinding:
+def _describe_transcript(
+    path: Path,
+    *,
+    glob_pat: str | None,
+    multiple: bool,
+    aliases: dict[str, str] | None = None,
+) -> TranscriptFinding:
     try:
         stat = path.stat()
         size = stat.st_size
@@ -227,7 +255,7 @@ def _describe_transcript(path: Path, *, glob_pat: str | None, multiple: bool) ->
         pass
     return TranscriptFinding(
         glob=glob_pat,
-        location=_redact_location(path),
+        location=_redact_location(path, aliases),
         fmt="jsonl" if path.suffix == ".jsonl" else (path.suffix.lstrip(".") or "unknown"),
         size_bytes=size,
         line_count=line_count,
@@ -246,20 +274,23 @@ def discover_transcript(
     *,
     cli: str,
     hints: Hints,
+    aliases: dict[str, str] | None = None,
 ) -> TranscriptFinding | None:
     """Locate the newest existing transcript via override or convention glob."""
     if hints.transcript:
         path = Path(hints.transcript).expanduser()
         if not path.is_file():
             return TranscriptFinding(note=f"--transcript path does not exist: {path.name}")
-        return _describe_transcript(path, glob_pat=None, multiple=False)
+        return _describe_transcript(path, glob_pat=None, multiple=False, aliases=aliases)
 
     if hints.session_dir:
         base = Path(hints.session_dir).expanduser()
         matches = sorted(base.glob("**/*.jsonl")) or sorted(base.glob("**/*.json"))
         if not matches:
             return TranscriptFinding(note=f"no *.jsonl/*.json under --session-dir {base.name}")
-        return _describe_transcript(_newest(matches), glob_pat=None, multiple=len(matches) > 1)
+        return _describe_transcript(
+            _newest(matches), glob_pat=None, multiple=len(matches) > 1, aliases=aliases
+        )
 
     pattern = TRANSCRIPT_GLOBS.get(parser) or FAMILY_GLOBS.get(cli)
     if not pattern:
@@ -275,7 +306,9 @@ def discover_transcript(
             note="no existing transcript matched the convention glob; "
             "use --transcript / --session-dir, or run --probe",
         )
-    return _describe_transcript(_newest(matches), glob_pat=pattern, multiple=len(matches) > 1)
+    return _describe_transcript(
+        _newest(matches), glob_pat=pattern, multiple=len(matches) > 1, aliases=aliases
+    )
 
 
 # ---------------------------------------------------------- schema inference
@@ -302,10 +335,15 @@ def _walk_paths(obj, prefix: str, out: set[str]) -> None:
     A dict key that isn't a plain identifier (e.g. a transcript that keys by
     relative file path or a per-file backup id) is collapsed to ``<key>`` —
     static field names (the ones a parser keys on, like ``input_tokens``) survive
-    untouched, but dynamic keys can't leak paths/content into the summary."""
+    untouched, but dynamic keys can't leak paths/content into the summary. A
+    credential-shaped key (``ghp_…`` as a map key) is identifier-shaped yet must
+    not ship, so it collapses too — the same hole :func:`sanitize.scrub_json`
+    closes for values."""
     if isinstance(obj, dict):
         for key, value in obj.items():
-            key = str(key) if sanitize.looks_like_identifier(str(key)) else "<key>"
+            key = str(key)
+            if not sanitize.looks_like_identifier(key) or sanitize.looks_like_secret(key):
+                key = "<key>"
             child = f"{prefix}.{key}" if prefix else key
             _walk_paths(value, child, out)
     elif isinstance(obj, list):
@@ -382,14 +420,21 @@ def scan(
     profile: CLIProfile | None,
     project: Path,
     hints: Hints,
+    pseudo: sanitize.Pseudonymizer | None = None,
 ) -> ProfileFinding:
+    # Aliases registered up front (the project basename) are routed at
+    # collection time so a normal run needs zero egress repairs.
+    aliases = {orig: alias for _ns, orig, alias in pseudo.entries()} if pseudo else None
     binary = hints.binary or (profile.binary if profile else cli)
     parser = profile.usage_parser if profile else "none"
     finding = ProfileFinding(
         cli=cli,
         mode="scan",
         known_profile=profile is not None,
-        binary=binary,
+        # The finding is render-only; a --binary hint may be an absolute path
+        # under $HOME, which must not reach the report (the raw local keeps
+        # driving which/--version below).
+        binary=sanitize.redact_home(binary),
         parser=parser,
         dialect=profile.hooks.dialect if profile else None,
         declared_events=dict(profile.hooks.events) if profile else {},
@@ -397,8 +442,10 @@ def scan(
 
     finding.flags = run_version_help(binary)
     if not finding.flags.found:
+        # finding.binary, not the raw local: a home-rooted --binary hint in a
+        # rendered warning would trip the egress guard's home-path rule.
         finding.warnings.append(
-            f"binary {binary!r} not found on PATH — version/help unavailable "
+            f"binary {finding.binary!r} not found on PATH — version/help unavailable "
             "(scan continues from on-disk conventions)"
         )
 
@@ -411,7 +458,7 @@ def scan(
                 "or re-run with --probe"
             )
 
-    finding.transcript = discover_transcript(parser, cli=cli, hints=hints)
+    finding.transcript = discover_transcript(parser, cli=cli, hints=hints, aliases=aliases)
     if finding.transcript and finding.transcript.note:
         finding.warnings.append(finding.transcript.note)
     if finding.transcript and finding.transcript.real_path is not None:
@@ -491,6 +538,12 @@ def _captured_transcript_path(capture_dir: Path) -> Path | None:
 
 
 def _collect_captures(capture_dir: Path, events_map: dict[str, str]) -> list[EventCapture]:
+    """Reduce each raw captured payload to its SHAPE: top-level keys and dotted
+    key-path:type paths. The payload's diagnostic value for profile authoring is
+    where the fields live and what type they are — so no payload *value* of any
+    kind ships, which removes the widest identifier-shaped egress surface
+    outright (#199). The walk sees the raw dict so leaf types are faithful;
+    dynamic (non-identifier) keys collapse to ``<key>`` in both projections."""
     captures: list[EventCapture] = []
     for payload_file in sorted(capture_dir.glob("*.payload.json")):
         import json
@@ -502,12 +555,16 @@ def _collect_captures(capture_dir: Path, events_map: dict[str, str]) -> list[Eve
         if not isinstance(raw, dict):
             continue
         native = str(raw.pop("argv_event", "Unknown"))
+        paths: set[str] = set()
+        _walk_paths(raw, "", paths)
         captures.append(
             EventCapture(
                 native_event=native,
                 canonical_event=events_map.get(native),
-                payload_keys=sorted(raw.keys()),
-                payload=sanitize.scrub_event_payload(raw),
+                payload_keys=sorted(
+                    str(k) if sanitize.looks_like_identifier(str(k)) else "<key>" for k in raw
+                ),
+                payload_schema=sorted(paths),
             )
         )
     return captures
@@ -521,15 +578,18 @@ def probe(
     hints: Hints,
     timeout_s: float = 90,
     keep_temp: bool = False,
+    pseudo: sanitize.Pseudonymizer | None = None,
 ) -> ProfileFinding:
     import json
 
+    aliases = {orig: alias for _ns, orig, alias in pseudo.entries()} if pseudo else None
     binary = hints.binary or profile.binary
     finding = ProfileFinding(
         cli=cli,
         mode="probe",
         known_profile=True,
-        binary=binary,
+        # render-only; see the identical redaction in scan()
+        binary=sanitize.redact_home(binary),
         parser=profile.usage_parser,
         dialect=profile.hooks.dialect,
         declared_events=dict(profile.hooks.events),
@@ -547,9 +607,10 @@ def probe(
     except Exception:  # noqa: BLE001 — a raising host probe means "cannot probe", not a crash
         mux_ready = False
     if not mux_ready or not shutil.which(binary):
-        missing = f"multiplexer backend {type(mux).__name__}" if not mux_ready else binary
+        # finding.binary, not the raw local — see the identical note in scan()
+        missing = f"multiplexer backend {type(mux).__name__}" if not mux_ready else finding.binary
         finding.warnings.append(f"{missing} not on PATH — cannot probe; falling back to scan")
-        scanned = scan(cli=cli, profile=profile, project=project, hints=hints)
+        scanned = scan(cli=cli, profile=profile, project=project, hints=hints, pseudo=pseudo)
         scanned.mode = "probe"
         return scanned
 
@@ -644,9 +705,13 @@ def probe(
         #    session. Falls back to the glob when the CLI reports no path.
         live = _captured_transcript_path(capture_dir)
         if live is not None and live.is_file():
-            finding.transcript = _describe_transcript(live, glob_pat=None, multiple=False)
+            finding.transcript = _describe_transcript(
+                live, glob_pat=None, multiple=False, aliases=aliases
+            )
         else:
-            finding.transcript = discover_transcript(profile.usage_parser, cli=cli, hints=hints)
+            finding.transcript = discover_transcript(
+                profile.usage_parser, cli=cli, hints=hints, aliases=aliases
+            )
         if finding.transcript and finding.transcript.note:
             finding.warnings.append(finding.transcript.note)
         if finding.transcript and finding.transcript.real_path is not None:
@@ -655,9 +720,11 @@ def probe(
     finally:
         launcher.kill()
         if keep_temp:
+            # ~-relative so a $TMPDIR under $HOME can't trip the egress guard;
+            # the shell expands ~ so the printed path stays inspectable.
             finding.warnings.append(
-                f"--keep-temp: RAW probe data retained at {tmpdir} — DO NOT SHARE; "
-                "delete it after inspection"
+                f"--keep-temp: RAW probe data retained at {sanitize.redact_home(str(tmpdir))} "
+                "— DO NOT SHARE; delete it after inspection"
             )
         else:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -681,7 +748,12 @@ def _fmt_kv(label: str, value) -> str:
     return f"- **{label}:** {value}"
 
 
-def render_markdown(f: ProfileFinding) -> str:
+def render_markdown(
+    f: ProfileFinding,
+    *,
+    pseudo: sanitize.Pseudonymizer | None = None,
+    repairs: list[tuple[str, int]] | None = None,
+) -> str:
     out: list[str] = []
     out.append(f"# Profile finalize report — {f.cli} ({f.mode})")
     out.append("")
@@ -732,7 +804,11 @@ def render_markdown(f: ProfileFinding) -> str:
                 out.append(
                     _fmt_kv("payload keys", ", ".join(f"`{k}`" for k in ev.payload_keys) or "—")
                 )
-                out.append("\n```json\n" + _json_dump(ev.payload) + "\n```")
+                out.append("\n**Payload schema** (key paths + leaf types, never values):")
+                if ev.payload_schema:
+                    out.append("\n```\n" + "\n".join(ev.payload_schema) + "\n```")
+                else:
+                    out.append("\n- _empty payload._")
         else:
             out.append("_no hook payloads captured (see warnings)._")
     out.append("")
@@ -786,16 +862,37 @@ def render_markdown(f: ProfileFinding) -> str:
     for s in f.next_steps:
         out.append(f"- → {s}")
     out.append("")
-    return "\n".join(out)
+
+    rendered = "\n".join(out)
+    rendered, reps = sanitize.guard(rendered, pseudo)
+    if reps:
+        note = [
+            "",
+            "### Backstop repairs",
+            "",
+            "_The leak self-check caught stray occurrences of pseudonymized "
+            "identifiers that the per-field routing missed, and substituted "
+            "their aliases — a bmad-loop routing gap; please report it._",
+            "",
+        ]
+        for label, count in reps:
+            note.append(f"- `{label}`: {count} stray occurrence(s) pseudonymized")
+        note.append("")
+        rendered += "\n".join(note)
+        # The note is appended after the repair loop verified the body, so
+        # re-check the whole thing: the note must sit inside the verified bytes.
+        sanitize.assert_clean(rendered, pseudo)
+    if repairs is not None:
+        repairs.extend(reps)
+    return rendered
 
 
-def _json_dump(obj) -> str:
-    import json
-
-    return json.dumps(obj, indent=2, sort_keys=True)
-
-
-def render_json(f: ProfileFinding) -> str:
+def render_json(
+    f: ProfileFinding,
+    *,
+    pseudo: sanitize.Pseudonymizer | None = None,
+    repairs: list[tuple[str, int]] | None = None,
+) -> str:
     import json
 
     def transcript_dict(t: TranscriptFinding | None):
@@ -830,7 +927,7 @@ def render_json(f: ProfileFinding) -> str:
                 "native_event": ev.native_event,
                 "canonical_event": ev.canonical_event,
                 "payload_keys": ev.payload_keys,
-                "payload": ev.payload,
+                "payload_schema": ev.payload_schema,
             }
             for ev in f.captured_events
         ],
@@ -851,4 +948,23 @@ def render_json(f: ProfileFinding) -> str:
     }
     # sort_keys so two probes of the same CLI diff cleanly — the document has
     # consumers now, and dict-literal order is an implementation detail.
-    return json.dumps(data, indent=2, sort_keys=True)
+    # ensure_ascii=False is a SAFETY requirement, not cosmetics (see
+    # diagnostics.render_json): with the default, a non-ASCII sensitive value
+    # reaches the guard as \uXXXX escapes and matches nothing, yet json.loads
+    # hands the consumer back the original. machine.emit/write_document emit
+    # this string verbatim, so the guarded bytes ARE the emitted bytes.
+    rendered = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False)
+    rendered, reps = sanitize.guard(rendered, pseudo)
+    if reps:
+        # Disclose the repair in the document itself so the routing gap surfaces
+        # as a reportable bug. Substitution preserved JSON validity — a leaked
+        # original is identifier-shaped and its alias is [A-Za-z0-9-], neither
+        # side carries quotes or backslashes — so reload-and-extend is safe.
+        # backstop_repairs is an optional additive key: absent on a clean report.
+        loaded = json.loads(rendered)
+        loaded["backstop_repairs"] = dict(reps)
+        rendered = json.dumps(loaded, indent=2, sort_keys=True, ensure_ascii=False)
+        sanitize.assert_clean(rendered, pseudo)
+    if repairs is not None:
+        repairs.extend(reps)
+    return rendered
