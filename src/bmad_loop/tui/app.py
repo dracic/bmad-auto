@@ -2,7 +2,9 @@
 
 Observer/launcher only: the TUI never runs engines in-process. Run control
 (r/s/e) launches detached bmad-loop processes in the bmad-loop-ctl tmux
-session via tui.launch; validate and dry runs are captured into a modal.
+session via tui.launch. Dry runs are captured into a text modal; validate
+renders its `--json` document into a findings modal (falling back to the text
+one), so the verdict is the document's `ok` rather than an exit code.
 The g binding opens the policy.toml settings editor.
 """
 
@@ -36,7 +38,7 @@ from ..model import (
 from ..policy import POLICY_FILE
 from ..process_host import ProcessHostError
 from ..runs import RUNS_DIR, RearmError, StopRunError
-from . import data, launch
+from . import data, launch, widgets
 from .screens.dashboard import DashboardScreen
 from .screens.modals import (
     ConfirmModal,
@@ -48,6 +50,7 @@ from .screens.modals import (
     StartSweepModal,
     StoryCheckpointModal,
     TextOutputModal,
+    ValidateFindingsModal,
 )
 from .screens.settings_screen import SettingsScreen
 from .settings import PolicyDoc
@@ -950,7 +953,46 @@ class BmadLoopApp(App[None]):
         )
 
     def action_validate(self) -> None:
-        self._show_captured("validate", ["validate", "--project", str(self.project)])
+        self._show_validate()
+
+    @work(thread=True, exclusive=True, group="captured")
+    def _show_validate(self) -> None:
+        """Preflight in a findings modal, degrading to the text one (#210).
+
+        A sibling of _show_captured rather than a change to it: that worker still
+        serves the two dry runs, which have no document to parse.
+
+        The transport is the subprocess and `--json`, not documents.py's builders
+        in-process, which its module docstring otherwise asks a non-CLI frontend
+        to prefer. Knowing exception: cmd_validate imports third-party mux entry
+        points and probes httpx, so the subprocess quarantines a broken plugin's
+        import side effects and leaves the TUI's own lru_cached mux selection
+        undisturbed. Extracting an in-process builder is a follow-up.
+
+        The body is guarded because @work(thread=True) defaults to
+        exit_on_error=True: a JSONDecodeError or a KeyError escaping here would
+        take the whole app down, not just this modal. exit_on_error=False is not
+        the fix — that trades the crash for pressing `v` and nothing happening.
+
+        The degrade **re-runs validate in text mode** rather than showing the
+        captured JSON. Dumping the document would withhold a perfectly good human
+        rendering at the exact moment the structural one failed, and hand the
+        reader a wall of `{"schema_version": ...}` instead. One sub-second
+        subprocess on a path that should never fire buys a degrade that is
+        byte-for-byte the pre-#210 behavior.
+        """
+        tail = ["validate", "--project", str(self.project)]
+        try:
+            _rc, out, _err = launch.run_captured_streams([*tail, "--json"])
+            doc = widgets.validate_document(out)
+        except Exception:  # noqa: BLE001 — a JSON-leg failure degrades, never kills the app
+            doc = None
+        if doc is None:
+            rc, merged = launch.run_captured(tail)
+            screen = TextOutputModal("validate", rc, merged)
+        else:
+            screen = ValidateFindingsModal(doc)
+        self.call_from_thread(self.push_screen, screen)
 
     @work(thread=True, exclusive=True, group="captured")
     def _show_captured(self, title: str, tail: list[str]) -> None:

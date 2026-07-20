@@ -191,6 +191,16 @@ breaking changes may land in a minor release.
 
 ### Changed
 
+- **The TUI's validate modal (`v`) renders `validate --json` instead of the text output (#210).**
+  One row per check — glyph, stable `check` id, message — with the verdict taken from the
+  document's `ok` rather than the exit code, which cannot tell "the checks failed" from "the
+  command broke". A check's `detail` is now reachable at all: inline for warnings and problems,
+  and `d` toggles it on for everything, so `mux.backends-detected` expands to a row per backend
+  instead of the text's `tmux*, psmux (unavailable)`. A failure adds a footer noting the gates
+  are chained — the later gates emit nothing after one fails, so a short list is not a short
+  list of problems. An unrenderable document (a newer schema, unparseable stdout) re-runs
+  validate in text mode and shows the old modal unchanged.
+
 - **BREAKING: `probe-adapter` now runs `diagnose`'s egress leak self-check, and captured hook
   payloads ship as a schema instead of scrubbed values (#199).** The rendered report re-scans
   itself before emitting (the guard moved to `sanitize.guard`, one audited implementation for

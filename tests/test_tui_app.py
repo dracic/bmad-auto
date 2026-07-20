@@ -57,6 +57,7 @@ from bmad_loop.tui.screens.modals import (
     StartSweepModal,
     StoryCheckpointModal,
     TextOutputModal,
+    ValidateFindingsModal,
 )
 from bmad_loop.tui.widgets import (
     _FINDING_CHECK_WIDTH,
@@ -1456,16 +1457,166 @@ async def test_dry_run_shows_captured_output(project, monkeypatch):
         await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
 
 
-async def test_validate_shows_output_modal(project, monkeypatch):
+# ---------------------------------------------------------- #210: validate wiring
+#
+# `v` renders the --json document; anything undrawable degrades to the text modal.
+# These tests mix real documents (via the conftest builder, for what actually gets
+# rendered) with hand-rolled stdout strings (for the degrades) on purpose, not out
+# of inconsistency: the builder goes through ValidationReport, so it can only ever
+# produce a *valid* document, and every degrade case is by definition one it cannot
+# express.
+
+
+def stub_validate(monkeypatch, *, stdout: str = "", rc: int = 0, text: str = "FAIL: no policy\n"):
+    """Stub **both** legs and record which ran.
+
+    Stubbing only run_captured_streams leaves the degrade's run_captured live, so
+    every degrade test would spawn a real `bmad-loop validate` subprocess — slow,
+    and asserting the host's preflight rather than the code under test."""
+    seen: dict[str, list[str]] = {}
+
+    def fake_streams(tail):
+        seen["json_tail"] = tail
+        return rc, stdout, ""
+
+    def fake_captured(tail):
+        seen["text_tail"] = tail
+        return rc, text
+
+    monkeypatch.setattr(launch, "run_captured_streams", fake_streams)
+    monkeypatch.setattr(launch, "run_captured", fake_captured)
+    return seen
+
+
+def grid_text(app: BmadLoopApp) -> str:
+    """The findings grid as it draws at the modal's width."""
+    return render(app.screen.query_one("#grid", Static).content)
+
+
+async def test_validate_shows_findings_modal(project, monkeypatch):
+    """The migrated test_validate_shows_output_modal. `v` renders the document
+    now, so the old run_captured stub is dead — and a dead stub is a real
+    subprocess, not a failure."""
+    doc = make_validate_document(
+        [
+            ("git.worktree-clean", "ok", "git worktree clean", None),
+            ("adapter.binary", "problem", "codex not found on PATH", {"binary": "codex"}),
+        ]
+    )
+    seen = stub_validate(monkeypatch, stdout=json.dumps(doc), rc=1)
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        await pilot.press("v")
+        await until(pilot, lambda: isinstance(app.screen, ValidateFindingsModal))
+        await ready(pilot, "#grid")
+        assert "--json" in seen["json_tail"]
+        assert "text_tail" not in seen, "the JSON leg drew it; nothing re-ran in text mode"
+
+        body = grid_text(app)
+        assert "git.worktree-clean" in body and "adapter.binary" in body
+        assert "binary: codex" in body, "a problem's detail is inline"
+        header = str(app.screen.query_one(".title", Static).content)
+        assert "validate failed" in header
+
+        await pilot.press("escape")
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+
+
+async def test_validate_detail_toggle_expands_every_finding(project, monkeypatch):
+    """`d` re-renders the same document with detail on."""
+    doc = make_validate_document(
+        [("host.process", "ok", "process host: Posix", {"host": "PosixProcessHost"})]
+    )
+    stub_validate(monkeypatch, stdout=json.dumps(doc))
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        await pilot.press("v")
+        await until(pilot, lambda: isinstance(app.screen, ValidateFindingsModal))
+        await ready(pilot, "#grid")
+        assert "host: PosixProcessHost" not in grid_text(app), "an ok detail starts collapsed"
+
+        await pilot.press("d")
+        await until(pilot, lambda: "host: PosixProcessHost" in grid_text(app))
+        await pilot.press("d")
+        await until(pilot, lambda: "host: PosixProcessHost" not in grid_text(app))
+
+
+async def test_validate_verdict_comes_from_the_document_not_the_exit_code(project, monkeypatch):
+    """rc conflates "checks failed" with "the command broke"; the document's `ok`
+    does not. Both legs are rendered here with rc deliberately disagreeing with
+    what the old code would have inferred from it."""
+    failing = make_validate_document([("adapter.binary", "problem", "codex not found", None)])
+    stub_validate(monkeypatch, stdout=json.dumps(failing), rc=1)
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        await pilot.press("v")
+        await until(pilot, lambda: isinstance(app.screen, ValidateFindingsModal))
+        await ready(pilot, "#grid")
+        header = str(app.screen.query_one(".title", Static).content)
+        assert "validate failed" in header
+        assert "gates are chained" in header, "a failure says the later gates may not have run"
+
+    # A passing document at rc 0 — same wiring, opposite verdict, and the header
+    # says so without the modal ever seeing the exit code.
+    passing = make_validate_document([("git.worktree-clean", "ok", "git worktree clean", None)])
+    stub_validate(monkeypatch, stdout=json.dumps(passing), rc=0)
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        await pilot.press("v")
+        await until(pilot, lambda: isinstance(app.screen, ValidateFindingsModal))
+        await ready(pilot, "#grid")
+        header = str(app.screen.query_one(".title", Static).content)
+        assert "validate passed" in header
+        assert "gates are chained" not in header
+
+
+@pytest.mark.parametrize(
+    ("stdout", "why"),
+    [
+        ("", "the command produced no document at all"),
+        ("not json{", "unparseable stdout"),
+        ('{"schema_version": 2, "ok": true, "counts": {}, "findings": []}', "a newer schema"),
+        ('{"schema_version": 1, "ok": true, "counts": {}, "findings": "nope"}', "wrong shape"),
+    ],
+)
+async def test_validate_degrades_to_the_text_modal(project, monkeypatch, stdout, why):
+    """Every undrawable document RE-RUNS validate in text mode. Showing the
+    captured JSON instead would hand the reader a wall of `{"schema_version": ...}`
+    at the exact moment the structural rendering failed; re-running costs one
+    subprocess and makes the degrade byte-for-byte the pre-#210 behavior."""
+    seen = stub_validate(monkeypatch, stdout=stdout, rc=1)
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        await pilot.press("v")
+        await until(pilot, lambda: isinstance(app.screen, TextOutputModal), timeout=10.0)
+        await ready(pilot, "Label")  # body mounts a tick after the screen swaps
+        labels = app.screen.query("Label")
+        assert any("exit 1" in str(label.content) for label in labels), why
+        assert "--json" not in seen["text_tail"], "the text re-run is the plain command"
+
+
+async def test_validate_worker_survives_a_raising_subprocess(project, monkeypatch):
+    """@work(thread=True) defaults to exit_on_error=True, so anything escaping the
+    worker body takes the whole app down rather than this one modal. The guard is
+    an except, not a set of condition checks — the raise here is not a shape the
+    checks could have caught."""
+    monkeypatch.setattr(
+        launch,
+        "run_captured_streams",
+        lambda tail: (_ for _ in ()).throw(OSError("no such file")),
+    )
     monkeypatch.setattr(launch, "run_captured", lambda tail: (1, "FAIL: no policy\n"))
     app = BmadLoopApp(project.project)
     async with app.run_test() as pilot:
         await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
         await pilot.press("v")
         await until(pilot, lambda: isinstance(app.screen, TextOutputModal))
-        await ready(pilot, "Label")  # body mounts a tick after the screen swaps
-        labels = app.screen.query("Label")
-        assert any("exit 1" in str(label.content) for label in labels)
+        assert app.is_running, "the app survived; only the JSON leg failed"
 
 
 async def test_resume_confirm_launches(project, monkeypatch):
