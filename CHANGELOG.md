@@ -15,9 +15,11 @@ breaking changes may land in a minor release.
   archived, deleted and protected run ids, the effective retention policy, and `freed_bytes`
   as a raw integer — the text's `~1.2MB` is a rendering of that number, and formatting is the
   renderer's job; for `cleanup` the run ids whose sessions went, the live ids left alone, and
-  the ctl windows closed. Plan and outcome share one shape, so `--dry-run --json` and the real
-  run differ only in the `dry_run` flag and a script can diff a pre-flight against what
-  actually happened. **The real paths are now scriptable at all** — they previously discarded
+  the ctl windows closed. Plan and outcome share one schema — same fields, same meanings, with
+  `dry_run` saying which one you are holding — so a script can pre-flight and then compare
+  against what actually happened. The values are each invocation's own sample rather than a
+  promise the two agree: `freed_bytes` is re-measured, and the world can move between the
+  preview and the commit. **The real paths are now scriptable at all** — they previously discarded
   the per-item data and printed only a summary line, and `protected` was a bare count. Both
   commands printed progress as they mutated, and both warned mid-loop about an unverifiable
   engine pid; under `--json` that warning becomes a document field, so stderr stays empty and
