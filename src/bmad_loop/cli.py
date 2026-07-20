@@ -32,6 +32,7 @@ from . import (
     verify,
 )
 from .adapters.base import CodingCLIAdapter
+from .checks import Finding, ValidationReport
 from .engine import Engine
 from .journal import Journal, load_state, save_state
 from .model import RunState
@@ -192,9 +193,9 @@ def _make_adapters(project: Path, run_dir: Path, policy) -> dict[str, CodingCLIA
 # ----------------------------------------------------------------- commands
 
 
-def _platform_preflight() -> tuple[list[str], list[str]]:
+def _platform_preflight() -> list[Finding]:
     """Probe the platform-selected seams — the terminal multiplexer and the process
-    host — for `cmd_validate`, returning ``(notes, problems)``.
+    host — for `cmd_validate`, returning the findings in emission order.
 
     A backend reports its own readiness through ``available()`` / ``version()``, so
     a new OS or transport surfaces here by *registering* rather than by adding a
@@ -208,26 +209,36 @@ def _platform_preflight() -> tuple[list[str], list[str]]:
     )
     from .process_host import get_process_host
 
-    notes: list[str] = []
-    problems: list[str] = []
+    found: list[Finding] = []
 
     try:
         backend = get_multiplexer()
         label = type(backend).__name__
+        version = backend.version()
         if backend.available():
-            version = backend.version()
-            notes.append(f"multiplexer {label} available" + (f" ({version})" if version else ""))
+            found.append(
+                Finding(
+                    "mux.backend",
+                    "ok",
+                    f"multiplexer {label} available" + (f" ({version})" if version else ""),
+                    {"backend": label, "available": True, "version": version},
+                )
+            )
         else:
-            version = backend.version()
-            problems.append(
-                f"multiplexer {label} unavailable"
-                + (f" (reports {version})" if version else "")
-                + " — its transport binary is missing, the version is unsupported, or a "
-                "required helper is absent (psmux needs `pwsh` on PATH); "
-                "see `bmad-loop diagnose`"
+            found.append(
+                Finding(
+                    "mux.backend",
+                    "problem",
+                    f"multiplexer {label} unavailable"
+                    + (f" (reports {version})" if version else "")
+                    + " — its transport binary is missing, the version is unsupported, or a "
+                    "required helper is absent (psmux needs `pwsh` on PATH); "
+                    "see `bmad-loop diagnose`",
+                    {"backend": label, "available": False, "version": version},
+                )
             )
     except Exception as e:  # noqa: BLE001 — selection or readiness must not abort validate
-        problems.append(f"multiplexer preflight failed: {e}")
+        found.append(Finding("mux.preflight", "problem", f"multiplexer preflight failed: {e}"))
 
     try:
         infos = detect_multiplexers()
@@ -244,37 +255,131 @@ def _platform_preflight() -> tuple[list[str], list[str]]:
             )
             for i in infos
         )
-        notes.append(f"mux backends: {listed} — `bmad-loop mux` for details")
+        # The text flattens each row into a suffix soup ("tmux*, psmux
+        # (unavailable)") whose trailing `*` a consumer would have to parse to
+        # learn which backend is selected. The detail keeps the rows themselves.
+        found.append(
+            Finding(
+                "mux.backends-detected",
+                "ok",
+                f"mux backends: {listed} — `bmad-loop mux` for details",
+                {
+                    "backends": [
+                        {
+                            "name": i.name,
+                            "matches_platform": i.matches_platform,
+                            "available": i.available,
+                            "version": i.version,
+                            "selected": i.selected,
+                            "reason": i.reason,
+                        }
+                        for i in infos
+                    ]
+                },
+            )
+        )
     chosen = next((i for i in infos if i.selected), None)
     if chosen and chosen.reason in ("env", "policy"):
-        notes.append(f"multiplexer selection {_mux_reason_label(chosen.reason)}")
+        # detail keeps the raw enum, not _mux_reason_label's prose: the label is
+        # wording ("set by [mux] backend in .bmad-loop/policy.toml"), the enum is
+        # the value MuxBackendInfo.reason actually carries.
+        found.append(
+            Finding(
+                "mux.selection",
+                "ok",
+                f"multiplexer selection {_mux_reason_label(chosen.reason)}",
+                {"backend": chosen.name, "reason": chosen.reason},
+            )
+        )
 
     # Advisory, not a problem: selection already degraded past the broken
     # package (a failed external can never be the selected backend), so the
     # preflight outcome above is authoritative — this line explains the absence.
     for ep_name, reason in sorted(external_backend_errors().items()):
-        notes.append(f"external mux backend '{ep_name}' failed to load: {reason}")
+        found.append(
+            Finding(
+                "mux.external-backend",
+                "ok",
+                f"external mux backend '{ep_name}' failed to load: {reason}",
+                {"entry_point": ep_name, "error": reason},
+            )
+        )
 
     try:
-        notes.append(f"process host: {type(get_process_host()).__name__}")
+        host = type(get_process_host()).__name__
+        found.append(Finding("host.process", "ok", f"process host: {host}", {"host": host}))
     except Exception as e:  # noqa: BLE001 — a bad BMAD_LOOP_PROCESS_HOST must report, not crash
-        problems.append(f"process host preflight failed: {e}")
+        found.append(Finding("host.process", "problem", f"process host preflight failed: {e}"))
 
-    return notes, problems
+    return found
+
+
+VALIDATE_SCHEMA_VERSION = 1
+
+
+def _validate_document(report: ValidationReport, stories_on: bool, spec_folder: str) -> dict:
+    """The `validate --json` document: the verdict plus every check that produced it.
+
+    Obeys the pure-document contract in machine.py (additive-only evolution;
+    anything breaking bumps VALIDATE_SCHEMA_VERSION). ``ok`` is true when no
+    finding has severity ``problem`` — warnings do not clear it — so it mirrors
+    the exit code exactly. This is the first ``--json`` command that emits a whole
+    document at rc 1: the nonzero code is the verdict being reported, not a
+    failure to produce one (see machine.py on parsing non-empty stdout whatever
+    the exit code).
+
+    Three things a consumer has to know:
+
+    - **``message`` is not contracted.** Several problems are a bare ``str(e)``
+      from the config, policy, profile and sprint-status exceptions, so their
+      wording moves with those modules. ``check`` is the only matchable identity;
+      match on it, and read ``message``/``detail`` for humans.
+    - **Absence is not a pass.** The gates are chained: if policy fails to load,
+      ``profiles`` is empty and the binary, hook and base-skill gates contribute
+      no finding at all. A check id missing from ``findings`` means "did not run",
+      never "passed" — check ``ok`` for the verdict, not the absence of an id.
+    - **``mux.backends-detected`` is gated on more than one registered backend**,
+      so a lone-tmux host carries no backend inventory. Same rule as above.
+
+    ``findings`` stays flat and in emission order rather than grouped by severity:
+    grouping would destroy the cross-severity ordering (the order the gates ran)
+    and turn "every non-ok finding" into a two-array concatenation.
+    """
+    return {
+        "schema_version": VALIDATE_SCHEMA_VERSION,
+        "ok": report.passed,
+        "mode": "stories" if stories_on else "sprint",
+        # "" rather than null in sprint mode, where a spec folder is inapplicable —
+        # the same convention as _list_document's paused_stage.
+        "spec_folder": spec_folder if stories_on else "",
+        "counts": report.counts(),
+        "findings": [
+            {
+                "check": f.check,
+                "severity": f.severity,
+                "message": f.message,
+                "detail": f.detail,
+            }
+            for f in report.findings
+        ],
+    }
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
     from .install import relay_registered
 
     project = _project(args)
-    problems: list[str] = []
-    notes: list[str] = []
+    report = ValidationReport()
 
     try:
         paths = bmadconfig.load_paths(project)
-        notes.append(f"BMAD config OK: artifacts at {paths.implementation_artifacts}")
+        report.ok(
+            "bmad-config",
+            f"BMAD config OK: artifacts at {paths.implementation_artifacts}",
+            {"implementation_artifacts": str(paths.implementation_artifacts)},
+        )
     except bmadconfig.BmadConfigError as e:
-        problems.append(str(e))
+        report.fail("bmad-config", str(e))
         paths = None
 
     # Policy first — its [stories].source (or a --spec override) selects which
@@ -289,10 +394,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
     try:
         pol = policy_mod.load(_policy_path(project))
         role_names = {role: pol.adapter.resolved(role).name for role in ROLES}
-        notes.append(
+        report.ok(
+            "policy",
             f"policy OK: gates={pol.gates.mode}, "
             f"adapter dev={role_names['dev']}, review={role_names['review']}, "
-            f"triage={role_names['triage']}"
+            f"triage={role_names['triage']}",
+            {"gates_mode": pol.gates.mode, "adapters": dict(role_names)},
         )
         for name in dict.fromkeys(role_names.values()):
             try:
@@ -300,58 +407,73 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 profiles.append(profile)
                 profile_by_name[name] = profile
             except ProfileError as e:
-                problems.append(str(e))
+                report.fail("adapter.profile", str(e), {"profile": name})
     except policy_mod.PolicyError as e:
-        problems.append(str(e))
+        report.fail("policy", str(e))
 
     stories_on, spec_folder = _stories_mode(args, pol)
     if paths:
         if stories_on:
             _validate_stories_queue(
-                project, paths, spec_folder, [p.skill_tree for p in profiles], notes, problems
+                project, paths, spec_folder, [p.skill_tree for p in profiles], report
             )
         else:
             try:
                 ss = sprintstatus.load(paths.sprint_status)
                 actionable = [s for s in ss.stories if s.status in sprintstatus.ACTIONABLE_STATUSES]
-                notes.append(
-                    f"sprint-status OK: {len(ss.stories)} stories, {len(actionable)} actionable"
+                report.ok(
+                    "queue.sprint-status",
+                    f"sprint-status OK: {len(ss.stories)} stories, {len(actionable)} actionable",
+                    {"stories": len(ss.stories), "actionable": len(actionable)},
                 )
                 if ss.unknown_keys:
-                    notes.append(f"  warning: unknown keys ignored: {', '.join(ss.unknown_keys)}")
+                    report.warn(
+                        "queue.sprint-status-unknown-keys",
+                        f"unknown keys ignored: {', '.join(ss.unknown_keys)}",
+                        {"unknown_keys": list(ss.unknown_keys)},
+                    )
             except sprintstatus.SprintStatusError as e:
-                problems.append(str(e))
+                report.fail("queue.sprint-status", str(e))
 
     try:
         if not verify.worktree_clean(project):
-            problems.append("git worktree is not clean — commit or stash before running")
+            report.fail(
+                "git.worktree-clean", "git worktree is not clean — commit or stash before running"
+            )
         else:
-            notes.append("git worktree clean")
+            report.ok("git.worktree-clean", "git worktree clean")
     except verify.GitError as e:
-        problems.append(f"git check failed: {e}")
+        report.fail("git.probe", f"git check failed: {e}")
 
-    pf_notes, pf_problems = _platform_preflight()
-    notes.extend(pf_notes)
-    problems.extend(pf_problems)
+    report.extend(_platform_preflight())
 
     for tool in dict.fromkeys(p.binary for p in profiles):
         if shutil.which(tool):
-            notes.append(f"{tool} found")
+            report.ok("adapter.binary", f"{tool} found", {"binary": tool})
         else:
-            problems.append(f"{tool} not found on PATH")
+            report.fail("adapter.binary", f"{tool} not found on PATH", {"binary": tool})
 
     for profile in profiles:
         if profile.hookless:
-            notes.append(
-                f"{profile.name}: hookless (HTTP/SSE transport) — no hook registration needed"
+            report.ok(
+                "adapter.hookless",
+                f"{profile.name}: hookless (HTTP/SSE transport) — no hook registration needed",
+                {"profile": profile.name},
             )
             # The HTTP adapter needs httpx, which ships as an optional extra —
             # surface a missing install here instead of at run start.
             if importlib.util.find_spec("httpx") is not None:
-                notes.append(f"httpx available for {profile.name}")
+                report.ok(
+                    "adapter.httpx",
+                    f"httpx available for {profile.name}",
+                    {"profile": profile.name},
+                )
             else:
-                problems.append(
-                    f"{profile.name}: httpx not installed — run `pip install 'bmad-loop[opencode]'`"
+                report.fail(
+                    "adapter.httpx",
+                    f"{profile.name}: httpx not installed — "
+                    f"run `pip install 'bmad-loop[opencode]'`",
+                    {"profile": profile.name},
                 )
             continue
         hook_config = project / profile.hooks.config_path
@@ -363,13 +485,23 @@ def cmd_validate(args: argparse.Namespace) -> int:
                     parsed, profile.hooks.dialect, profile.hooks.events
                 )
             except json.JSONDecodeError:
-                problems.append(f"{hook_config} is not valid JSON")
+                report.fail(
+                    "hooks.config-parse",
+                    f"{hook_config} is not valid JSON",
+                    {"profile": profile.name, "config_path": str(hook_config)},
+                )
         if hooks_ok:
-            notes.append(f"bmad-loop hooks registered for {profile.name}")
+            report.ok(
+                "hooks.registered",
+                f"bmad-loop hooks registered for {profile.name}",
+                {"profile": profile.name, "config_path": str(hook_config)},
+            )
         else:
-            problems.append(
+            report.fail(
+                "hooks.registered",
                 f"bmad-loop hooks not registered for {profile.name} — "
-                f"run `bmad-loop init --cli {profile.name}`"
+                f"run `bmad-loop init --cli {profile.name}`",
+                {"profile": profile.name, "config_path": str(hook_config)},
             )
 
     # opencode config-file model ids are "provider/model" (see the opencode_http docstring);
@@ -380,21 +512,29 @@ def cmd_validate(args: argparse.Namespace) -> int:
             cfg = pol.adapter.resolved(role)
             prof = profile_by_name.get(cfg.name)
             if prof is not None and prof.hookless and cfg.model and "/" not in cfg.model:
-                notes.append(
-                    f"  warning: {role} model {cfg.model!r} is not 'provider/model' — "
-                    f"{prof.name} expects e.g. 'anthropic/claude-haiku-4-5'"
+                report.warn(
+                    "policy.model-qualified",
+                    f"{role} model {cfg.model!r} is not 'provider/model' — "
+                    f"{prof.name} expects e.g. 'anthropic/claude-haiku-4-5'",
+                    {"role": role, "model": cfg.model, "profile": prof.name},
                 )
 
     base_problems = install.missing_base_skills(project, [p.skill_tree for p in profiles])
     if profiles and not base_problems:
-        notes.append("upstream skills present (bmad-dev-auto + review hunters)")
-    problems.extend(base_problems)
+        report.ok(
+            "skills.base",
+            "upstream skills present (bmad-dev-auto + review hunters)",
+            {"trees": list(dict.fromkeys(p.skill_tree for p in profiles))},
+        )
+    report.extend(base_problems)
 
-    for note in notes:
-        print(f"  ok: {note}")
-    for problem in problems:
-        print(f"FAIL: {problem}", file=sys.stderr)
-    return 1 if problems else 0
+    if getattr(args, "json", False):
+        # getattr, not args.json: cmd_validate is called directly by tests (and by
+        # anything holding a hand-built Namespace) that predate the flag.
+        machine.emit(_validate_document(report, stories_on, spec_folder))
+    else:
+        report.render()
+    return 0 if report.passed else 1
 
 
 def _mux_reason_label(reason: str) -> str:
@@ -540,7 +680,7 @@ def _require_base_skills(project: Path, pol, *, require_stories: bool = False) -
         problems += install.missing_stories_support(project, skill_trees)
     if problems:
         for problem in problems:
-            print(f"FAIL: {problem}", file=sys.stderr)
+            print(f"FAIL: {problem.message}", file=sys.stderr)
         print("run `bmad-loop validate` for details", file=sys.stderr)
         return False
     return True
@@ -594,30 +734,39 @@ def _validate_stories_queue(
     paths: bmadconfig.ProjectPaths,
     spec_folder: str,
     skill_trees: list[str],
-    notes: list[str],
-    problems: list[str],
+    report: ValidationReport,
 ) -> None:
     """Stories-mode counterpart of ``cmd_validate``'s sprint-status gate: validate
     the ``stories.yaml`` manifest + ``SPEC.md`` and confirm the installed
     ``bmad-dev-auto`` carries the folder+id dispatch flow stories mode needs (an
-    older skill would HALT at dispatch). Appends notes/problems in place; the
-    probe carries its own remediation text ("update the bmm module")."""
+    older skill would HALT at dispatch). Appends findings to ``report`` in place;
+    the probe carries its own remediation text ("update the bmm module")."""
     folder = stories_mod.resolve_spec_folder(paths.project, spec_folder)
     problem = _validate_stories_folder(paths, spec_folder)
     if problem:
-        problems.append(problem)
+        report.fail("queue.stories-manifest", problem, {"spec_folder": str(folder)})
     else:
         try:
             count = len(stories_mod.load_stories(folder).entries)
-            notes.append(
-                f"stories mode OK: {count} stories in {folder}/stories.yaml, SPEC.md present"
+            report.ok(
+                "queue.stories-manifest",
+                f"stories mode OK: {count} stories in {folder}/stories.yaml, SPEC.md present",
+                {"spec_folder": str(folder), "stories": count},
             )
         except stories_mod.StoriesError as e:  # already validated above — defensive
-            problems.append(f"stories mode: {e} (spec folder: {folder})")
+            report.fail(
+                "queue.stories-manifest",
+                f"stories mode: {e} (spec folder: {folder})",
+                {"spec_folder": str(folder)},
+            )
     stories_probs = install.missing_stories_support(project, skill_trees)
     if skill_trees and not stories_probs:
-        notes.append("bmad-dev-auto supports folder+id dispatch (stories mode)")
-    problems.extend(stories_probs)
+        report.ok(
+            "skills.stories-dispatch",
+            "bmad-dev-auto supports folder+id dispatch (stories mode)",
+            {"trees": list(dict.fromkeys(skill_trees))},
+        )
+    report.extend(stories_probs)
 
 
 def _warn_unknown_keys(ss: sprintstatus.SprintStatus) -> None:
@@ -2320,6 +2469,7 @@ def main(argv: list[str] | None = None) -> int:
         help="validate stories mode against this epic spec folder's stories.yaml "
         "(overrides [stories].source; skips the sprint-status gate)",
     )
+    machine.add_json_flag(validate_p, "check findings")
 
     mux_p = add(
         "mux",

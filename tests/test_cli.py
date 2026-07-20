@@ -5,7 +5,14 @@ import json
 
 import pytest
 import yaml
-from conftest import escalated_run, install_bmad_config, machine_json, write_sprint
+from conftest import (
+    escalated_run,
+    git,
+    install_bmad_config,
+    install_dev_base_skills,
+    machine_json,
+    write_sprint,
+)
 
 from bmad_loop import cli
 from bmad_loop import policy as policy_mod
@@ -2800,11 +2807,21 @@ def _patch_preflight(monkeypatch, backend):
     monkeypatch.setattr(ph_mod, "get_process_host", lambda: _FakeHost())
 
 
+def _preflight_notes_problems():
+    """The preflight's pre-#205 (notes, problems) shape, rebuilt from its findings —
+    these tests assert the *seam probing*, which the Finding refactor did not change."""
+    found = cli._platform_preflight()
+    return (
+        [f.message for f in found if f.severity != "problem"],
+        [f.message for f in found if f.severity == "problem"],
+    )
+
+
 def test_platform_preflight_reports_available_backend(monkeypatch):
     # An available backend reports through available()/version() — no sys.platform
     # branch — and the selected process host is named for visibility.
     _patch_preflight(monkeypatch, _FakeBackend(ok=True, version="tmux 3.4"))
-    notes, problems = cli._platform_preflight()
+    notes, problems = _preflight_notes_problems()
     assert not problems
     assert any("_FakeBackend" in n and "tmux 3.4" in n for n in notes)
     assert any("process host" in n and "_FakeHost" in n for n in notes)
@@ -2814,7 +2831,7 @@ def test_platform_preflight_flags_unavailable_backend(monkeypatch):
     # A backend whose transport binary is absent surfaces here as a problem, so a
     # new OS registers a backend rather than inlining a win32 block in validate.
     _patch_preflight(monkeypatch, _FakeBackend(ok=False))
-    notes, problems = cli._platform_preflight()
+    notes, problems = _preflight_notes_problems()
     assert any("unavailable" in p for p in problems)
 
 
@@ -2828,7 +2845,7 @@ def test_platform_preflight_reports_multiplexer_selection_error(monkeypatch):
         raise MultiplexerError("BMAD_LOOP_MUX_BACKEND='bogus' matches no registered backend")
 
     monkeypatch.setattr(mux_mod, "get_multiplexer", _boom)
-    notes, problems = cli._platform_preflight()  # must not raise
+    notes, problems = _preflight_notes_problems()  # must not raise
     assert any("bogus" in p for p in problems)
 
 
@@ -2844,7 +2861,7 @@ def test_platform_preflight_reports_process_host_selection_error(monkeypatch):
         raise ProcessHostError("BMAD_LOOP_PROCESS_HOST='bogus' matches no registered host")
 
     monkeypatch.setattr(ph_mod, "get_process_host", _boom)
-    notes, problems = cli._platform_preflight()  # must not raise
+    notes, problems = _preflight_notes_problems()  # must not raise
     assert any("bogus" in p for p in problems)
     assert any("_FakeBackend" in n for n in notes)  # the healthy seam still reported
 
@@ -3037,6 +3054,217 @@ def test_validate_stories_folder_known_selector_ok(project):
     assert cli._validate_stories_folder(project, STORIES_SPEC_FOLDER, selector="2") is None
 
 
+# ------------------------- #205: validate --json ------------------------------
+
+CLAUDE_ONLY_POLICY = '[adapter]\nname = "claude"\nmodel = "opus"\n'
+
+
+def _make_validate_pass(project, monkeypatch, capsys):
+    """Set a project up so every validate gate passes, and pin the two gates whose
+    outcome is a property of the *host* rather than of the project: whether the CLI
+    binary is on PATH and whether a multiplexer is installed. Without those pins the
+    rc-0 leg would pass or fail by machine, which is exactly the kind of green that
+    means nothing."""
+    install_bmad_config(project)
+    _write_policy(project.project, CLAUDE_ONLY_POLICY)
+    write_sprint(project, {"epic-1": "backlog", "1-1-a": "ready-for-dev"})
+    install_dev_base_skills(project.project, folder_id=True)
+    assert cli.main(["init", "--project", str(project.project)]) == 0  # registers the hooks
+    git(project.project, "add", "-A")  # every file above is a worktree change
+    git(project.project, "commit", "-q", "-m", "validate fixture")
+    monkeypatch.setattr(cli.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(
+        cli,
+        "_platform_preflight",
+        lambda: [cli.Finding("mux.backend", "ok", "multiplexer TmuxBackend available (tmux 3.4)")],
+    )
+    capsys.readouterr()  # drop `init`'s chatter — the next read must see only the document
+
+
+def test_validate_json_clean_project_is_a_pure_document_at_rc_0(project, capsys, monkeypatch):
+    """The happy path: one whole document on stdout, nothing else, ok true."""
+    _make_validate_pass(project, monkeypatch, capsys)
+
+    doc = machine_json(["validate", "--project", str(project.project), "--json"], capsys)
+    assert doc["schema_version"] == cli.VALIDATE_SCHEMA_VERSION == 1
+    assert doc["ok"] is True
+    assert doc["counts"]["problem"] == 0
+    assert doc["findings"], "a passing validate still reports what it checked"
+    assert {f["check"] for f in doc["findings"]} >= {"bmad-config", "policy", "git.worktree-clean"}
+
+
+def test_validate_json_failing_check_emits_whole_document_at_rc_1(project, capsys):
+    """#205's interesting case: rc 1 is the *verdict*, not a failure to produce a
+    document. stdout is still one complete document and stderr is still empty —
+    the `FAIL:` lines became findings, they did not move to the other stream."""
+    _write_policy(project.project, CLAUDE_ONLY_POLICY)  # no BMAD config -> a real problem
+
+    doc = machine_json(["validate", "--project", str(project.project), "--json"], capsys, rc=1)
+    assert doc["ok"] is False
+    assert doc["counts"]["problem"] >= 1
+    failed = [f for f in doc["findings"] if f["severity"] == "problem"]
+    assert "bmad-config" in {f["check"] for f in failed}
+
+
+def test_validate_json_counts_and_ok_agree_with_findings(project, capsys):
+    """`ok` mirrors the exit code exactly: problems clear it, warnings never do."""
+    install_bmad_config(project)
+    _write_policy(project.project, '[adapter]\nname = "opencode"\nmodel = "haiku"\n')
+    write_sprint(project, {"epic-1": "backlog"})
+
+    doc = machine_json(["validate", "--project", str(project.project), "--json"], capsys, rc=1)
+    findings = doc["findings"]
+    for severity in ("ok", "warning", "problem"):
+        assert doc["counts"][severity] == sum(1 for f in findings if f["severity"] == severity)
+    assert doc["ok"] == (doc["counts"]["problem"] == 0)
+    # this project warns (bare opencode model) *and* fails — the warning did not
+    # clear ok, and the warning is not counted among the problems
+    assert doc["counts"]["warning"] >= 1 and doc["ok"] is False
+
+
+def test_validate_json_warning_message_carries_no_severity_prefix(project, capsys):
+    """The severity lives in the `severity` field, never doubled into the message.
+
+    The text form prints `  ok:   warning: ...` because the note *stored* the
+    "warning: " prefix; a consumer must not have to strip it back off."""
+    install_bmad_config(project)
+    _write_policy(project.project, '[adapter]\nname = "opencode"\nmodel = "haiku"\n')
+    write_sprint(project, {"epic-1": "backlog"})
+
+    doc = machine_json(["validate", "--project", str(project.project), "--json"], capsys, rc=1)
+    warned = [f for f in doc["findings"] if f["severity"] == "warning"]
+    assert warned, "the bare opencode model warns"
+    assert any(f["check"] == "policy.model-qualified" for f in warned)
+    for finding in warned:
+        assert "warning:" not in finding["message"]
+        assert not finding["message"].startswith(" ")
+
+
+@pytest.mark.parametrize(
+    ("spec", "mode", "folder"),
+    [(None, "sprint", ""), (STORIES_SPEC_FOLDER, "stories", STORIES_SPEC_FOLDER)],
+    ids=["sprint", "stories"],
+)
+def test_validate_json_mode_and_spec_folder_reflect_the_flag(project, capsys, spec, mode, folder):
+    """`--spec` forces stories mode, and the document says which queue was gated.
+
+    spec_folder is "" — not null — in sprint mode, where it is inapplicable: the
+    same ""-for-inapplicable convention as _list_document's paused_stage."""
+    install_bmad_config(project)
+    _setup_stories_fixture(project, [_stories_entry("1")])
+    _write_policy(project.project, CLAUDE_ONLY_POLICY)  # sprint policy either way
+    write_sprint(project, {"epic-1": "backlog"})
+
+    argv = ["validate", "--project", str(project.project), "--json"]
+    if spec:
+        argv += ["--spec", spec]
+    doc = machine_json(argv, capsys, rc=1)
+    assert doc["mode"] == mode
+    assert doc["spec_folder"] == folder
+    gate = "queue.stories-manifest" if spec else "queue.sprint-status"
+    assert gate in {f["check"] for f in doc["findings"]}
+
+
+def test_validate_json_every_emitted_check_is_registered(project, capsys, monkeypatch):
+    """The `add` assert enforces this per call site; this proves it end-to-end over a
+    real run, so an id that only ever appears on an unexercised path still has to be
+    in the registry."""
+    from bmad_loop.checks import VALIDATE_CHECKS
+
+    _make_validate_pass(project, monkeypatch, capsys)
+    passing = machine_json(["validate", "--project", str(project.project), "--json"], capsys)
+    _write_policy(project.project, "[adapter]\nname = ")  # unparseable -> the failure paths
+    failing = machine_json(["validate", "--project", str(project.project), "--json"], capsys, rc=1)
+    emitted = {f["check"] for f in (*passing["findings"], *failing["findings"])}
+    assert emitted, "the run emitted findings"
+    assert emitted <= VALIDATE_CHECKS
+
+
+def test_validate_json_mux_detail_keeps_the_rows_the_text_flattens(mux_registry, capsys):
+    """The text line ("alpha*, beta (unavailable)") makes a consumer parse a trailing
+    `*` to learn which backend is selected. The detail keeps all six MuxBackendInfo
+    fields verbatim — and the text line itself is unchanged."""
+    import sys as _sys
+
+    mux_registry.register_multiplexer(
+        "alpha", lambda p: p == _sys.platform, lambda: _MuxStub(avail=True, version="alpha 1.2")
+    )
+    mux_registry.register_multiplexer("beta", lambda p: False, lambda: _MuxStub(avail=False))
+
+    found = cli._platform_preflight()
+    listing = next(f for f in found if f.check == "mux.backends-detected")
+    # unchanged text
+    assert "alpha*" in listing.message and "beta (unavailable)" in listing.message
+    rows = {r["name"]: r for r in listing.detail["backends"]}
+    assert set(rows) == {"alpha", "beta"}
+    assert set(rows["alpha"]) == {
+        "name",
+        "matches_platform",
+        "available",
+        "version",
+        "selected",
+        "reason",
+    }
+    assert rows["alpha"]["selected"] is True and rows["beta"]["selected"] is False
+    assert rows["alpha"]["version"] == "alpha 1.2" and rows["beta"]["version"] is None
+    assert rows["beta"]["matches_platform"] is False and rows["beta"]["available"] is False
+
+
+def test_platform_preflight_selection_detail_keeps_the_raw_reason(mux_registry, monkeypatch):
+    """mux.selection's message renders _mux_reason_label's prose; the detail keeps the
+    enum MuxBackendInfo.reason actually carries, which is the matchable value."""
+    mux_registry.register_multiplexer("alpha", lambda p: False, lambda: _MuxStub(avail=True))
+    monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "alpha")
+    mux_registry.get_multiplexer.cache_clear()
+
+    selection = next(f for f in cli._platform_preflight() if f.check == "mux.selection")
+    assert selection.detail == {"backend": "alpha", "reason": "env"}
+    assert "forced by BMAD_LOOP_MUX_BACKEND" in selection.message  # prose stays in the message
+
+
+def test_validate_without_a_json_attribute_still_renders_text(project, capsys):
+    """cmd_validate reads `getattr(args, "json", False)`, not `args.json`: it is called
+    directly with hand-built Namespaces that predate the flag (every validate test
+    above does), and an AttributeError there would be a crash, not a fallback."""
+    install_bmad_config(project)
+    _write_policy(project.project, CLAUDE_ONLY_POLICY)
+    args = argparse.Namespace(project=str(project.project), spec=None)  # no `json` attribute
+
+    cli.cmd_validate(args)  # must not raise
+    out = capsys.readouterr().out
+    assert "  ok: BMAD config OK:" in out  # the text form, not a document
+    assert not out.lstrip().startswith("{")
+
+
+def test_validation_report_renders_each_severity_verbatim(capsys):
+    """The exact bytes of all three severities.
+
+    The doubled space in the warning line is shipped output, not a typo: the
+    warning sites stored `"  warning: " + msg` into the list the `  ok: ` printer
+    walked. _validate_output lowercases and substring-matches, so tidying it would
+    pass every text test silently — this test is the thing that would fail."""
+    from bmad_loop.checks import ValidationReport
+
+    report = ValidationReport()
+    report.ok("git.worktree-clean", "git worktree clean")
+    report.warn("queue.sprint-status-unknown-keys", "unknown keys ignored: x, y")
+    report.fail("adapter.binary", "codex not found on PATH")
+    report.render()
+
+    out, err = capsys.readouterr()
+    assert out == "  ok: git worktree clean\n  ok:   warning: unknown keys ignored: x, y\n"
+    assert err == "FAIL: codex not found on PATH\n"
+
+
+def test_validation_report_rejects_an_unregistered_check_id():
+    """One printed line = exactly one Finding, and every Finding names a registered
+    gate. A new check site cannot ship without adding its id to VALIDATE_CHECKS."""
+    from bmad_loop.checks import ValidationReport
+
+    with pytest.raises(AssertionError, match="unregistered check id"):
+        ValidationReport().ok("git.worktee-clean", "typo'd id")  # codespell:ignore
+
+
 def test_dry_run_stories_shows_plan_halt_markers(project, capsys):
     """Item 10: dry-run mirrors the real dispatch's leg-1 markers for a pending
     spec_checkpoint story (`Halt after planning.` + BMAD_LOOP_PLAN_HALT)."""
@@ -3200,13 +3428,13 @@ def test_platform_preflight_lists_multiple_backends(mux_registry, monkeypatch):
         "alpha", lambda p: p == _sys.platform, lambda: _MuxStub(avail=True, version="alpha 1.2")
     )
     mux_registry.register_multiplexer("beta", lambda p: False, lambda: _MuxStub(avail=False))
-    notes, problems = cli._platform_preflight()
+    notes, problems = _preflight_notes_problems()
     assert any("mux backends:" in n and "alpha*" in n and "beta (unavailable)" in n for n in notes)
 
 
 def test_platform_preflight_single_backend_gets_no_listing(mux_registry):
     mux_registry.register_multiplexer("alpha", lambda p: True, lambda: _MuxStub(avail=True))
-    notes, problems = cli._platform_preflight()
+    notes, problems = _preflight_notes_problems()
     assert not any("mux backends:" in n for n in notes)
 
 
@@ -3214,5 +3442,5 @@ def test_platform_preflight_notes_forced_selection_provenance(mux_registry, monk
     mux_registry.register_multiplexer("alpha", lambda p: False, lambda: _MuxStub(avail=True))
     monkeypatch.setenv("BMAD_LOOP_MUX_BACKEND", "alpha")
     mux_registry.get_multiplexer.cache_clear()
-    notes, problems = cli._platform_preflight()
+    notes, problems = _preflight_notes_problems()
     assert any("forced by BMAD_LOOP_MUX_BACKEND" in n for n in notes)
