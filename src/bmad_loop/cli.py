@@ -11,7 +11,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from . import (
     __version__,
@@ -33,6 +32,28 @@ from . import (
 )
 from .adapters.base import CodingCLIAdapter
 from .checks import Finding, ValidationReport
+
+# The --json document builders live in documents.py (the library-level projection
+# layer a non-CLI frontend imports). The schema constants are re-exported rather
+# than used here — `cli.STATUS_SCHEMA_VERSION` and friends are the published names
+# consumers and tests already resolve — so each carries a noqa: without it ruff
+# F401 autofixes the re-export away and every `cli.*_SCHEMA_VERSION` reference
+# breaks. Keep the noqa when adding a command.
+from .documents import CLEAN_SCHEMA_VERSION  # noqa: F401 — re-export
+from .documents import CLEANUP_SCHEMA_VERSION  # noqa: F401 — re-export
+from .documents import DECISIONS_SCHEMA_VERSION  # noqa: F401 — re-export
+from .documents import LIST_SCHEMA_VERSION  # noqa: F401 — re-export
+from .documents import STATUS_SCHEMA_VERSION  # noqa: F401 — re-export
+from .documents import VALIDATE_SCHEMA_VERSION  # noqa: F401 — re-export
+from .documents import (
+    _clean_document,
+    _cleanup_document,
+    _decisions_document,
+    _list_document,
+    _run_token_totals,
+    _status_document,
+    _validate_document,
+)
 from .engine import Engine
 from .journal import Journal, load_state, save_state
 from .model import RunState
@@ -40,10 +61,7 @@ from .platform_util import MAX_SEGMENT
 from .process_host import ProcessHostError
 from .runs import RUNS_DIR
 from .stories_engine import StoriesEngine
-from .sweep import Decision, SweepEngine
-
-if TYPE_CHECKING:
-    from .tui.data import RunInfo
+from .sweep import SweepEngine
 
 POLICY_FILE = policy_mod.POLICY_FILE
 
@@ -312,57 +330,6 @@ def _platform_preflight() -> list[Finding]:
         found.append(Finding("host.process", "problem", f"process host preflight failed: {e}"))
 
     return found
-
-
-VALIDATE_SCHEMA_VERSION = 1
-
-
-def _validate_document(report: ValidationReport, stories_on: bool, spec_folder: str) -> dict:
-    """The `validate --json` document: the verdict plus every check that produced it.
-
-    Obeys the pure-document contract in machine.py (additive-only evolution;
-    anything breaking bumps VALIDATE_SCHEMA_VERSION). ``ok`` is true when no
-    finding has severity ``problem`` — warnings do not clear it — so it mirrors
-    the exit code exactly. This is the first ``--json`` command that emits a whole
-    document at rc 1: the nonzero code is the verdict being reported, not a
-    failure to produce one (see machine.py on parsing non-empty stdout whatever
-    the exit code).
-
-    Three things a consumer has to know:
-
-    - **``message`` is not contracted.** Several problems are a bare ``str(e)``
-      from the config, policy, profile and sprint-status exceptions, so their
-      wording moves with those modules. ``check`` is the only matchable identity;
-      match on it, and read ``message``/``detail`` for humans.
-    - **Absence is not a pass.** The gates are chained: if policy fails to load,
-      ``profiles`` is empty and the binary, hook and base-skill gates contribute
-      no finding at all. A check id missing from ``findings`` means "did not run",
-      never "passed" — check ``ok`` for the verdict, not the absence of an id.
-    - **``mux.backends-detected`` is gated on more than one registered backend**,
-      so a lone-tmux host carries no backend inventory. Same rule as above.
-
-    ``findings`` stays flat and in emission order rather than grouped by severity:
-    grouping would destroy the cross-severity ordering (the order the gates ran)
-    and turn "every non-ok finding" into a two-array concatenation.
-    """
-    return {
-        "schema_version": VALIDATE_SCHEMA_VERSION,
-        "ok": report.passed,
-        "mode": "stories" if stories_on else "sprint",
-        # "" rather than null in sprint mode, where a spec folder is inapplicable —
-        # the same convention as _list_document's paused_stage.
-        "spec_folder": spec_folder if stories_on else "",
-        "counts": report.counts(),
-        "findings": [
-            {
-                "check": f.check,
-                "severity": f.severity,
-                "message": f.message,
-                "detail": f.detail,
-            }
-            for f in report.findings
-        ],
-    }
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -1531,52 +1498,6 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     return _resume_paused_run(project, run_dir)
 
 
-DECISIONS_SCHEMA_VERSION = 1
-
-
-def _decisions_document(pending: list[Decision]) -> dict[str, object]:
-    """The `decisions --json` document: every pending decision, in DW order.
-
-    Obeys the pure-document contract in machine.py (additive-only evolution;
-    anything breaking bumps DECISIONS_SCHEMA_VERSION). A pure projection of
-    pending_missed_decisions(), and a lossless one — unlike the `--list` text,
-    which drops `context` outright and shows only key/label/effect of each
-    option, hiding the `intent`/`resolution`/`bundle_name` that decide what a
-    sweep actually builds or writes. A caller answering by policy needs those,
-    so the document carries the whole dataclass.
-
-    `recommended` is the derived form of the decision's `recommendation` key,
-    so a consumer never has to cross-reference two fields (the text encodes it
-    as a "(recommended)" suffix on a free-text line). Exactly one option
-    carries it when the recommendation names a real key. Nothing pending is a
-    valid empty document with exit 0, never an error.
-    """
-    return {
-        "schema_version": DECISIONS_SCHEMA_VERSION,
-        "decisions": [
-            {
-                "id": d.id,
-                "question": d.question,
-                "context": d.context,
-                "recommendation": d.recommendation,
-                "options": [
-                    {
-                        "key": opt.key,
-                        "label": opt.label,
-                        "effect": opt.effect,
-                        "intent": opt.intent,
-                        "resolution": opt.resolution,
-                        "bundle_name": opt.bundle_name,
-                        "recommended": opt.key == d.recommendation,
-                    }
-                    for opt in d.options
-                ],
-            }
-            for d in pending
-        ],
-    }
-
-
 def cmd_decisions(args: argparse.Namespace) -> int:
     """Answer deferred-work decisions earlier sweeps left unanswered (skipped by
     an unattended sweep, or an interactive one that was abandoned). Answers are
@@ -1624,86 +1545,6 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         print(f"  {decision.id}: {outcome}")
     print("\nrun `bmad-loop sweep` to act on any builds.")
     return 0
-
-
-STATUS_SCHEMA_VERSION = 1
-
-
-def _run_token_totals(state: RunState) -> tuple[int, int, float]:
-    """Run-level token totals as ``(raw, weighted, weight)``.
-
-    The weight is the run's persisted snapshot — never live policy — so the
-    figures match what the run actually enforced; the TUI and the run summary
-    agree (see Engine.summary). Weighted is the sum of per-task weighted
-    totals (sum-of-rounds), never a weighted_total of the summed counters:
-    two tasks of 101 cache reads at weight 0.5 weigh 50 + 50 = 100, not
-    round(202 * 0.5) = 101.
-    """
-    weight = state.cache_read_weight()
-    raw = sum(t.tokens.total for t in state.tasks.values())
-    weighted = sum(t.tokens.weighted_total(weight) for t in state.tasks.values())
-    return raw, weighted, weight
-
-
-def _status_document(state: RunState) -> dict[str, object]:
-    """The `status --json` document: the stable machine-readable contract.
-
-    Obeys the pure-document contract in machine.py (additive-only evolution;
-    anything breaking bumps STATUS_SCHEMA_VERSION), unlike the human-readable
-    status text, which is best-effort and free to change. Everything here is
-    derived from state.json alone — never from live policy or other project
-    files — so a consumer can reproduce the document, and the weight matches
-    what the run actually enforced (see _run_token_totals).
-    """
-    raw_total, weighted_total, weight = _run_token_totals(state)
-    if state.finished:
-        status = "finished"
-    elif state.paused:
-        status = "paused"
-    elif state.crashed:
-        status = "crashed"
-    elif state.stopped:
-        status = "stopped"
-    else:
-        status = "in-progress"
-    tasks = []
-    for key, task in state.tasks.items():
-        tokens = task.tokens.to_dict()
-        tokens["raw"] = task.tokens.total
-        tokens["weighted"] = task.tokens.weighted_total(weight)
-        tasks.append(
-            {
-                "story_key": key,
-                "epic": task.epic,
-                "phase": str(task.phase),
-                "attempt": task.attempt,
-                "review_cycle": task.review_cycle,
-                "tokens": tokens,
-                "commit_sha": task.commit_sha,
-                "defer_reason": task.defer_reason,
-            }
-        )
-    return {
-        "schema_version": STATUS_SCHEMA_VERSION,
-        "run_id": state.run_id,
-        "run_type": state.run_type,
-        "source": state.source,
-        "started_at": state.started_at,
-        "status": status,
-        "finished": state.finished,
-        "stopped": state.stopped,
-        "crashed": state.crashed,
-        "crash_error": state.crash_error,
-        "paused_stage": state.paused_stage,
-        "paused_reason": state.paused_reason,
-        "paused_story_key": state.paused_story_key,
-        "cache_read_weight": weight,
-        "tokens": {
-            "raw": raw_total,
-            "weighted": weighted_total,
-        },
-        "tasks": tasks,
-    }
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -1769,38 +1610,6 @@ def cmd_status(args: argparse.Namespace) -> int:
     except bmadconfig.BmadConfigError:
         pass
     return 0
-
-
-LIST_SCHEMA_VERSION = 1
-
-
-def _list_document(infos: list[RunInfo]) -> dict[str, object]:
-    """The `list --json` document: one entry per run, oldest first.
-
-    Obeys the pure-document contract in machine.py (additive-only evolution;
-    anything breaking bumps LIST_SCHEMA_VERSION). A pure projection of
-    discover_runs(): status is its liveness-aware vocabulary
-    (running|paused|finished|stopped|crashed|interrupted|unknown), and runs
-    whose state.json fails to parse are included (run_type "?", started_at "",
-    status "unknown") — enumeration scripts must see them. `ref` is
-    runs.short_ref(run_id), derived from the id — stable, not positional.
-    paused_stage is "" unless status is "paused". An empty runs dir is a valid
-    empty document with exit 0, never an error.
-    """
-    return {
-        "schema_version": LIST_SCHEMA_VERSION,
-        "runs": [
-            {
-                "ref": runs.short_ref(ri.run_id),
-                "run_id": ri.run_id,
-                "run_type": ri.run_type,
-                "started_at": ri.started_at,
-                "status": ri.status,
-                "paused_stage": ri.paused_stage,
-            }
-            for ri in infos
-        ],
-    }
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -1928,44 +1737,6 @@ def cmd_archive(args: argparse.Namespace) -> int:
     return 0
 
 
-CLEANUP_SCHEMA_VERSION = 1
-
-
-def _cleanup_document(
-    *,
-    dry_run: bool,
-    killed: list[str],
-    live: list[str],
-    unknown: set[str],
-    windows: list[str],
-) -> dict[str, object]:
-    """The `cleanup --json` document: the multiplexer artifacts this invocation
-    removed, or — under ``--dry-run`` — would remove.
-
-    Obeys the pure-document contract in machine.py (additive-only evolution;
-    anything breaking bumps CLEANUP_SCHEMA_VERSION). Plan and outcome share one
-    shape: the lists mean the same thing either way and `dry_run` alone says
-    whether it happened, so a caller can diff a preview against the real run.
-    `sessions.removed` holds run ids (the session name is `bmad-loop-<id>`),
-    `ctl_windows.removed` holds window names. `unverifiable_pid` is the subset
-    of `sessions.removed` whose engine liveness could not be proven — the text
-    mode's stderr warning, carried in the document so JSON mode leaves stderr
-    empty. It never blocks cleanup: pruning kills the tmux session, never the
-    engine pid. Nothing to clean up is a valid document of empty lists at
-    exit 0, never an error.
-    """
-    return {
-        "schema_version": CLEANUP_SCHEMA_VERSION,
-        "dry_run": dry_run,
-        "sessions": {
-            "removed": list(killed),
-            "live": list(live),
-            "unverifiable_pid": sorted(unknown),
-        },
-        "ctl_windows": {"removed": list(windows)},
-    }
-
-
 def cmd_cleanup(args: argparse.Namespace) -> int:
     from .tui import launch  # pure stdlib; no textual import
 
@@ -2026,68 +1797,6 @@ def _human_bytes(n: int) -> str:
             return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
         size /= 1024
     return f"{size:.1f}TB"
-
-
-CLEAN_SCHEMA_VERSION = 1
-
-
-def _clean_document(
-    *,
-    dry_run: bool,
-    retain: int,
-    cleanup_policy: policy_mod.CleanupPolicy,
-    freed_bytes: int,
-    worktrees: list[str],
-    trimmed: list[str],
-    archived: list[str],
-    deleted: list[str],
-    protected: list[str],
-    unverifiable_pid: list[str],
-) -> dict[str, object]:
-    """The `clean --json` document: the disk this invocation reclaimed, or —
-    under ``--dry-run`` — would reclaim.
-
-    Obeys the pure-document contract in machine.py (additive-only evolution;
-    anything breaking bumps CLEAN_SCHEMA_VERSION). Plan and outcome share one
-    shape: the lists mean the same thing either way and `dry_run` alone says
-    whether it happened, so a caller can diff a preview against the real run.
-
-    `freed_bytes` is a raw integer — the text mode's `~1.2MB` is a rendering of
-    this number, and formatting is the renderer's job. It is the same estimate
-    the text prints: measured before mutating (so it holds under --dry-run) and
-    approximate by construction, since it sums whole run dirs for archive/delete
-    but only the `worktrees/` tree for a trim.
-
-    Every list names items the text enumerates or counts: `worktrees` holds
-    absolute worktree paths, the rest hold run ids. `protected` is the runs left
-    untouched — `--keep`-listed or non-terminal — which the text reports only as
-    a count. `unverifiable_pid` is the subset of touched runs whose engine
-    liveness could not be proven; it is the text mode's stderr warning, carried
-    in the document so JSON mode leaves stderr empty, and it never blocks
-    reclamation.
-
-    `policy.retain` is the *effective* window — `--retain` when given, else
-    `[cleanup] run_retention`. The other three are the configured policy as
-    loaded. Note `--hard` overrides `archive_old` for this invocation only, so
-    it does not change the reported value; the outcome shows in `deleted`.
-    """
-    return {
-        "schema_version": CLEAN_SCHEMA_VERSION,
-        "dry_run": dry_run,
-        "policy": {
-            "retain": retain,
-            "retention_days": cleanup_policy.retention_days,
-            "archive_old": cleanup_policy.archive_old,
-            "trim_artifacts": cleanup_policy.trim_artifacts,
-        },
-        "freed_bytes": freed_bytes,
-        "worktrees": list(worktrees),
-        "trimmed": list(trimmed),
-        "archived": list(archived),
-        "deleted": list(deleted),
-        "protected": list(protected),
-        "unverifiable_pid": list(unverifiable_pid),
-    }
 
 
 def cmd_clean(args: argparse.Namespace) -> int:
