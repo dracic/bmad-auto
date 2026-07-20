@@ -1057,6 +1057,60 @@ def test_list_json_paused_run_carries_stage(project, capsys):
     assert entry["paused_stage"] == PAUSE_ESCALATION
 
 
+# ---------------------------------------- documents.py as an imported library
+
+# documents.py exists so a non-CLI frontend (the planned web backend) can import
+# the builders and serialize them itself, never shelling out to the CLI to parse
+# its stdout. These two pin that promise the only way that matters: drive one
+# fixture down BOTH paths and assert the same dict comes back. Without them the
+# library path has no coverage of its own — every other --json test reaches the
+# builders through `cli.main`, so a change that reached `status --json` but not
+# `status_document` (or the reverse) would land green and only break in a
+# consumer. Equality is asserted against the RAW builder return, not a
+# json round-trip: a consumer holds this dict before serializing it, so a tuple
+# where a list belongs is a real defect the round-trip would hide.
+
+
+def test_status_document_library_call_matches_the_cli(project, capsys):
+    from bmad_loop.documents import status_document
+    from bmad_loop.journal import load_state
+    from bmad_loop.model import Phase, StoryTask, TokenUsage
+
+    task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    task.tokens = TokenUsage(
+        input_tokens=100, output_tokens=50, cache_creation_tokens=10, cache_read_tokens=1000
+    )
+    run_dir = _make_run_with_tokens(project, {"1-1-login": task}, weight=0.5)
+
+    from_cli = _status_json(project, capsys)
+    from_library = status_document(load_state(run_dir))
+
+    assert from_library == from_cli
+
+
+def test_list_document_library_call_matches_the_cli(project, capsys):
+    # cmd_list sources its RunInfos the same lazy way — data.py has no textual
+    # imports, so this does not drag the TUI into a library consumer's process.
+    from bmad_loop.documents import list_document
+    from bmad_loop.tui.data import discover_runs
+
+    # Deterministic statuses only: running/interrupted probe pid liveness and
+    # would flake (see _make_list_run).
+    _make_list_run(project, "20260101-000000-aaaa", started_at="2026-01-01T00:00:00", finished=True)
+    _make_list_run(
+        project,
+        "20260102-000000-bbbb",
+        started_at="2026-01-02T00:00:00",
+        run_type="sweep",
+        stopped=True,
+    )
+
+    from_cli = _list_json(project, capsys)
+    from_library = list_document(discover_runs(project.project))
+
+    assert from_library == from_cli
+
+
 def test_attach_records_return_pane_inside_tmux(project, monkeypatch):
     from bmad_loop.tui import launch
 
@@ -3192,7 +3246,7 @@ def test_validate_json_mode_and_spec_folder_reflect_the_flag(project, capsys, sp
     """`--spec` forces stories mode, and the document says which queue was gated.
 
     spec_folder is "" — not null — in sprint mode, where it is inapplicable: the
-    same ""-for-inapplicable convention as _list_document's paused_stage."""
+    same ""-for-inapplicable convention as list_document's paused_stage."""
     install_bmad_config(project)
     _setup_stories_fixture(project, [_stories_entry("1")])
     _write_policy(project.project, CLAUDE_ONLY_POLICY)  # sprint policy either way

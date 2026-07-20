@@ -46,13 +46,13 @@ from .documents import LIST_SCHEMA_VERSION  # noqa: F401 — re-export
 from .documents import STATUS_SCHEMA_VERSION  # noqa: F401 — re-export
 from .documents import VALIDATE_SCHEMA_VERSION  # noqa: F401 — re-export
 from .documents import (
-    _clean_document,
-    _cleanup_document,
-    _decisions_document,
-    _list_document,
-    _run_token_totals,
-    _status_document,
-    _validate_document,
+    clean_document,
+    cleanup_document,
+    decisions_document,
+    list_document,
+    run_token_totals,
+    status_document,
+    validate_document,
 )
 from .engine import Engine
 from .journal import Journal, load_state, save_state
@@ -504,7 +504,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         # getattr, not args.json: cmd_validate is called directly by tests (and by
         # anything holding a hand-built Namespace) that predate the flag.
-        machine.emit(_validate_document(report, stories_on, spec_folder))
+        machine.emit(validate_document(report, stories_on, spec_folder))
     else:
         report.render()
     return 0 if report.passed else 1
@@ -1521,7 +1521,7 @@ def cmd_decisions(args: argparse.Namespace) -> int:
         # document, not the text line), and regardless of --list: --json *is*
         # the listing. It cannot fall through to the prompter, which reads stdin
         # and prints per-answer progress — neither survives a pure document.
-        machine.emit(_decisions_document(pending))
+        machine.emit(decisions_document(pending))
         return 0
     if not pending:
         print("no unanswered decisions from past sweeps")
@@ -1568,7 +1568,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 1
     state = load_state(run_dir)
     if args.json:
-        machine.emit(_status_document(state))
+        machine.emit(status_document(state))
         return 0
     kind = f" [{state.run_type}]" if state.run_type != "story" else ""
     print(f"run {state.run_id}{kind}  started {state.started_at}")
@@ -1578,7 +1578,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"status: PAUSED ({state.paused_stage}) — {state.paused_reason}")
     else:
         print("status: in progress (or interrupted)")
-    raw_total, weighted_total, weight = _run_token_totals(state)
+    raw_total, weighted_total, weight = run_token_totals(state)
     if raw_total:
         print(
             f"tokens: {weighted_total:,} weighted "
@@ -1624,7 +1624,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     project = _project(args)
     infos = discover_runs(project)  # oldest first
     if args.json:
-        machine.emit(_list_document(infos))
+        machine.emit(list_document(infos))
         return 0
     if not infos:
         print("no runs found")
@@ -1762,7 +1762,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     )
     if args.json:
         machine.emit(
-            _cleanup_document(
+            cleanup_document(
                 dry_run=args.dry_run, killed=killed, live=live, unknown=unknown, windows=windows
             )
         )
@@ -1881,7 +1881,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
 
     if args.json:
         machine.emit(
-            _clean_document(
+            clean_document(
                 dry_run=dry,
                 retain=retain,
                 cleanup_policy=pol.cleanup,
