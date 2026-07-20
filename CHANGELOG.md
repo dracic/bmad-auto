@@ -290,6 +290,13 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
 
 ### Fixed
 
+- **A dry run the TUI cannot spawn opens a modal instead of taking the app down (#210).** The
+  `run --dry-run` / `sweep --dry-run` workers called `run_captured` unguarded, and
+  `@work(thread=True)` defaults to `exit_on_error=True` — so an `OSError` from the spawn itself
+  (a venv deleted out from under `sys.executable`, `EAGAIN` off a loaded process table) escaped
+  the worker and killed the whole app rather than the one modal. Both workers and the validate
+  degrade now share a guard that reports the reason in the modal body.
+
 - **`--json` output survives a console that cannot encode it (#200).** A JSON document is not
   necessarily ASCII: `diagnostics.render_json` serializes with `ensure_ascii=False` so its leak
   guard can scan values unescaped (#195, below), which lets a _non_-sensitive non-ASCII field —

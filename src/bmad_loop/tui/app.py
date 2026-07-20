@@ -980,6 +980,12 @@ class BmadLoopApp(App[None]):
         reader a wall of `{"schema_version": ...}` instead. One sub-second
         subprocess on a path that should never fire buys a degrade that is
         byte-for-byte the pre-#210 behavior.
+
+        That re-run goes through _run_captured_guarded rather than calling
+        run_captured directly: the except above does not cover it, and the two
+        legs spawn the same subprocess, so a failure to spawn at all is not a
+        JSON-leg failure a text re-run recovers from — it is the same failure
+        twice, the second one escaping into exit_on_error.
         """
         tail = ["validate", "--project", str(self.project)]
         try:
@@ -988,15 +994,33 @@ class BmadLoopApp(App[None]):
         except Exception:  # noqa: BLE001 — a JSON-leg failure degrades, never kills the app
             doc = None
         if doc is None:
-            rc, merged = launch.run_captured(tail)
+            rc, merged = self._run_captured_guarded(tail)
             screen = TextOutputModal("validate", rc, merged)
         else:
             screen = ValidateFindingsModal(doc)
         self.call_from_thread(self.push_screen, screen)
 
+    def _run_captured_guarded(self, tail: list[str]) -> tuple[int, str]:
+        """run_captured, with a failure to spawn rendered as output, not raised.
+
+        Every caller is a @work(thread=True) body, and that decorator defaults to
+        exit_on_error=True: an OSError out of subprocess.run — a deleted venv
+        under sys.executable, EAGAIN off a loaded process table — would escape
+        the worker and take the whole app down rather than this one modal.
+
+        The reason goes in the body rather than a notify() because the modal is
+        already opening; a blank panel over an `exit 1` header would say only
+        that something went wrong. The header carries which command it was, so
+        the body does not repeat it.
+        """
+        try:
+            return launch.run_captured(tail)
+        except Exception as exc:  # noqa: BLE001 — a failed spawn is a modal, not a crash
+            return 1, f"could not run: {exc}"
+
     @work(thread=True, exclusive=True, group="captured")
     def _show_captured(self, title: str, tail: list[str]) -> None:
-        rc, out = launch.run_captured(tail)
+        rc, out = self._run_captured_guarded(tail)
         self.call_from_thread(self.push_screen, TextOutputModal(title, rc, out))
 
     def action_settings(self) -> None:

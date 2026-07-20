@@ -1457,6 +1457,32 @@ async def test_dry_run_shows_captured_output(project, monkeypatch):
         await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
 
 
+async def test_dry_run_worker_survives_a_raising_subprocess(project, monkeypatch):
+    """The twin of test_validate_worker_survives_a_raising_subprocess: this worker
+    is a @work(thread=True) body too, so a subprocess that cannot be spawned takes
+    the whole app down unless run_captured is guarded. Both go through
+    _run_captured_guarded, and this is the leg that proves the shared guard."""
+    monkeypatch.setattr(launch, "mux_available", lambda: True)
+    monkeypatch.setattr(
+        launch,
+        "run_captured_streams",
+        lambda tail: (_ for _ in ()).throw(OSError("no such file")),
+    )
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        await pilot.press("r")
+        await until(pilot, lambda: isinstance(app.screen, StartRunModal))
+        await ready(pilot, "#ok")
+        app.screen.query_one("#dry-run", Checkbox).value = True
+        await pilot.click("#ok")
+        await until(pilot, lambda: isinstance(app.screen, TextOutputModal))
+        await ready(pilot, "#output Static")
+        body = render(app.screen.query_one("#output Static").content)
+        assert "no such file" in body, "the modal carries the reason, not a blank panel"
+        assert app.is_running, "the app survived a dry run it could not spawn"
+
+
 # ---------------------------------------------------------- #210: validate wiring
 #
 # `v` renders the --json document; anything undrawable degrades to the text modal.
@@ -1604,19 +1630,28 @@ async def test_validate_worker_survives_a_raising_subprocess(project, monkeypatc
     """@work(thread=True) defaults to exit_on_error=True, so anything escaping the
     worker body takes the whole app down rather than this one modal. The guard is
     an except, not a set of condition checks — the raise here is not a shape the
-    checks could have caught."""
+    checks could have caught.
+
+    Only run_captured_streams is stubbed, on purpose: run_captured *calls* it, so
+    a spawn failure is not a JSON-leg failure that the text re-run recovers from
+    — it is the same failure twice. Stubbing the two legs to opposite outcomes
+    would model a split production cannot produce, and would leave the degrade's
+    own raise escaping the worker unnoticed. It raises in place of the spawn, so
+    no real subprocess runs either."""
     monkeypatch.setattr(
         launch,
         "run_captured_streams",
         lambda tail: (_ for _ in ()).throw(OSError("no such file")),
     )
-    monkeypatch.setattr(launch, "run_captured", lambda tail: (1, "FAIL: no policy\n"))
     app = BmadLoopApp(project.project)
     async with app.run_test() as pilot:
         await until(pilot, lambda: isinstance(app.screen, DashboardScreen))
         await pilot.press("v")
         await until(pilot, lambda: isinstance(app.screen, TextOutputModal))
-        assert app.is_running, "the app survived; only the JSON leg failed"
+        await ready(pilot, "#output Static")
+        body = render(app.screen.query_one("#output Static").content)
+        assert "no such file" in body, "the modal carries the reason, not a blank panel"
+        assert app.is_running, "the app survived a failure BOTH legs hit"
 
 
 async def test_resume_confirm_launches(project, monkeypatch):
