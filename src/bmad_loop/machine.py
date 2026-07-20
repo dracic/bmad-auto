@@ -52,12 +52,19 @@ Two ways in, by what the caller already holds:
 
 :func:`write_document` is the ``--out`` sibling of :func:`emit_document`, taking
 the same already-serialized string to a file instead of stdout.
+
+The serializer flags differ by family on purpose and are not to be unified: the
+renderers behind :func:`emit_document` sort their keys (a diff-stable dump is
+worth more than field order there) while :func:`emit`'s dicts are built in the
+order they are meant to be read, and ``diagnostics.render_json`` alone passes
+``ensure_ascii=False`` because its leak guard has to scan the values unescaped.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 
@@ -93,8 +100,25 @@ def emit_document(rendered: str) -> None:
     Raises :class:`ValueError` on a malformed document — a bug in the caller's
     renderer, and far better surfaced as a crash with empty stdout (which the
     contract permits) than as a half-parsable stream a consumer has to diagnose.
+
+    stdout is switched to UTF-8 first, because a document is not necessarily
+    ASCII — ``diagnostics.render_json`` dumps with ``ensure_ascii=False`` so its
+    leak guard can scan the values unescaped, which lets a non-sensitive
+    non-ASCII field (a localized ``platform.release()``, say) through to here
+    verbatim. Encoding it for a legacy non-UTF-8 console then raised
+    :class:`UnicodeEncodeError` before a byte was written (#200). Escaping the
+    output instead would have been the smaller change and the wrong one: it
+    breaks the invariant this function exists for, since the guard verified the
+    unescaped bytes. So the stream is made able to carry the document rather
+    than the document cut down to fit the stream.
     """
-    print(_validated(rendered))
+    document = _validated(rendered)
+    # Guarded: a substituted stdout (pytest capture, an exotic stream) may not be
+    # a TextIOWrapper at all. Falling through leaves the pre-#200 behaviour, which
+    # is a crash with stdout still empty — permitted by the contract above.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    print(document)
 
 
 def write_document(path: Path, rendered: str) -> None:
