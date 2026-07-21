@@ -248,6 +248,64 @@ def test_kill_session_no_binary_no_spawn(rec, monkeypatch):
     assert rec.calls == []
 
 
+# ------------------------------------------------------- return target (#221)
+# psmux runs one server per session, so the parked-window return target must be
+# session-qualified: a bare %N replayed from the control session is at best
+# unresolvable, at worst collides with a real control-session pane
+# (psmux/psmux#483). The seam default (bare pane id) stays correct for tmux —
+# whose switch-client rejects the qualified form — so the composition lives in
+# this backend's override.
+
+
+def _probe_fake(monkeypatch, answers: dict[str, tuple[int, str]]):
+    """Script the display-message probes: fmt -> (returncode, stdout)."""
+
+    def fake(argv, **kwargs):
+        rc, out = answers[argv[-1]]
+        return subprocess.CompletedProcess(argv, rc, stdout=out, stderr="")
+
+    monkeypatch.setenv("TMUX", "/tmp/psmux-1000/default,123,0")  # inside psmux
+    monkeypatch.setattr(tmux_base.subprocess, "run", fake)
+
+
+def test_return_target_session_qualified(monkeypatch):
+    _probe_fake(monkeypatch, {"#{pane_id}": (0, "%9\n"), "#{session_name}": (0, "main\n")})
+    assert PsmuxMultiplexer().current_return_target() == "=main:%9"
+
+
+def test_return_target_none_outside_mux(monkeypatch):
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr(tmux_base.subprocess, "run", _RecordRun())
+    assert PsmuxMultiplexer().current_return_target() is None
+
+
+def test_return_target_none_on_empty_pane(monkeypatch):
+    _probe_fake(monkeypatch, {"#{pane_id}": (0, "\n"), "#{session_name}": (0, "main\n")})
+    assert PsmuxMultiplexer().current_return_target() is None
+
+
+def test_return_target_bare_pane_when_session_probe_fails(monkeypatch):
+    # A resolvable own pane means we ARE inside the multiplexer; a failed
+    # session-name probe degrades to the bare pane id, never to None (which
+    # callers would record as "detach" and strand the client).
+    _probe_fake(monkeypatch, {"#{pane_id}": (0, "%9\n"), "#{session_name}": (1, "")})
+    assert PsmuxMultiplexer().current_return_target() == "%9"
+
+
+def test_return_target_bare_pane_on_empty_session_name(monkeypatch):
+    # rc-0 empty stdout from the session probe must degrade the same way a
+    # failed probe does — a "=:%9" target would misparse at replay.
+    _probe_fake(monkeypatch, {"#{pane_id}": (0, "%9\n"), "#{session_name}": (0, "\n")})
+    assert PsmuxMultiplexer().current_return_target() == "%9"
+
+
+def test_return_target_bare_pane_on_unqualifiable_session_name(monkeypatch):
+    # A session name the `=session:%N` grammar cannot carry (a `:` would split
+    # at the wrong colon on replay) degrades to the bare id too.
+    _probe_fake(monkeypatch, {"#{pane_id}": (0, "%9\n"), "#{session_name}": (0, "a:b\n")})
+    assert PsmuxMultiplexer().current_return_target() == "%9"
+
+
 # ------------------------------------------------------------- parked window
 
 

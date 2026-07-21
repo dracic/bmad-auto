@@ -171,6 +171,31 @@ class PsmuxMultiplexer(BaseTmuxBackend):
         except (subprocess.SubprocessError, OSError):
             pass
 
+    def current_return_target(self) -> str | None:
+        # psmux runs one server per session, so a bare pane id recorded on a
+        # control-session window is session-local at replay: at best
+        # unresolvable, at worst colliding with a real control-session pane and
+        # landing the client on the wrong one with exit 0 (psmux/psmux#483).
+        # Qualify with the session: psmux's parse_target accepts a pane id in
+        # the window slot of `=session:%N` and (on releases carrying the #483
+        # fix) forwards it to the owning server, where the id resolves in
+        # exactly the right per-server id space. tmux must NOT receive this
+        # form — its window resolver has no pane-id handling, so the qualified
+        # target errors and the return degrades to `switch-client -l` — which
+        # is why composition is backend-owned rather than seam-uniform.
+        pane = self.current_pane_id()
+        if not pane:
+            return None
+        session = self.current_session()
+        # Degrade to the bare id (the base default, pre-#483 hazard and all)
+        # rather than None when the session probe fails, answers empty, or
+        # answers a name the `=session:%N` grammar cannot carry: a resolvable
+        # own pane means we ARE inside the multiplexer, so recording "detach"
+        # would strand the client.
+        if not session or ":" in session:
+            return pane
+        return self.target(session, pane)
+
     def pipe_pane(self, window_id: str, log_file: Path) -> None:
         # The base's POSIX `cat >>` sink assumes a POSIX host shell, and psmux
         # strips every dash-flag token from the piped command before spawning it

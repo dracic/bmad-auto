@@ -88,8 +88,13 @@ seams of a full OS port are in
   `send_text`.
 - **Client / attach** — `attach_target_argv` (argv that reaches a target, nesting-
   aware), `current_pane_id` / `current_window_id` / `current_session`,
-  `detach_client`, `switch_client` (with an optional last-client fallback),
-  `available` (is this backend usable on the current host).
+  `current_return_target` (the value an interactive attach records for the
+  parked-window return hop, replayed opaquely by `switch_client` and the parked
+  trailer; concrete default = the native pane id, so most backends inherit it —
+  override only when your ids do not resolve from another session's context,
+  as psmux does to emit `=session:%N`), `detach_client`, `switch_client` (with
+  an optional last-client fallback), `available` (is this backend usable on
+  the current host).
 
 **Window targets.** The target-taking methods (`kill_window`, `select_window`,
 the window-option trio, `attach_target_argv`, `switch_client`) receive one of two
@@ -97,8 +102,11 @@ families: the **seam-canonical target token** `=session[:window]` — formatted 
 the concrete `TerminalMultiplexer.target(session, window=None)`, decoded by the
 module-level `parse_target()` — or the backend's own **native id** (whatever your
 `new_window` returned). Core never hand-assembles the grammar; it calls
-`target()`. tmux consumes the token natively (it coincides with tmux exact-match
-syntax), so `BaseTmuxBackend` passes it straight through. A native-id backend
+`target()`. (The parked-window return target is the one value composed by the
+backend itself — `current_return_target`, above — precisely so this grammar
+never has to carry a pane id.) tmux consumes the token natively (it coincides
+with tmux exact-match syntax), so `BaseTmuxBackend` passes it straight
+through. A native-id backend
 calls `parse_target()` first — `None` means "already a native id, use as-is",
 otherwise resolve `(session, window)` yourself; the herdr adapter's
 `_parse_target`

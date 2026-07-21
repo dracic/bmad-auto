@@ -406,16 +406,17 @@ class BmadLoopApp(App[None]):
         ok, argv = self._mux_guarded(lambda: runs.attach_target_argv(target))
         if not ok:
             return
-        # Backend-honest inside-the-multiplexer probe (current_pane_id() is None
-        # outside): inside, attach_target_argv returned the fire-and-forget
-        # switch/focus form, so no suspend is needed.
-        pane = launch.current_pane_id()
-        if pane is not None:
-            # Record our own pane on the ctl window so its trailing shell
-            # switches the client back here when it exits, instead of stranding
-            # the user in the control session.
+        # Backend-honest inside-the-multiplexer probe (current_return_target()
+        # is None outside): inside, attach_target_argv returned the
+        # fire-and-forget switch/focus form, so no suspend is needed.
+        ret = launch.current_return_target()
+        if ret is not None:
+            # Record our own pane target (session-qualified when resolvable)
+            # on the ctl window so its trailing shell switches the client back
+            # here when it exits, instead of stranding the user in the control
+            # session.
             if return_window is not None:
-                launch.set_return_pane(return_window, pane)
+                launch.set_return_pane(return_window, ret)
             subprocess.call(argv)
             return
         # Outside tmux we attach a throwaway client (under suspend). The ctl

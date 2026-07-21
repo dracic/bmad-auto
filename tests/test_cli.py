@@ -1217,14 +1217,14 @@ def test_attach_records_return_pane_inside_tmux(project, monkeypatch):
         ),
     )
     monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1,0")
-    monkeypatch.setattr(launch, "current_pane_id", lambda: "%3")
+    monkeypatch.setattr(launch, "current_return_target", lambda: "=main:%3")
     recorded: list = []
     monkeypatch.setattr(launch, "set_return_pane", lambda w, p: recorded.append((w, p)))
     called: list = []
     monkeypatch.setattr(cli.subprocess, "call", lambda argv: called.append(argv) or 0)
 
     assert cli.main(["attach", "--project", str(project.project), "20260101-000000-aaaa"]) == 0
-    assert recorded == [("=bmad-loop-ctl:sweep-RID", "%3")]
+    assert recorded == [("=bmad-loop-ctl:sweep-RID", "=main:%3")]
     assert called == [["tmux", "switch-client", "-t", "=bmad-loop-ctl"]]
 
 

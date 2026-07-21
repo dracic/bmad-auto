@@ -75,28 +75,34 @@ def select_ctl_window_id(window_id: str) -> None:
 # Per-window tmux user option recording what an interactive attach should do
 # with the client once the window's command exits (consumed by the multiplexer's
 # parked-window return trailer; see start_detached and the tmux backend). Set by
-# set_return_pane at attach time. Value is either a pane
-# id (%N) to switch the client to — used when the TUI runs inside tmux and
-# switched its own client over — or RETURN_DETACH, used when the TUI runs
-# outside tmux and a throwaway client was attached that must detach so the
+# set_return_pane at attach time. Value is either a backend-composed pane
+# target — replayed opaquely, so each backend records the form its own
+# switch-client resolves: a bare pane id (%N) on tmux, =session:%N on psmux,
+# whose one-server-per-session model cannot resolve a bare id from the control
+# session (psmux/psmux#483) — used when the TUI runs inside the multiplexer and
+# switched its own client over; or RETURN_DETACH, used when the TUI runs
+# outside and a throwaway client was attached that must detach so the
 # suspended TUI resumes.
 RETURN_OPTION = "@bmad_return_pane"
-RETURN_DETACH = "detach"  # pane ids are %N, so this never collides with one
+RETURN_DETACH = "detach"  # pane targets are %N / =sess:%N, never "detach"
 
 
-def current_pane_id() -> str | None:
-    """Stable tmux id (%N) of the pane this process runs in, or None when not
-    inside tmux / tmux is unavailable. For the TUI process this is its own pane
-    — the place an attach should return the client to."""
-    return get_multiplexer().current_pane_id()
+def current_return_target() -> str | None:
+    """Backend-composed target of the pane this process runs in — the place an
+    attach should return the client to — or None when not inside the
+    multiplexer / it is unavailable. The value is opaque to callers: record it
+    with set_return_pane, replay it via switch_client / the parked trailer.
+    See TerminalMultiplexer.current_return_target for the composition
+    contract."""
+    return get_multiplexer().current_return_target()
 
 
-def set_return_pane(window_target: str, pane_id: str) -> None:
-    """Record `pane_id` as the return target on a control-session window, so its
-    trailing shell switches the client back there when the window's command
-    exits. `window_target` is any tmux window spec (e.g. `=bmad-loop-ctl:run-…`
-    or a stable `@N` id)."""
-    get_multiplexer().set_window_option(window_target, RETURN_OPTION, pane_id)
+def set_return_pane(window_target: str, target: str) -> None:
+    """Record `target` (a current_return_target value or RETURN_DETACH) as the
+    return move on a control-session window, so its trailing shell sends the
+    client back there when the window's command exits. `window_target` is any
+    tmux window spec (e.g. `=bmad-loop-ctl:run-…` or a stable `@N` id)."""
+    get_multiplexer().set_window_option(window_target, RETURN_OPTION, target)
 
 
 def current_session() -> str | None:
@@ -125,7 +131,8 @@ def return_attached_client() -> bool:
     command keeps running in the background, instead of after it exits.
 
     Reads the RETURN_OPTION recorded on the current window by set_return_pane:
-      - a pane id (%N): switch that client back there (`-l` fallback if it's gone);
+      - a pane target (backend-composed: bare %N on tmux, =session:%N on
+        psmux): switch that client back there (`-l` fallback if it's gone);
       - RETURN_DETACH: detach the client so a blocking `tmux attach` returns;
       - unset/empty: nobody attached with a return target — do nothing.
     The option is then cleared so the post-exit return trailer doesn't fire a
