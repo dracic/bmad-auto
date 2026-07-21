@@ -4691,6 +4691,48 @@ def test_journal_records_decisions(project):
         assert expected in kinds
 
 
+def test_sessions_stamp_resolved_adapter_identity(project):
+    """#153 phase 1: every session's session-start journal entry and persisted
+    SessionRecord carry the resolved adapter profile + model. A review-stage name
+    override switches the profile and (per AdapterPolicy.resolved) resets the
+    model to the CLI default "" because model is client-specific."""
+    write_sprint(project, {"1-1-a": "ready-for-dev"})
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),
+        adapter=AdapterPolicy(
+            name="claude",
+            model="opus",
+            review=StageAdapterPolicy(name="gemini"),
+        ),
+    )
+    engine, _ = make_engine(
+        project,
+        [dev_effect(project, "1-1-a"), review_effect(project, "1-1-a", clean=True)],
+        policy=policy,
+    )
+    engine.run()
+
+    starts = {e["role"]: e for e in engine.journal.entries() if e["kind"] == "session-start"}
+    assert set(starts) == {"dev", "review"}
+    expected_dev = policy.adapter.resolved("dev")
+    expected_review = policy.adapter.resolved("review")
+    # base model rides the dev stage; the review name switch resets it to ""
+    assert (expected_dev.name, expected_dev.model) == ("claude", "opus")
+    assert (expected_review.name, expected_review.model) == ("gemini", "")
+    for role, expected in (("dev", expected_dev), ("review", expected_review)):
+        entry = starts[role]
+        assert entry["adapter"] == expected.name
+        assert entry["model"] == expected.model
+        assert entry["story_key"] == "1-1-a"
+
+    saved = load_state(engine.run_dir)
+    records = {r.role: r for r in saved.tasks["1-1-a"].sessions}
+    assert (records["dev"].adapter, records["dev"].model) == ("claude", "opus")
+    assert (records["review"].adapter, records["review"].model) == ("gemini", "")
+
+
 def test_journal_stamps_log_position(tmp_path):
     journal = Journal(tmp_path)
     journal.append("run-start")

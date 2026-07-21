@@ -81,6 +81,30 @@ def test_session_record_result_json_defaults_none_for_legacy_state():
     assert SessionRecord.from_dict(doc).result_json is None
 
 
+def test_session_record_adapter_identity_round_trips():
+    record = SessionRecord(
+        task_id="1-1-a-dev-1",
+        role="dev",
+        status="completed",
+        adapter="claude",
+        model="opus",
+    )
+    back = SessionRecord.from_dict(record.to_dict())
+    assert back.adapter == "claude"
+    assert back.model == "opus"
+
+
+def test_session_record_adapter_identity_defaults_for_legacy_state():
+    # a state.json from before #153 has no adapter/model keys — it must load with
+    # "" defaults (adapter "" flags a record that predates identity stamping)
+    doc = SessionRecord(task_id="1-1-a-dev-1", role="dev", status="completed").to_dict()
+    del doc["adapter"]
+    del doc["model"]
+    back = SessionRecord.from_dict(doc)
+    assert back.adapter == ""
+    assert back.model == ""
+
+
 def test_followup_review_recommended_round_trips():
     task = StoryTask(story_key="1-1-a", epic=1, followup_review_recommended=True)
     assert StoryTask.from_dict(task.to_dict()).followup_review_recommended is True

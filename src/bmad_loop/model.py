@@ -94,6 +94,11 @@ class SessionRecord:
     task_id: str
     role: str  # "dev" | "review"
     status: str  # SessionResult.status
+    # resolved adapter identity for the session (#153 phase 1). adapter "" means
+    # the record predates identity stamping; adapter set with model "" means the
+    # session ran the CLI profile's default model (no explicit model override).
+    adapter: str = ""
+    model: str = ""
     session_id: str | None = None
     transcript_path: str | None = None
     usage: TokenUsage | None = None
@@ -106,6 +111,8 @@ class SessionRecord:
             "task_id": self.task_id,
             "role": self.role,
             "status": self.status,
+            "adapter": self.adapter,
+            "model": self.model,
             "session_id": self.session_id,
             "transcript_path": self.transcript_path,
             "usage": self.usage.to_dict() if self.usage else None,
@@ -119,6 +126,8 @@ class SessionRecord:
             task_id=d["task_id"],
             role=d["role"],
             status=d["status"],
+            adapter=str(d.get("adapter", "")),
+            model=str(d.get("model", "")),
             session_id=d.get("session_id"),
             transcript_path=d.get("transcript_path"),
             usage=TokenUsage.from_dict(usage) if usage else None,

@@ -24,6 +24,7 @@ from bmad_loop.adapters.mock import MockAdapter
 from bmad_loop.journal import Journal, load_state, save_state
 from bmad_loop.model import Phase, RunState, StoryTask, TokenUsage
 from bmad_loop.policy import (
+    AdapterPolicy,
     DevPolicy,
     GatesPolicy,
     LimitsPolicy,
@@ -31,6 +32,7 @@ from bmad_loop.policy import (
     Policy,
     ReviewPolicy,
     ScmPolicy,
+    StageAdapterPolicy,
     SweepPolicy,
 )
 from bmad_loop.sweep import DecisionPrompter, SweepEngine, validate_migration, validate_triage
@@ -827,6 +829,46 @@ def test_unattended_skips_decisions(project):
     assert entries["DW-1"].open  # untouched, waits for an interactive sweep
     assert entries["DW-2"].status.startswith("done")
     assert not (engine.run_dir / "decisions.json").is_file()
+
+
+def test_triage_session_stamps_resolved_adapter_identity(project):
+    """#153 phase 1: the sweep triage session's session-start entry and persisted
+    SessionRecord carry the resolved triage adapter profile + model. A triage-stage
+    name override switches the profile and resets the model to the CLI default ""."""
+    write_ledger(project, {"DW-1": "open"})
+    plan = triage_result(
+        ["DW-1"],
+        already_resolved=[{"id": "DW-1", "evidence": "already guarded at src.txt:1"}],
+    )
+    policy = Policy(
+        gates=GatesPolicy(mode="none"),
+        notify=QUIET,
+        scm=ScmPolicy(rollback_on_failure=True),
+        adapter=AdapterPolicy(
+            name="claude",
+            model="opus",
+            triage=StageAdapterPolicy(name="gemini"),
+        ),
+    )
+    engine, adapter = make_sweep(project, [triage_effect(plan)], policy=policy)
+    summary = engine.run()
+    assert not summary.paused
+    assert [s.role for s in adapter.sessions] == ["triage"]
+
+    expected = policy.adapter.resolved("triage")
+    assert (expected.name, expected.model) == ("gemini", "")  # client switch resets model
+
+    entries = [json.loads(line) for line in journal_text(engine).splitlines()]
+    starts = [e for e in entries if e["kind"] == "session-start" and e.get("role") == "triage"]
+    assert len(starts) == 1
+    assert starts[0]["adapter"] == "gemini"
+    assert starts[0]["model"] == ""
+    assert starts[0]["story_key"] == "sweep-triage"
+
+    saved = load_state(engine.run_dir)
+    rec = saved.tasks["sweep-triage"].sessions[-1]
+    assert rec.role == "triage"
+    assert (rec.adapter, rec.model) == ("gemini", "")
 
 
 def test_bundle_review_disabled_skips_review_session(project):
