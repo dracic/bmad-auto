@@ -24,6 +24,7 @@ from textual.widgets import DataTable, RichLog, Static, Tree
 from textual.widgets.option_list import Option
 from textual.widgets.tree import TreeNode
 
+from .. import policy
 from ..model import (
     PAUSE_EPIC_BOUNDARY,
     PAUSE_ESCALATION,
@@ -100,6 +101,14 @@ def stopping_tag() -> Text:
     return Text("⏹ stop", style=STATUS_STYLES[data.STOPPED])
 
 
+def agent_label(name: str, model: str) -> str:
+    """Compact ``name·model`` label for a resolved adapter (e.g. "claude·opus"),
+    or just the name when no explicit model is recorded (``model == ""`` means the
+    session ran the CLI profile's default). Shared by the header's agent line and
+    the tasks table's agent cell so the two never drift."""
+    return f"{name}·{model}" if model else name
+
+
 class RunHeader(Static):
     """One-glance summary of the selected run, or the empty-state hint."""
 
@@ -132,6 +141,7 @@ class RunHeader(Static):
         state: RunState | None,
         decision: tuple[str, str] | None = None,
         stopping: bool = False,
+        agent: data.ActiveAgent | None = None,
     ) -> None:
         text = Text()
         text.append(run_id, style="bold")
@@ -165,6 +175,34 @@ class RunHeader(Static):
         style = "red" if counts[Phase.ESCALATED] else "dim"
         text.append(f"  escalated {counts[Phase.ESCALATED]}", style=style)
         text.append(f"  {weighted:,} tokens ({raw:,} raw)", style="dim")
+
+        # The agent line: who is driving (or, when idle, who is configured to).
+        if agent is not None:
+            # A session is open: show the live agent, its model and stage role.
+            text.append("\nagent ", style="dim")
+            text.append(agent.name, style="bold cyan")
+            if agent.model:
+                text.append(f" · {agent.model}", style="cyan")
+            if agent.role:
+                text.append(f" · {agent.role}", style="dim")
+        else:
+            # No session open: show the configured adapters from the run's policy
+            # snapshot. Skip the line entirely when the snapshot can't be rebuilt
+            # (a pre-#153 run) rather than fabricate an all-defaults "claude".
+            rebuilt = policy.adapter_policy_from_snapshot(state.policy_snapshot)
+            if rebuilt is not None:
+                dev = rebuilt.resolved("dev")
+                review = rebuilt.resolved("review")
+                dev_label = agent_label(dev.name, dev.model)
+                review_label = agent_label(review.name, review.model)
+                if dev_label == review_label:
+                    line = f"\nagents {dev_label}"  # dev and review resolve alike
+                else:
+                    line = f"\nagents dev {dev_label} review {review_label}"
+                if state.run_type == "sweep":
+                    triage = rebuilt.resolved("triage")
+                    line += f" triage {agent_label(triage.name, triage.model)}"
+                text.append(line, style="dim")
 
         if stopping:
             # A RUNNING or UNKNOWN run with a pending graceful-stop request: it never

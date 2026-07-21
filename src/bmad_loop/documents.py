@@ -40,10 +40,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from . import runs
+from . import policy, runs
 
 if TYPE_CHECKING:
-    from . import policy as policy_mod
     from .checks import ValidationReport
     from .model import RunState
     from .sweep import Decision
@@ -178,8 +177,30 @@ def status_document(state: RunState, *, graceful_stop_pending: bool = False) -> 
     ``graceful_stop_pending``: liveness plus the presence of the control file is
     not in state.json, so the caller supplies it (default False keeps the
     builder a pure projection); ``status`` itself is unaffected.
+
+    Two adapter-identity keys (#153 phase 3), both derived from the snapshot and
+    the recorded sessions — never live policy — and deliberately named apart:
+
+    - Run-level ``adapters`` is the *configured-resolved* identity: the
+      dev/review/triage adapter the run's ``policy_snapshot`` resolves to, via
+      :func:`policy.adapter_policy_from_snapshot` + ``AdapterPolicy.resolved`` so
+      the stage-inheritance rules are the canonical ones, not re-derived here.
+      ``None`` when the snapshot carries no rebuildable ``[adapter]`` block (a run
+      that predates adapter stamping) — distinct from an all-``claude`` default.
+    - Per-task ``adapters_used`` is the *actually-recorded* identity: the last
+      stamped :class:`~bmad_loop.model.SessionRecord` per role in the task's
+      sessions, ``{role: {"name", "model"}}``. ``{}`` for a task whose sessions
+      predate stamping (``adapter == ""``). Configured need not equal used — a
+      policy edited mid-run, or a role that never ran, diverge.
     """
     raw_total, weighted_total, weight = run_token_totals(state)
+    adapter_policy = policy.adapter_policy_from_snapshot(state.policy_snapshot)
+    adapters: dict[str, dict[str, str]] | None = None
+    if adapter_policy is not None:
+        adapters = {}
+        for role in ("dev", "review", "triage"):
+            resolved = adapter_policy.resolved(role)
+            adapters[role] = {"name": resolved.name, "model": resolved.model}
     if state.finished:
         status = "finished"
     elif state.paused:
@@ -195,6 +216,12 @@ def status_document(state: RunState, *, graceful_stop_pending: bool = False) -> 
         tokens = task.tokens.to_dict()
         tokens["raw"] = task.tokens.total
         tokens["weighted"] = task.tokens.weighted_total(weight)
+        # Last stamped session per role wins (iteration is chronological); a role
+        # whose only sessions predate stamping (adapter "") contributes nothing.
+        adapters_used: dict[str, dict[str, str]] = {}
+        for record in task.sessions:
+            if record.adapter:
+                adapters_used[record.role] = {"name": record.adapter, "model": record.model}
         tasks.append(
             {
                 "story_key": key,
@@ -205,6 +232,7 @@ def status_document(state: RunState, *, graceful_stop_pending: bool = False) -> 
                 "tokens": tokens,
                 "commit_sha": task.commit_sha,
                 "defer_reason": task.defer_reason,
+                "adapters_used": adapters_used,
             }
         )
     return {
@@ -227,6 +255,7 @@ def status_document(state: RunState, *, graceful_stop_pending: bool = False) -> 
             "raw": raw_total,
             "weighted": weighted_total,
         },
+        "adapters": adapters,
         "tasks": tasks,
     }
 
@@ -308,7 +337,7 @@ def clean_document(
     *,
     dry_run: bool,
     retain: int,
-    cleanup_policy: policy_mod.CleanupPolicy,
+    cleanup_policy: policy.CleanupPolicy,
     freed_bytes: int,
     worktrees: list[str],
     trimmed: list[str],

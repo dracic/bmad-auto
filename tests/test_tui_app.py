@@ -36,7 +36,7 @@ from bmad_loop import documents
 from bmad_loop import policy as policy_mod
 from bmad_loop.adapters.multiplexer import MultiplexerError
 from bmad_loop.journal import Journal, save_state
-from bmad_loop.model import Phase, RunState, StoryTask, TokenUsage
+from bmad_loop.model import Phase, RunState, SessionRecord, StoryTask, TokenUsage
 from bmad_loop.runs import RUNS_DIR
 from bmad_loop.tui import data, launch, widgets
 from bmad_loop.tui.app import BmadLoopApp
@@ -71,6 +71,7 @@ from bmad_loop.tui.widgets import (
     Splitter,
     SprintTree,
     StoriesTable,
+    agent_label,
     journal_line,
     pause_label,
     pause_tag,
@@ -2095,6 +2096,13 @@ def test_stopping_tag_renders():
     assert tag.style == widgets.STATUS_STYLES[data.STOPPED]
 
 
+def test_agent_label():
+    # name·model, or just the name when no explicit model was recorded ("")
+    assert agent_label("claude", "opus") == "claude·opus"
+    assert agent_label("claude", "") == "claude"
+    assert agent_label("codex", "gpt-5") == "codex·gpt-5"
+
+
 def test_sprint_story_label_split_suffix():
     # split halves (issue #144) must render distinctly: 6a-… / 6b-…, not both 6-…
     from bmad_loop.sprintstatus import Story
@@ -2461,6 +2469,97 @@ async def test_graceful_stop_pending_shows_in_header_and_note(project, monkeypat
         await until(
             pilot,
             lambda: "stop" in runs_table.get_cell("20260611-100000-aaaa", "note").plain,
+        )
+
+
+async def test_active_agent_shows_in_header_and_task_cell(project, monkeypatch):
+    # End to end: a RUNNING run with an open, adapter-stamped session-start paints
+    # the header's live agent line and the task row's agent cell
+    # (data.active_agent -> snapshot -> apply). Story key matches STORY_RE.
+    monkeypatch.setattr(data, "liveness", lambda run_dir: "alive")
+    task = StoryTask(story_key="1-1-alpha", epic=1, phase=Phase.DEV_RUNNING)
+    run_dir = make_run(
+        project.project,
+        "20260611-100000-aaaa",
+        alive=True,
+        tasks={"1-1-alpha": task},
+        policy_snapshot={"adapter": {"name": "claude", "model": "opus"}},
+    )
+    Journal(run_dir).append(
+        "session-start",
+        task_id="1-1-alpha-dev-1",
+        role="dev",
+        adapter="claude",
+        model="opus",
+        story_key="1-1-alpha",
+    )
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        screen = dashboard(app)
+        await until(pilot, lambda: screen.selected_run_id == "20260611-100000-aaaa")
+        header = screen.query_one("#runheader", RunHeader)
+        await until(pilot, lambda: "claude · opus · dev" in str(header.content))
+        tasks_table = screen.query_one("#tasks", DataTable)
+        await until(
+            pilot,
+            lambda: tasks_table.row_count == 1
+            and tasks_table.get_cell("1-1-alpha", "agent") == "claude·opus",
+        )
+
+
+async def test_idle_run_shows_configured_agents_and_cell_falls_back(project, monkeypatch):
+    # No session open (session-start then a matching session-end): the header shows
+    # the configured adapters from the snapshot (dev/review differ, so the full
+    # "agents dev … review …" form renders), and the agent cell falls back to the
+    # last adapter-stamped SessionRecord rather than the (absent) live agent.
+    monkeypatch.setattr(data, "liveness", lambda run_dir: "alive")
+    task = StoryTask(
+        story_key="1-1-alpha",
+        epic=1,
+        phase=Phase.DONE,
+        sessions=[
+            SessionRecord(
+                task_id="1-1-alpha-dev-1",
+                role="dev",
+                status="completed",
+                adapter="claude",
+                model="haiku",
+            )
+        ],
+    )
+    run_dir = make_run(
+        project.project,
+        "20260611-100000-aaaa",
+        alive=True,
+        tasks={"1-1-alpha": task},
+        policy_snapshot={
+            "adapter": {"name": "claude", "model": "opus", "review": {"name": "codex"}}
+        },
+    )
+    journal = Journal(run_dir)
+    journal.append(
+        "session-start",
+        task_id="1-1-alpha-dev-1",
+        role="dev",
+        adapter="claude",
+        model="haiku",
+        story_key="1-1-alpha",
+    )
+    journal.append("session-end", task_id="1-1-alpha-dev-1")
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        screen = dashboard(app)
+        await until(pilot, lambda: screen.selected_run_id == "20260611-100000-aaaa")
+        header = screen.query_one("#runheader", RunHeader)
+        # configured line, not a live "agent …" line (no session is open)
+        await until(pilot, lambda: "agents dev claude·opus review codex" in str(header.content))
+        assert "\nagent " not in str(header.content)
+        tasks_table = screen.query_one("#tasks", DataTable)
+        # cell reads the stamped record's model (haiku), distinct from the config
+        await until(
+            pilot,
+            lambda: tasks_table.row_count == 1
+            and tasks_table.get_cell("1-1-alpha", "agent") == "claude·haiku",
         )
 
 

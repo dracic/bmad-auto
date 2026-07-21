@@ -26,7 +26,7 @@ from rich.color import ColorParseError
 from rich.style import Style
 from rich.text import Text
 
-from .. import bmadconfig, deferredwork, sprintstatus, stories
+from .. import bmadconfig, deferredwork, policy, sprintstatus, stories
 from ..adapters.multiplexer import MultiplexerError, get_multiplexer, mux_usable
 from ..gates import ATTENTION_FILE
 from ..journal import JOURNAL_FILE, LOGS_DIR, STATE_FILE, load_state
@@ -668,19 +668,31 @@ class LogView:
         return Text("\n").join(rows)
 
 
-def active_task_id(run_dir: Path, journal_entries: list[dict[str, Any]]) -> str | None:
-    """Task whose agent session is currently open: the last session-start
-    without a later session-end. Falls back to the newest file in logs/ —
-    a tail attached mid-session has no start event in view."""
+def _open_session_start(journal_entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The session-start entry whose agent session is currently open: the last
+    session-start with no later matching session-end. None when every started
+    session has ended (or none started). The task_id is tracked as a string so
+    the session-end match is byte-identical to what active_task_id compared."""
+    open_entry: dict[str, Any] | None = None
     active: str | None = None
     for entry in journal_entries:
         kind = entry.get("kind")
         if kind == "session-start" and entry.get("task_id") is not None:
             active = str(entry["task_id"])
+            open_entry = entry
         elif kind == "session-end" and str(entry.get("task_id")) == active:
             active = None
-    if active is not None:
-        return active
+            open_entry = None
+    return open_entry
+
+
+def active_task_id(run_dir: Path, journal_entries: list[dict[str, Any]]) -> str | None:
+    """Task whose agent session is currently open: the last session-start
+    without a later session-end. Falls back to the newest file in logs/ —
+    a tail attached mid-session has no start event in view."""
+    entry = _open_session_start(journal_entries)
+    if entry is not None:
+        return str(entry["task_id"])
     try:
         logs = sorted(
             (run_dir / LOGS_DIR).glob("*.log"),
@@ -689,6 +701,70 @@ def active_task_id(run_dir: Path, journal_entries: list[dict[str, Any]]) -> str 
     except OSError:
         return None
     return logs[-1].stem if logs else None
+
+
+@dataclass(frozen=True)
+class ActiveAgent:
+    """Identity of the agent currently driving a run, derived from the open
+    session-start journal entry: the task/story it is working, the stage role,
+    and the resolved adapter name + model."""
+
+    task_id: str
+    story_key: str
+    role: str
+    name: str
+    model: str
+
+
+def _story_key_from_task_id(task_id: str, role: str) -> str:
+    """Recover the story key from a session task_id when the journal entry
+    predates story-key stamping (#153 phase 1). The id is
+    ``safe_segment(f"{story_key}-{part}-{seq}")`` where ``part`` is the role, or
+    a workflow label for labeled plugin sessions — so peel the trailing
+    ``-{part}-{seq}``: drop the numeric seq, then the recorded role when it
+    matches (the common case), else one more ``-`` group (best-effort, since a
+    label is not recoverable from the entry)."""
+    head, sep, seq = task_id.rpartition("-")
+    if not sep or not seq.isdigit():
+        return task_id  # not the expected shape — best we can do
+    if role and head.endswith(f"-{role}"):
+        return head[: -(len(role) + 1)]
+    parent = head.rpartition("-")[0]
+    return parent or head
+
+
+def active_agent(
+    journal_entries: list[dict[str, Any]], policy_snapshot: dict[str, Any] | None
+) -> ActiveAgent | None:
+    """The agent currently driving the run, or None when no session is open.
+
+    Journal-only: unlike :func:`active_task_id` there is no logs/ fallback — a
+    tail attached mid-session carries no adapter identity. A session-start
+    stamped since #153 phase 1 supplies the adapter name/model (and story_key)
+    directly. For an older, unstamped entry the run's persisted
+    ``policy_snapshot`` is rebuilt and resolved for the entry's role; when that
+    yields nothing trustworthy (no/empty snapshot) the agent is unknown -> None.
+    Never raises on a malformed entry."""
+    try:
+        entry = _open_session_start(journal_entries)
+        if entry is None:
+            return None
+        task_id = str(entry.get("task_id", ""))
+        role = str(entry.get("role") or "")
+        if "adapter" in entry:
+            name = str(entry.get("adapter", ""))
+            model = str(entry.get("model", ""))
+        else:
+            rebuilt = policy.adapter_policy_from_snapshot(policy_snapshot)
+            if rebuilt is None:
+                return None
+            resolved = rebuilt.resolved(role)
+            name, model = resolved.name, resolved.model
+        story_raw = entry.get("story_key")
+        story_key = str(story_raw) if story_raw else _story_key_from_task_id(task_id, role)
+        return ActiveAgent(task_id=task_id, story_key=story_key, role=role, name=name, model=model)
+    except Exception:
+        return None
 
 
 def pending_decision(journal_entries: list[dict[str, Any]]) -> tuple[str, str] | None:

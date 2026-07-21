@@ -161,7 +161,16 @@ status glyph + word, start timestamp, current epic, and a counts line —
 `tasks N · done (green) · deferred (yellow) · escalated (red when nonzero) ·
 tokens`, where the token figure reads `<weighted> tokens (<raw> raw)` — the
 cost-weighted total first (cache reads at `limits.cache_read_weight`), the
-unweighted one in parentheses. Below that, situational banners:
+unweighted one in parentheses. Below the counts, an **agent line** names who is
+driving: while a session is open it reads `agent <name> · <model> · <role>` (the
+resolved adapter for the live stage — `model` omitted when the session ran the
+CLI profile's default, `role` is the stage `dev` / `review` / `triage`); when no
+session is open it falls back to the run's configured adapters, rebuilt from the
+run's policy snapshot — `agents <name·model>` when dev and review resolve alike,
+else `agents dev <name·model> review <name·model>`, plus a `triage <name·model>`
+on sweep runs. A run that predates adapter stamping (no rebuildable snapshot)
+shows no agent line at all rather than a fabricated default. Below that,
+situational banners:
 
 - `⏸ paused (<stage>) — <reason> · press e to resume` — gate or escalation
   pause; stages are `spec-approval`, `epic-boundary`, `escalation`,
@@ -187,6 +196,7 @@ One row per story (or sweep bundle/triage task) in the selected run:
 | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `story`  | story key, or the sweep task id                                                                                                                                                                                                         |
 | `phase`  | `pending` → `dev-running` → `dev-verify` → `review-running` → `review-verify` → `committing` → `done`; terminal alternatives `deferred` / `escalated`; sweep triage shows `triage-running` / `triage-verify`                            |
+| `agent`  | the adapter driving this story, `<name·model>` (`·model` dropped when it's the profile default). The live agent when it's working this row, else the last session that stamped an identity (#153), else `-` (nothing recorded)          |
 | `dev`    | dev attempt counter, `×N`                                                                                                                                                                                                               |
 | `review` | review cycle counter, `×N`                                                                                                                                                                                                              |
 | `tokens` | cost-weighted token total for the story — cache reads counted at `limits.cache_read_weight` (default 0.1), the same total the budgets judge. `-` until known; a real `0` (possible with the weight set to 0) is shown as `0`, never `-` |

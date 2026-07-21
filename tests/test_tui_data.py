@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from conftest import install_bmad_config, write_sprint
 
-from bmad_loop import deferredwork
+from bmad_loop import deferredwork, policy
 from bmad_loop.adapters import tmux_base
 from bmad_loop.journal import Journal, save_state
 from bmad_loop.model import RunState
@@ -832,6 +832,103 @@ def test_active_task_id_falls_back_to_newest_log(tmp_path):
     (logs / "t-new.log").write_text("new")
     os.utime(logs / "t-old.log", ns=(1, 1))
     assert data.active_task_id(tmp_path, []) == "t-new"
+
+
+def test_active_task_id_matches_open_session_start(tmp_path):
+    # Regression: extracting _open_session_start must leave active_task_id
+    # byte-identical, including the logs/ fallback tail.
+    entries = [
+        {"kind": "session-start", "task_id": "t1"},
+        {"kind": "session-end", "task_id": "t1"},
+        {"kind": "session-start", "task_id": "t2"},
+    ]
+    assert data.active_task_id(tmp_path, entries) == "t2"
+    assert data._open_session_start(entries) is entries[-1]  # the open entry itself
+
+    closed = entries + [{"kind": "session-end", "task_id": "t2"}]
+    assert data.active_task_id(tmp_path, closed) is None
+    assert data._open_session_start(closed) is None
+
+    # nothing open in the journal -> newest-log fallback still fires
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "t-old.log").write_text("old")
+    (logs / "t-new.log").write_text("new")
+    os.utime(logs / "t-old.log", ns=(1, 1))
+    assert data.active_task_id(tmp_path, closed) == "t-new"
+
+
+# ------------------------------------------------------------- active agent
+
+
+def test_active_agent_from_stamped_session_start():
+    entries = [
+        {
+            "kind": "session-start",
+            "task_id": "1-1-alpha-dev-3",
+            "role": "dev",
+            "adapter": "claude",
+            "model": "opus",
+            "story_key": "1-1-alpha",
+        },
+    ]
+    assert data.active_agent(entries, None) == data.ActiveAgent(
+        task_id="1-1-alpha-dev-3",
+        story_key="1-1-alpha",
+        role="dev",
+        name="claude",
+        model="opus",
+    )
+
+
+def test_active_agent_none_after_matching_session_end():
+    entries = [
+        {
+            "kind": "session-start",
+            "task_id": "1-1-alpha-dev-3",
+            "role": "dev",
+            "adapter": "claude",
+            "model": "opus",
+            "story_key": "1-1-alpha",
+        },
+        {"kind": "session-end", "task_id": "1-1-alpha-dev-3"},
+    ]
+    assert data.active_agent(entries, None) is None
+
+
+def test_active_agent_falls_back_to_policy_snapshot():
+    # An entry recorded before adapter stamping (#153 phase 1) has no "adapter"
+    # and no "story_key": identity is rebuilt from the run's policy snapshot,
+    # resolved for the entry's role, and the story key is peeled off the
+    # task_id. A review-stage model override must win over the base model.
+    snapshot = {"adapter": {"name": "claude", "model": "opus", "review": {"model": "haiku"}}}
+    entries = [{"kind": "session-start", "task_id": "2-3-beta-review-1", "role": "review"}]
+    agent = data.active_agent(entries, snapshot)
+    resolved = policy.adapter_policy_from_snapshot(snapshot).resolved("review")
+    assert agent is not None
+    assert (agent.name, agent.model) == (resolved.name, resolved.model) == ("claude", "haiku")
+    assert agent.story_key == "2-3-beta"  # peeled from "-review-1"
+    assert agent.role == "review"
+
+
+def test_active_agent_labeled_session_peels_story_key():
+    # A labeled plugin session's task_id carries the label, not the role; the
+    # recorded role won't match, so the story key peels via best-effort rsplit.
+    entries = [{"kind": "session-start", "task_id": "4-2-gamma-tea-7", "role": "dev"}]
+    agent = data.active_agent(entries, {"adapter": {"name": "codex", "model": "gpt-5"}})
+    assert agent is not None
+    assert agent.story_key == "4-2-gamma"  # "-tea-7" stripped despite role != "tea"
+    assert (agent.name, agent.model) == ("codex", "gpt-5")
+
+
+def test_active_agent_none_without_resolvable_snapshot():
+    # Unstamped entry + no trustworthy snapshot: an all-"claude" reconstruction
+    # would mislabel a run that predates stamping, so the agent is unknown.
+    unstamped = [{"kind": "session-start", "task_id": "2-3-beta-review-1", "role": "review"}]
+    assert data.active_agent(unstamped, None) is None
+    assert data.active_agent(unstamped, {}) is None
+    assert data.active_agent(unstamped, {"adapter": {}}) is None  # table without a name
+    assert data.active_agent([], None) is None  # no open session at all
 
 
 # ---------------------------------------------------------- pending decision

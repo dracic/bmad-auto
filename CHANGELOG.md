@@ -9,6 +9,16 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **Active agent indicator (#153).** The TUI run header and tasks table now name who is driving —
+  the resolved adapter·model for the live stage, or the run's configured adapters when no session is
+  open. Session-start journal entries and session records stamp the resolved adapter identity, and
+  `bmad-loop status --json` gains an additive run-level `adapters` (the snapshot-resolved
+  dev/review/triage identity, `null` on a run predating stamping) and per-story `adapters_used` (the
+  identity actually recorded per role) — both are a projection of the run's persisted policy snapshot
+  (re-stamped from current config on resume) and its recorded sessions, not live policy read at status
+  time; a run whose snapshot predates adapter stamping reports `adapters: null` rather than a
+  fabricated default. Schema version unchanged.
+
 - **Graceful stop (`stop --graceful`, TUI `S`).** Ask a live run to finish its in-flight item —
   a story or sweep bundle through commit, or an in-progress sweep triage — then finalize cleanly
   and stop as a resumable `stopped` run, instead of the hard SIGTERM stop that kills mid-item.

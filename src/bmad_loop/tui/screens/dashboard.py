@@ -37,7 +37,7 @@ from textual.widgets.option_list import Option, OptionDoesNotExist
 
 from ... import policy as policy_mod
 from ... import sprintstatus, stories
-from ...model import RunState
+from ...model import RunState, StoryTask
 from ...runs import RUNS_DIR
 from .. import data
 from ..widgets import (
@@ -48,6 +48,7 @@ from ..widgets import (
     Splitter,
     SprintTree,
     StoriesTable,
+    agent_label,
     pause_tag,
     status_cell,
     stopping_tag,
@@ -130,6 +131,7 @@ class _Snapshot:
     run_id: str = ""
     status: str = data.UNKNOWN
     stopping: bool = False  # selected run has a graceful stop pending (RUNNING only)
+    agent: data.ActiveAgent | None = None  # agent driving the selected run, live only
     state: RunState | None = None
     stories_mode: bool = False  # selected run is stories mode (source == "stories")
     stories: list[stories.StoryRow] | None = None  # stories board rows, when stories_mode
@@ -277,6 +279,7 @@ class DashboardScreen(Screen[None]):
         tasks = self.query_one("#tasks", DataTable)
         tasks.add_column("story", key="story", width=30)
         tasks.add_column("phase", key="phase", width=16)
+        tasks.add_column("agent", key="agent", width=13)
         tasks.add_column("dev", key="dev", width=5)
         tasks.add_column("review", key="review", width=6)
         tasks.add_column("tokens", key="tokens", width=12)
@@ -779,6 +782,12 @@ class DashboardScreen(Screen[None]):
                     snap.toast_decision = True
                 ctx.decision_toasted = snap.decision[0] if snap.decision else None
                 task = pin or data.active_task_id(ctx.run_dir, ctx.entries)
+                # The live agent driving the run, gated like `stopping`: a dead run
+                # has no live agent, but UNKNOWN liveness is honored (cf. 3eb5c21).
+                if snap.status in (data.RUNNING, data.UNKNOWN):
+                    snap.agent = data.active_agent(
+                        ctx.entries, snap.state.policy_snapshot if snap.state else None
+                    )
                 snap.log_pinned = pin is not None
                 if task != ctx.log_task:
                     ctx.log_task = task
@@ -835,11 +844,16 @@ class DashboardScreen(Screen[None]):
             if snap.run_id == self._pending_run:
                 self._pending_run = None  # the engine is up
             header.show_run(
-                snap.run_id, snap.status, snap.state, snap.decision, stopping=snap.stopping
+                snap.run_id,
+                snap.status,
+                snap.state,
+                snap.decision,
+                stopping=snap.stopping,
+                agent=snap.agent,
             )
         self._apply_board(snap)
         if snap.state is not None:
-            self._apply_tasks(snap.state)
+            self._apply_tasks(snap.state, snap.agent)
         if snap.toast_decision and snap.decision is not None:
             self.notify(
                 snap.decision[1] or snap.decision[0],
@@ -950,7 +964,7 @@ class DashboardScreen(Screen[None]):
             # just appeared — bring the cursor to it
             table.move_cursor(row=self._run_rows.index(self.selected_run_id))
 
-    def _apply_tasks(self, state: RunState) -> None:
+    def _apply_tasks(self, state: RunState, agent: data.ActiveAgent | None = None) -> None:
         table = self.query_one("#tasks", DataTable)
         weight = state.cache_read_weight()
         for key, task in state.tasks.items():
@@ -964,6 +978,7 @@ class DashboardScreen(Screen[None]):
             info = task.defer_reason or (task.commit_sha or "")[:12]
             cells = {
                 "phase": str(task.phase),
+                "agent": self._agent_cell(task, key, agent),
                 "dev": f"×{task.attempt}",
                 "review": f"×{task.review_cycle}",
                 "tokens": tokens,
@@ -976,6 +991,18 @@ class DashboardScreen(Screen[None]):
             else:
                 table.add_row(key, *cells.values(), key=key)
                 self._task_rows.add(key)
+
+    @staticmethod
+    def _agent_cell(task: StoryTask, key: str, agent: data.ActiveAgent | None) -> str:
+        """The agent column for one task row. Prefer the live agent when it is
+        driving THIS task, else the last session that stamped an adapter identity
+        (#153 phase 1), else "-" (no live agent and no stamped history)."""
+        if agent is not None and agent.story_key == key:
+            return agent_label(agent.name, agent.model)
+        for record in reversed(task.sessions):
+            if record.adapter:
+                return agent_label(record.adapter, record.model)
+        return "-"
 
     def _apply_attention(self, table: DataTable, runs: list[data.RunInfo]) -> None:
         """Global attention indicator: how many runs are paused awaiting a human.

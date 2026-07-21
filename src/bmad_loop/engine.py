@@ -2593,7 +2593,15 @@ class Engine:
             cache_read_weight=self.policy.limits.cache_read_weight,
         )
         self.journal.set_active_log(task_id)
-        self.journal.append("session-start", task_id=task_id, role=role, prompt=prompt)
+        self.journal.append(
+            "session-start",
+            task_id=task_id,
+            role=role,
+            adapter=cfg.name,
+            model=cfg.model,
+            story_key=task.story_key,
+            prompt=prompt,
+        )
         # Every session-start must be paired with a session-end, whatever path
         # leaves this method: on an abort (RunStopped / KeyboardInterrupt / a
         # transport error out of adapter.run) the top-level handlers record
@@ -2622,6 +2630,8 @@ class Engine:
                     task_id=task_id,
                     role=role,
                     status=result.status,
+                    adapter=cfg.name,
+                    model=cfg.model,
                     session_id=result.session_id,
                     transcript_path=result.transcript_path,
                     result_json=(
