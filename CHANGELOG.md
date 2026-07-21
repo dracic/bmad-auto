@@ -14,9 +14,10 @@ breaking changes may land in a minor release.
   open. Session-start journal entries and session records stamp the resolved adapter identity, and
   `bmad-loop status --json` gains an additive run-level `adapters` (the snapshot-resolved
   dev/review/triage identity, `null` on a run predating stamping) and per-story `adapters_used` (the
-  identity actually recorded per role) — both derived from the run's policy snapshot and recorded
-  sessions rather than live config, so a resumed pre-upgrade run reflects its current config. Schema
-  version unchanged.
+  identity actually recorded per role) — both are a projection of the run's persisted policy snapshot
+  (re-stamped from current config on resume) and its recorded sessions, not live policy read at status
+  time; a run whose snapshot predates adapter stamping reports `adapters: null` rather than a
+  fabricated default. Schema version unchanged.
 
 - **Graceful stop (`stop --graceful`, TUI `S`).** Ask a live run to finish its in-flight item —
   a story or sweep bundle through commit, or an in-progress sweep triage — then finalize cleanly
