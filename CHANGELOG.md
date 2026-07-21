@@ -9,6 +9,14 @@ breaking changes may land in a minor release.
 
 ### Added
 
+- **Graceful stop (`stop --graceful`, TUI `S`).** Ask a live run to finish its in-flight item —
+  a story or sweep bundle, through commit — then finalize cleanly and stop as a resumable
+  `stopped` run, instead of the hard SIGTERM stop that kills mid-item. Delivered through a
+  `stop-request.json` control file consumed at the next item boundary, so it needs no signal and
+  works on every platform and multiplexer backend. Pending auto-sweeps are suppressed;
+  `--cancel-graceful` withdraws a request, and a hard stop still wins over a pending one.
+  `status --json` gains an additive `graceful_stop_pending` field (schema version unchanged).
+
 - **`bmad-loop validate --json` (#205).** A stable, schema-versioned JSON document of the
   preflight: the `ok` verdict, the queue `mode`/`spec_folder`, per-severity `counts`, and every
   check as a flat emission-ordered finding. Each finding carries a **stable `check` id** —
