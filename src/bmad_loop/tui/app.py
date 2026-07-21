@@ -133,6 +133,7 @@ class BmadLoopApp(App[None]):
         Binding("d", "answer_decisions", "decisions"),
         Binding("a", "attach", "attach"),
         Binding("x", "stop_run", "stop"),
+        Binding("S", "graceful_stop_run", "soft-stop"),
         Binding("D", "delete_run", "delete"),
         Binding("A", "archive_run", "archive"),
         Binding("c", "cleanup_sessions", "cleanup"),
@@ -830,6 +831,67 @@ class BmadLoopApp(App[None]):
             self.call_from_thread(self.notify, f"stop failed: {e}", severity="error")
             return
         self.call_from_thread(self.notify, f"run {run_id} stopped")
+
+    def action_graceful_stop_run(self) -> None:
+        """Ask the selected live run to stop *gracefully*: finish the in-flight item
+        (story dev/review/commit, or a sweep bundle through commit), then finalize
+        cleanly and stop — resumable, unlike the hard SIGTERM `x` delivers.
+
+        Deliberately no `_mux_missing` gate: unlike `x` (which kills the agent
+        window) this touches no multiplexer — the request is a control file the
+        engine polls at item boundaries — so it must work even with the backend
+        down. Mirrors action_stop_run otherwise: liveness gate, then a confirm."""
+        selected = self._selected_run_dir()
+        if selected is None:
+            return
+        run_id, run_dir = selected
+        if not data.liveness(run_dir) == "alive":
+            self.notify(f"run {run_id} is not live", severity="warning")
+            return
+
+        def done(ok: bool | None) -> None:
+            if ok:
+                self._graceful_stop_worker(run_id, run_dir)
+
+        self.push_screen(
+            ConfirmModal(
+                "graceful stop",
+                f"stop run {run_id} after the current item finishes?\n"
+                "the in-flight story/bundle completes through commit, then the run "
+                "finalizes and stops (resumable). `x` stops immediately instead.",
+                confirm_label="graceful stop",
+            ),
+            done,
+        )
+
+    @work(thread=True, group="lifecycle")
+    def _graceful_stop_worker(self, run_id: str, run_dir: Path) -> None:
+        # The TUI is an observer: it only writes the control file via the runs
+        # helper (atomic tmp + replace) — it never signals the engine, shells out,
+        # or writes the journal. request_graceful_stop returns a status token to
+        # message on; every UI update from this thread marshals through
+        # call_from_thread (worker threads must not touch widgets directly).
+        try:
+            outcome = runs.request_graceful_stop(run_dir)
+        except runs.GracefulStopError as e:
+            self.call_from_thread(self.notify, str(e), severity="error")
+            return
+        if outcome == "already-pending":
+            self.call_from_thread(self.notify, f"run {run_id} already has a graceful stop pending")
+            return
+        if outcome == "requested-unverifiable":
+            self.call_from_thread(
+                self.notify,
+                f"run {run_id}: could not confirm a live engine (unverifiable pid) — "
+                "the request stands and fires if one is running",
+                severity="warning",
+            )
+            return
+        self.call_from_thread(
+            self.notify,
+            f"graceful stop requested — run {run_id} will stop after the current item "
+            f"completes; continue later with `bmad-loop resume {run_id}`",
+        )
 
     def action_delete_run(self) -> None:
         selected = self._selected_run_dir()

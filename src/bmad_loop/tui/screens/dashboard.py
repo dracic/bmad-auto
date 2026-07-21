@@ -50,6 +50,7 @@ from ..widgets import (
     StoriesTable,
     pause_tag,
     status_cell,
+    stopping_tag,
 )
 from .modals import DeferredEntryModal
 
@@ -128,6 +129,7 @@ class _Snapshot:
     has_run: bool = False
     run_id: str = ""
     status: str = data.UNKNOWN
+    stopping: bool = False  # selected run has a graceful stop pending (RUNNING only)
     state: RunState | None = None
     stories_mode: bool = False  # selected run is stories mode (source == "stories")
     stories: list[stories.StoryRow] | None = None  # stories board rows, when stories_mode
@@ -758,6 +760,9 @@ class DashboardScreen(Screen[None]):
                 snap.run_id = ctx.run_dir.name
                 snap.state = ctx.watcher.state()
                 snap.status = ctx.watcher.status()
+                # A graceful stop pending is the control file, meaningful only while
+                # RUNNING (the engine consumes it at the next item boundary).
+                snap.stopping = snap.status == data.RUNNING and ctx.watcher.stopping()
                 if snap.state is not None and snap.state.source == "stories":
                     # per-run board: re-derived each tick (only while a stories run
                     # is selected) so it tracks the dev sessions writing story specs.
@@ -826,7 +831,9 @@ class DashboardScreen(Screen[None]):
         else:
             if snap.run_id == self._pending_run:
                 self._pending_run = None  # the engine is up
-            header.show_run(snap.run_id, snap.status, snap.state, snap.decision)
+            header.show_run(
+                snap.run_id, snap.status, snap.state, snap.decision, stopping=snap.stopping
+            )
         self._apply_board(snap)
         if snap.state is not None:
             self._apply_tasks(snap.state)
@@ -914,15 +921,16 @@ class DashboardScreen(Screen[None]):
         first_populate = not self._run_rows
         added: list[str] = []
         for run in runs:
+            note = stopping_tag() if run.stopping else pause_tag(run.paused_stage)
             if run.run_id in self._run_rows:
                 table.update_cell(run.run_id, "st", status_cell(run.status))
-                table.update_cell(run.run_id, "note", pause_tag(run.paused_stage))
+                table.update_cell(run.run_id, "note", note)
             else:
                 table.add_row(
                     status_cell(run.status),
                     run.run_id,
                     run.run_type,
-                    pause_tag(run.paused_stage),
+                    note,
                     key=run.run_id,
                 )
                 self._run_rows.append(run.run_id)

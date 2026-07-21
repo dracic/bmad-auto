@@ -2087,6 +2087,14 @@ def test_pause_tag_and_label_render():
     assert label == "escalation" and "red" in style
 
 
+def test_stopping_tag_renders():
+    # glyph + style match STOPPED (the end state a graceful stop lands in)
+    tag = widgets.stopping_tag()
+    assert isinstance(tag, Text)
+    assert "stop" in tag.plain
+    assert tag.style == widgets.STATUS_STYLES[data.STOPPED]
+
+
 def test_sprint_story_label_split_suffix():
     # split halves (issue #144) must render distinctly: 6a-… / 6b-…, not both 6-…
     from bmad_loop.sprintstatus import Story
@@ -2321,6 +2329,112 @@ def test_checkpoint_gate_line_pluralization():
     assert f(0) == "verify + review gates passed · no follow-up review cycles"
     assert f(1) == "verify + review gates passed · 1 follow-up review cycle"
     assert f(3) == "verify + review gates passed · 3 follow-up review cycles"
+
+
+# ------------------------------------------------------------ graceful stop (S)
+
+
+async def test_graceful_stop_requests_via_helper(project, monkeypatch):
+    # S writes the graceful-stop control file via the runs helper and toasts. No
+    # multiplexer is touched (no _mux_missing gate, mux_available left unset), no
+    # shell-out — the worker only calls runs.request_graceful_stop.
+    from bmad_loop import runs
+
+    calls: list[Path] = []
+    monkeypatch.setattr(data, "liveness", lambda run_dir: "alive")
+    monkeypatch.setattr(runs, "request_graceful_stop", lambda rd: calls.append(rd) or "requested")
+    make_run(project.project, "20260611-100000-aaaa", alive=True)
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: dashboard(app).selected_run_id == "20260611-100000-aaaa")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.click(await ready(pilot, "#ok"))
+        await until(pilot, lambda: len(calls) == 1)
+        assert calls[0].name == "20260611-100000-aaaa"
+        await until(pilot, lambda: any("graceful stop requested" in m for m in notifications(app)))
+
+
+@pytest.mark.parametrize(
+    "token, needle",
+    [
+        ("already-pending", "already has a graceful stop pending"),
+        ("requested-unverifiable", "could not confirm a live engine"),
+    ],
+)
+async def test_graceful_stop_token_messages(project, monkeypatch, token, needle):
+    # The worker translates each status token from the helper into its own toast.
+    from bmad_loop import runs
+
+    monkeypatch.setattr(data, "liveness", lambda run_dir: "alive")
+    monkeypatch.setattr(runs, "request_graceful_stop", lambda rd: token)
+    make_run(project.project, "20260611-100000-aaaa", alive=True)
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: dashboard(app).selected_run_id == "20260611-100000-aaaa")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.click(await ready(pilot, "#ok"))
+        await until(pilot, lambda: any(needle in m for m in notifications(app)))
+
+
+async def test_graceful_stop_not_live_warns_without_calling(project, monkeypatch):
+    # A dead/unverifiable engine is refused at the liveness gate — the helper is
+    # never called and no confirm modal opens (mirrors action_stop_run's gate).
+    from bmad_loop import runs
+
+    calls: list[Path] = []
+    monkeypatch.setattr(data, "liveness", lambda run_dir: "dead")
+    monkeypatch.setattr(runs, "request_graceful_stop", lambda rd: calls.append(rd) or "requested")
+    make_run(project.project, "20260611-100000-aaaa")
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: dashboard(app).selected_run_id == "20260611-100000-aaaa")
+        await pilot.press("S")
+        await until(pilot, lambda: any("is not live" in m for m in notifications(app)))
+        assert calls == []
+        assert not isinstance(app.screen, ConfirmModal)
+
+
+async def test_graceful_stop_error_toasts(project, monkeypatch):
+    # A GracefulStopError out of the helper (finished/dead run) surfaces as an
+    # error toast rather than escaping the worker (exit_on_error would kill the app).
+    from bmad_loop import runs
+
+    def boom(rd):
+        raise runs.GracefulStopError("run has already finished — nothing to stop")
+
+    monkeypatch.setattr(data, "liveness", lambda run_dir: "alive")
+    monkeypatch.setattr(runs, "request_graceful_stop", boom)
+    make_run(project.project, "20260611-100000-aaaa", alive=True)
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: dashboard(app).selected_run_id == "20260611-100000-aaaa")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.click(await ready(pilot, "#ok"))
+        await until(pilot, lambda: any("nothing to stop" in m for m in notifications(app)))
+
+
+async def test_graceful_stop_pending_shows_in_header_and_note(project, monkeypatch):
+    # End to end: a RUNNING run with the control file present paints the header
+    # pending line and the runs-table stop tag (data -> snapshot -> apply).
+    from bmad_loop.runs import STOP_REQUEST_FILE
+
+    monkeypatch.setattr(data, "liveness", lambda run_dir: "alive")
+    run_dir = make_run(project.project, "20260611-100000-aaaa", alive=True)
+    (run_dir / STOP_REQUEST_FILE).write_text("{}", encoding="utf-8")
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        screen = dashboard(app)
+        await until(pilot, lambda: screen.selected_run_id == "20260611-100000-aaaa")
+        header = screen.query_one("#runheader", RunHeader)
+        await until(pilot, lambda: "graceful stop pending" in str(header.content))
+        runs_table = screen.query_one("#runs", DataTable)
+        await until(
+            pilot,
+            lambda: "stop" in runs_table.get_cell("20260611-100000-aaaa", "note").plain,
+        )
 
 
 async def test_story_checkpoint_card_surfaces_real_review_cycles(project, monkeypatch):

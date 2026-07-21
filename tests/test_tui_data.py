@@ -178,6 +178,45 @@ def test_finished_beats_stopped(tmp_path):
     assert data.discover_runs(tmp_path)[0].status == data.FINISHED
 
 
+def test_discover_runs_marks_graceful_stop_pending_while_running(tmp_path):
+    from bmad_loop.runs import STOP_REQUEST_FILE
+
+    run_dir = make_run(tmp_path, "20260611-120000-cccc")
+    write_pid(run_dir)  # test process pid: alive -> RUNNING
+    assert data.discover_runs(tmp_path)[0].stopping is False  # no request yet
+    (run_dir / STOP_REQUEST_FILE).write_text("{}", encoding="utf-8")
+    info = data.discover_runs(tmp_path)[0]
+    assert info.status == data.RUNNING
+    assert info.stopping is True
+
+
+def test_stopping_ignored_on_a_non_running_run(tmp_path):
+    # The engine consumes the control file at the stop boundary; a file lingering
+    # on an already-stopped or finished run must not read as still-stopping.
+    from bmad_loop.runs import STOP_REQUEST_FILE
+
+    stopped = make_run(tmp_path, "20260611-100000-aaaa", stopped=True)
+    (stopped / "engine.pid").write_text(str(dead_pid()))
+    (stopped / STOP_REQUEST_FILE).write_text("{}", encoding="utf-8")
+    finished = make_run(tmp_path, "20260611-110000-bbbb", finished=True)
+    (finished / STOP_REQUEST_FILE).write_text("{}", encoding="utf-8")
+    infos = {i.run_id: i for i in data.discover_runs(tmp_path)}
+    assert infos["20260611-100000-aaaa"].status == data.STOPPED
+    assert infos["20260611-100000-aaaa"].stopping is False
+    assert infos["20260611-110000-bbbb"].status == data.FINISHED
+    assert infos["20260611-110000-bbbb"].stopping is False
+
+
+def test_watcher_stopping_reads_the_control_file(tmp_path):
+    from bmad_loop.runs import STOP_REQUEST_FILE
+
+    run_dir = make_run(tmp_path, "20260611-100000-aaaa")
+    watcher = data.RunWatcher(run_dir)
+    assert watcher.stopping() is False
+    (run_dir / STOP_REQUEST_FILE).write_text("{}", encoding="utf-8")
+    assert watcher.stopping() is True
+
+
 def test_discover_runs_legacy_no_pid_is_unknown(tmp_path, monkeypatch):
     make_run(tmp_path, "20260611-100000-aaaa")
     # legacy liveness now flows through the multiplexer backend; patch its seam.

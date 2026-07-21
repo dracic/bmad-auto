@@ -93,6 +93,13 @@ def pause_label(stage: str) -> tuple[str, str]:
     return label, style
 
 
+def stopping_tag() -> Text:
+    """Compact tag for a run with a graceful stop pending, shown in the runs-table
+    note cell in place of a pause badge. The glyph + style match
+    STATUS_GLYPHS/STATUS_STYLES[STOPPED] — the end state a graceful stop lands in."""
+    return Text("⏹ stop", style=STATUS_STYLES[data.STOPPED])
+
+
 class RunHeader(Static):
     """One-glance summary of the selected run, or the empty-state hint."""
 
@@ -124,6 +131,7 @@ class RunHeader(Static):
         status: str,
         state: RunState | None,
         decision: tuple[str, str] | None = None,
+        stopping: bool = False,
     ) -> None:
         text = Text()
         text.append(run_id, style="bold")
@@ -157,6 +165,14 @@ class RunHeader(Static):
         style = "red" if counts[Phase.ESCALATED] else "dim"
         text.append(f"  escalated {counts[Phase.ESCALATED]}", style=style)
         text.append(f"  {weighted:,} tokens ({raw:,} raw)", style="dim")
+
+        if stopping:
+            # A RUNNING run with a pending graceful-stop request: it never enters the
+            # PAUSED/CRASHED/INTERRUPTED branches below, so this stands on its own.
+            text.append(
+                "\n⏹ graceful stop pending — will stop after the current item",
+                style="bold yellow",
+            )
 
         if status == data.PAUSED:
             text.append("\n⏸ paused", style="bold yellow")
