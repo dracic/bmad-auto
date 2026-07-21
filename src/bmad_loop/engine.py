@@ -598,13 +598,22 @@ class Engine:
         # config so the worktree's Editor MCP is reachable. Aggregate every loaded
         # plugin's declared seeds.
         seeds.extend(self._registry.seed_files())
-        provision_worktree(
+        skipped_seeds = provision_worktree(
             unit.path,
             profiles,
             self.paths.repo_root,
             seed_files=list(dict.fromkeys(seeds)),  # dedupe, preserve order
             seed_globs=self._registry.seed_globs(),
         )
+        if skipped_seeds:
+            # A seed entry whose destination already exists is a no-op. Harmless for
+            # a file the checkout legitimately carries, but a directory entry is
+            # skipped WHOLE the moment any child is tracked — so a `worktree_seed`
+            # that looks applied can be copying nothing. Journal it; provision is
+            # quiet by contract (it runs under the TUI).
+            self.journal.append(
+                "worktree-seed-skipped", story_key=task.story_key, entries=skipped_seeds
+            )
         self.journal.append(
             "worktree-opened", story_key=task.story_key, branch=unit.branch, path=str(unit.path)
         )
