@@ -17,8 +17,12 @@ shows which one is selected and why. Selection precedence, highest first:
 1. `BMAD_LOOP_MUX_BACKEND=<name>` — forces a backend for one invocation.
 2. `bmad-loop mux set <name>` — persists the choice into the gitignored, machine-scoped
    `[mux] backend` key in `.bmad-loop/policy.toml` (`mux set --clear` reverts to auto).
-3. The platform default — tmux on POSIX, psmux on native Windows — when installed.
+3. The platform default — tmux on POSIX, psmux on native Windows — when registered
+   and available (psmux's availability rules are below).
 4. The first registered backend that matches the platform and is available.
+5. If none of the above is available, a historical fallback keeps older setups working:
+   the first backend matching the platform regardless of availability, else tmux. The
+   selected backend then probes unavailable, and `bmad-loop validate` reports it as such.
 
 The choice applies to the next invocation — switch between runs, not while one is live:
 `attach`, `cleanup`, and the TUI all look for sessions in the currently selected backend.
