@@ -835,6 +835,99 @@ def test_status_json_emits_pure_document(project, capsys):
         "raw": 1160,
         "weighted": 660,
     }
+    # #153 phase 3: this fixture's snapshot has no [adapter] block and the task has
+    # no stamped sessions, so both identity keys report their "nothing recorded"
+    # form — None (not an all-claude default) run-level, {} per-task.
+    assert doc["adapters"] is None
+    assert entry["adapters_used"] == {}
+
+
+def test_status_json_exposes_adapter_identity(project, capsys):
+    """#153 phase 3: run-level ``adapters`` is the snapshot's configured-resolved
+    identity for every role (matching AdapterPolicy.resolved, stage overrides and
+    the client-switch model reset included), and per-task ``adapters_used`` is the
+    last stamped session per role — the two are deliberately separate surfaces."""
+    import json
+
+    from bmad_loop import policy
+    from bmad_loop.journal import save_state
+    from bmad_loop.model import Phase, RunState, SessionRecord, StoryTask, TokenUsage
+
+    # A real policy: base claude/opus, a review stage that switches client to codex
+    # (which resets the resolved model to "" — the #189 client-switch rule), and a
+    # pinned weight so the snapshot is a faithful json round-trip of asdict(Policy).
+    pol = policy.loads(
+        "[limits]\ncache_read_weight = 0.5\n"
+        '[adapter]\nname = "claude"\nmodel = "opus"\n'
+        '[adapter.review]\nname = "codex"\n'
+    )
+    snapshot = json.loads(json.dumps(pol.to_dict()))
+
+    task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    task.tokens = TokenUsage(input_tokens=10)
+    # Two dev sessions: the LAST stamped one per role wins (a mid-run model swap).
+    task.sessions = [
+        SessionRecord(task_id="t", role="dev", status="ok", adapter="claude", model="sonnet"),
+        SessionRecord(task_id="t", role="dev", status="ok", adapter="claude", model="opus"),
+        SessionRecord(task_id="t", role="review", status="ok", adapter="codex", model=""),
+    ]
+
+    run_id = "20260101-000000-aaaa"
+    run_dir = project.project / ".bmad-loop" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    save_state(
+        run_dir,
+        RunState(
+            run_id=run_id,
+            project=str(project.project),
+            started_at="2026-01-01T00:00:00",
+            finished=True,
+            tasks={"1-1-login": task},
+            policy_snapshot=snapshot,
+        ),
+    )
+
+    doc = _status_json(project, capsys)
+    assert doc["schema_version"] == cli.STATUS_SCHEMA_VERSION == 1
+    # Run-level adapters resolve exactly as the live policy does, per role.
+    assert doc["adapters"] == {
+        role: {
+            "name": pol.adapter.resolved(role).name,
+            "model": pol.adapter.resolved(role).model,
+        }
+        for role in ("dev", "review", "triage")
+    }
+    # Concretely: dev/triage inherit claude/opus; the review client switch to codex
+    # resets the model to "".
+    assert doc["adapters"]["dev"] == {"name": "claude", "model": "opus"}
+    assert doc["adapters"]["review"] == {"name": "codex", "model": ""}
+    assert doc["adapters"]["triage"] == {"name": "claude", "model": "opus"}
+    # Per-task used identity: the last dev session (opus, not the earlier sonnet)
+    # and the one review session.
+    (entry,) = doc["tasks"]
+    assert entry["adapters_used"] == {
+        "dev": {"name": "claude", "model": "opus"},
+        "review": {"name": "codex", "model": ""},
+    }
+
+
+def test_status_json_adapter_identity_absent_for_pre_upgrade_runs(project, capsys):
+    """A run persisted before adapter stamping: the snapshot carries no rebuildable
+    [adapter] block (``adapters`` is None, never a synthesized all-claude default),
+    and its sessions carry the empty-adapter sentinel (``adapters_used`` is {})."""
+    from bmad_loop.model import Phase, SessionRecord, StoryTask, TokenUsage
+
+    task = StoryTask(story_key="1-1-login", epic=1, phase=Phase.DONE)
+    task.tokens = TokenUsage(input_tokens=10)
+    # Pre-upgrade record: adapter defaults to "" (the phase-1 sentinel).
+    task.sessions = [SessionRecord(task_id="t", role="dev", status="ok")]
+    # _make_run_with_tokens pins only [limits].cache_read_weight — no [adapter].
+    _make_run_with_tokens(project, {"1-1-login": task}, weight=0.1)
+
+    doc = _status_json(project, capsys)
+    assert doc["adapters"] is None
+    (entry,) = doc["tasks"]
+    assert entry["adapters_used"] == {}
 
 
 def test_status_json_weight_from_snapshot_and_per_task_rounding(project, capsys):
