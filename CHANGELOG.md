@@ -5,7 +5,7 @@ All notable changes to `bmad-loop` are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
-## [Unreleased]
+## [0.9.0] — 2026-07-21
 
 ### Added
 
@@ -337,6 +337,17 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
   `=session:%N`, which releases carrying the psmux/psmux#483 fix resolve cross-server,
   degrading to the bare id only if the session probe fails. The replay sides treat the value
   as an opaque target and are unchanged.
+
+- **A `worktree_seed` entry that silently copies nothing is now journaled (#230).** Under
+  worktree isolation `provision_worktree` copies a seed only when the destination is absent —
+  right for a file the checkout legitimately carries, but a _directory_ entry is skipped whole
+  the moment any child is tracked, so `worktree_seed = ["_bmad"]` with a tracked `_bmad/custom`
+  copies nothing at all, including the absent children that would clobber nothing. Provisioning
+  is quiet by contract (it runs under the TUI), so the skip was invisible: user-authored config
+  that reads as applied was a no-op. It now returns the skipped entries and the engine records a
+  `worktree-seed-skipped` journal event; glob-expanded matches are excluded, since a plugin glob
+  is expected to hit paths the checkout already carries. Behavior is otherwise unchanged —
+  nothing new is copied.
 
 - **A dry run the TUI cannot spawn opens a modal instead of taking the app down (#210).** The
   `run --dry-run` / `sweep --dry-run` workers called `run_captured` unguarded, and
@@ -1680,6 +1691,7 @@ enforced in CI.
   implementation phase, driven by a Python control loop with hook-based session transport and
   resumable on-disk run state.
 
+[0.9.0]: https://github.com/bmad-code-org/bmad-loop/releases/tag/v0.9.0
 [0.8.1]: https://github.com/bmad-code-org/bmad-loop/releases/tag/v0.8.1
 [0.8.0]: https://github.com/bmad-code-org/bmad-loop/releases/tag/v0.8.0
 [0.7.12]: https://github.com/bmad-code-org/bmad-auto/releases/tag/v0.7.12
