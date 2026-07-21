@@ -32,7 +32,13 @@ from ..gates import ATTENTION_FILE
 from ..journal import JOURNAL_FILE, LOGS_DIR, STATE_FILE, load_state
 from ..model import RunState
 from ..process_host import ProcessHostError
-from ..runs import list_run_dirs, probe_liveness, read_pid_identity, session_name
+from ..runs import (
+    STOP_REQUEST_FILE,
+    list_run_dirs,
+    probe_liveness,
+    read_pid_identity,
+    session_name,
+)
 
 # Run statuses shown by the dashboard.
 RUNNING = "running"
@@ -133,6 +139,7 @@ class RunInfo:
     started_at: str
     status: str
     paused_stage: str = ""  # RunState.paused_stage when PAUSED, else ""; drives the badge
+    stopping: bool = False  # a graceful stop is pending (control file present) while RUNNING
 
 
 # state.json path -> (stat sig, header fields tuple)
@@ -176,7 +183,13 @@ def discover_runs(project: Path) -> list[RunInfo]:
         # paused_stage is advisory: only meaningful while the run is actually PAUSED
         # (a resumed run keeps the last stage in state until it re-pauses/finishes).
         stage = paused_stage if status == PAUSED else ""
-        out.append(RunInfo(run_dir.name, run_dir, run_type, started_at, status, stage))
+        # A pending graceful stop is the control file's presence, but only while an
+        # engine is still around to honor it — RUNNING or UNKNOWN (an unverifiable
+        # pid still consumes the file). The engine discards the file at the stop
+        # boundary, so a lingering file on an already-concluded run is not "stopping":
+        # STOPPED/FINISHED/CRASHED classify before liveness, so they never read UNKNOWN.
+        stopping = status in (RUNNING, UNKNOWN) and (run_dir / STOP_REQUEST_FILE).is_file()
+        out.append(RunInfo(run_dir.name, run_dir, run_type, started_at, status, stage, stopping))
     return out
 
 
@@ -213,6 +226,13 @@ class RunWatcher:
         if state is None:
             return UNKNOWN
         return _classify(state.finished, state.paused, state.stopped, state.crashed, self.run_dir)
+
+    def stopping(self) -> bool:
+        """True when a graceful-stop request is pending for this run (its control
+        file is present) — a bare existence read for the run-header pending line,
+        mirroring runs.graceful_stop_requested. The caller gates on a RUNNING
+        status so a file lingering on a stopped run doesn't read as still-stopping."""
+        return (self.run_dir / STOP_REQUEST_FILE).is_file()
 
     def attention(self) -> str:
         path = self.run_dir / ATTENTION_FILE

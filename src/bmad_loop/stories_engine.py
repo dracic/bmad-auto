@@ -50,6 +50,7 @@ from .model import (
     Phase,
     StoryTask,
 )
+from .runs import graceful_stop_requested
 
 
 @dataclass(frozen=True)
@@ -599,10 +600,18 @@ class StoriesEngine(Engine):
         # committed-story count, not the resume-reset _loop counter — is what keeps
         # a done_checkpoint pause from letting a resume leapfrog past the bound (the
         # pause+resume would otherwise reset the local counter and dispatch more).
-        if self._schedule_complete() or self._max_stories_reached():
-            self.journal.append(
-                "checkpoint-skip-last", story_key=task.story_key, checkpoint="story"
-            )
+        # A pending graceful stop also skips the done_checkpoint pause: the
+        # loop-head check will end the run as `stopped` on the next iteration, so
+        # pausing here would strand it `paused` instead — the stop must win (see
+        # the plan's "done_checkpoint + graceful after same story" disposition).
+        graceful = graceful_stop_requested(self.run_dir)
+        if self._schedule_complete() or self._max_stories_reached() or graceful:
+            fields: dict[str, Any] = {"story_key": task.story_key, "checkpoint": "story"}
+            if graceful:
+                # tag the cause so the journal distinguishes a graceful-stop skip
+                # from a natural last-story / --max-stories skip.
+                fields["reason"] = "graceful-stop"
+            self.journal.append("checkpoint-skip-last", **fields)
             return
         self.journal.append(
             "checkpoint-pause", story_key=task.story_key, checkpoint="story", commit=task.commit_sha
@@ -639,3 +648,39 @@ class StoriesEngine(Engine):
         if self.max_stories is None:
             return False
         return self._dispatched_count() >= self.max_stories
+
+    def _remaining_estimate(self) -> int | None:
+        """Stories a resume would still drive, for the graceful-stop journal +
+        notify. Mirrors the scheduler that drives ``is_complete``
+        (:meth:`_compute_schedule`) but without its journaling/selector-pause side
+        effects: scan the manifest in list order, skip entries already retired this
+        run (DONE/DEFERRED) or done on disk, count the actionable ones, and stop at
+        the first wedge — a blocked story a plain resume cannot leapfrog, so later
+        entries are unreachable until ``resolve``. Reuses the scheduler's own
+        classifier so the count stays in lockstep with ``is_complete`` (both derive
+        from :func:`stories._classify`). Best-effort — any manifest/spec read error
+        returns None so a graceful stop is never blocked on it."""
+        try:
+            story_set = self._load_stories()
+            folder = self._stories_folder()
+            skip = {
+                key
+                for key, task in self.state.tasks.items()
+                if task.phase in (Phase.DONE, Phase.DEFERRED)
+            }
+            entries = story_set.entries
+            if self._story_id_filter is not None:
+                entries = tuple(e for e in entries if e.id == self._story_id_filter)
+            remaining = 0
+            for entry in entries:
+                if entry.id in skip:
+                    continue
+                disposition = stories._classify(stories.resolve_story_spec(folder, entry.id))
+                if disposition == "done":
+                    continue
+                if disposition == "wedged":
+                    break  # a blocked story stops the scan; the rest is unreachable
+                remaining += 1  # actionable
+            return remaining
+        except Exception:  # noqa: BLE001 - a hint must never break the stop
+            return None

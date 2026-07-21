@@ -1,5 +1,6 @@
 """Run-directory helper tests."""
 
+import json
 import os
 import re
 import subprocess
@@ -520,6 +521,82 @@ def test_stop_run_clean_stop_on_pre_stop_pid_reuse(tmp_path, monkeypatch):
     assert load_state(run_dir).stopped is True
     assert killed == ["r1"]
     assert '"fallback": true' in (run_dir / "journal.jsonl").read_text()
+
+
+# ---------------------------------------------------------------- graceful stop
+
+
+def _use_host(monkeypatch, host):
+    monkeypatch.setattr(runs, "get_process_host", lambda: host)
+
+
+def test_request_graceful_stop_writes_file_when_alive(tmp_path, monkeypatch):
+    run_dir = _make_state_run(tmp_path, "r1")
+    (run_dir / "engine.pid").write_text("4242 100.0")  # identity matches the live host
+    _use_host(monkeypatch, _FakeHost(alive=True, identity=100.0))
+    assert runs.request_graceful_stop(run_dir) == "requested"
+    assert runs.graceful_stop_requested(run_dir)
+    body = json.loads((run_dir / runs.STOP_REQUEST_FILE).read_text())
+    assert body["mode"] == "graceful"
+    assert body["requested_at"]  # an ISO timestamp is stamped
+    # written atomically — no staging temp left behind
+    assert not (run_dir / (runs.STOP_REQUEST_FILE + ".tmp")).exists()
+
+
+def test_request_graceful_stop_idempotent_keeps_timestamp(tmp_path, monkeypatch):
+    run_dir = _make_state_run(tmp_path, "r1")
+    (run_dir / "engine.pid").write_text("4242 100.0")
+    _use_host(monkeypatch, _FakeHost(alive=True, identity=100.0))
+    # a request already on disk with a distinctive timestamp must be left untouched
+    existing = json.dumps({"requested_at": "2000-01-01T00:00:00", "mode": "graceful"})
+    (run_dir / runs.STOP_REQUEST_FILE).write_text(existing)
+    assert runs.request_graceful_stop(run_dir) == "already-pending"
+    assert (run_dir / runs.STOP_REQUEST_FILE).read_text() == existing  # original preserved
+
+
+def test_request_graceful_stop_refuses_dead_engine(tmp_path):
+    run_dir = _make_state_run(tmp_path, "r1")  # no engine.pid → liveness reads "dead"
+    with pytest.raises(runs.GracefulStopError, match="no live engine"):
+        runs.request_graceful_stop(run_dir)
+    assert not runs.graceful_stop_requested(run_dir)  # nothing written on refusal
+
+
+def test_request_graceful_stop_refuses_finished_run(tmp_path):
+    run_dir = _make_state_run(tmp_path, "r1", finished=True)
+    with pytest.raises(runs.GracefulStopError, match="already finished"):
+        runs.request_graceful_stop(run_dir)
+    assert not runs.graceful_stop_requested(run_dir)
+
+
+def test_request_graceful_stop_unknown_liveness_is_unverifiable(tmp_path, monkeypatch):
+    run_dir = _make_state_run(tmp_path, "r1")
+    (run_dir / "engine.pid").write_text("4242 100.0")
+    # a live pid whose identity is unreadable (win32 access-denied) reads "unknown":
+    # the request is still written, but the caller can't confirm a consumer.
+    _use_host(monkeypatch, _FakeHost(alive=True, identity=None))
+    assert runs.request_graceful_stop(run_dir) == "requested-unverifiable"
+    assert runs.graceful_stop_requested(run_dir)
+
+
+def test_clear_graceful_stop_removes_or_noops(tmp_path):
+    run_dir = _make_run(tmp_path, "r1")
+    assert runs.clear_graceful_stop(run_dir) is False  # nothing pending → no-op, never raises
+    (run_dir / runs.STOP_REQUEST_FILE).write_text("{}")
+    assert runs.clear_graceful_stop(run_dir) is True  # present → removed
+    assert not runs.graceful_stop_requested(run_dir)
+    assert runs.clear_graceful_stop(run_dir) is False  # already gone → no-op again
+
+
+def test_stop_run_clears_pending_graceful_request(tmp_path, monkeypatch):
+    """A hard stop supersedes a pending graceful request: the control file is
+    cleared even on the no-live-engine mark-stopped fallback path, so a later
+    resume doesn't re-honor the stop the operator escalated past."""
+    monkeypatch.setattr(runs, "kill_session", lambda _rid: None)
+    run_dir = _make_state_run(tmp_path, "r1")  # no engine.pid → mark-stopped fallback
+    (run_dir / runs.STOP_REQUEST_FILE).write_text("{}")  # a graceful request pending
+    assert runs.stop_run(run_dir) is True
+    assert load_state(run_dir).stopped is True
+    assert not runs.graceful_stop_requested(run_dir)
 
 
 # ---------------------------------------------------------------- prune sessions

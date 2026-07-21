@@ -1161,6 +1161,15 @@ def _resume_paused_run(project: Path, run_dir: Path) -> int:
     # can therefore disagree with those fields; that is correct, not a bug.
     state.policy_snapshot = new_snapshot
     state.clear_pause()
+    # A resume is fresh user intent: discard any graceful-stop request left over from
+    # a prior stopped-gracefully run so the re-armed engine does not consume it at the
+    # first item boundary and immediately re-stop. Fire before write_pid — the moment
+    # the pid lands the engine is "live" and a lingering request becomes honorable.
+    if runs.clear_graceful_stop(run_dir):
+        print(
+            f"run {run_dir.name}: discarded a stale graceful-stop request before resuming",
+            file=sys.stderr,
+        )
     runs.write_pid(run_dir)
     # Persist before the engine starts: status, the TUI and diagnose only ever
     # read state.json, and Engine._save() may not fire for minutes. write_pid
@@ -1567,8 +1576,17 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("no runs found", file=sys.stderr)
         return 1
     state = load_state(run_dir)
+    # A pending graceful stop is not in state.json (it's the control file + a live
+    # engine), so derive it here and hand it to the builder / text branch. Order the
+    # `and` so the cheap file check gates the engine_liveness probe: skip it when the
+    # run is already concluded or no request is on disk.
+    graceful_pending = (
+        not (state.finished or state.paused or state.stopped or state.crashed)
+        and runs.graceful_stop_requested(run_dir)
+        and runs.engine_liveness(run_dir) != "dead"
+    )
     if args.json:
-        machine.emit(status_document(state))
+        machine.emit(status_document(state, graceful_stop_pending=graceful_pending))
         return 0
     kind = f" [{state.run_type}]" if state.run_type != "story" else ""
     print(f"run {state.run_id}{kind}  started {state.started_at}")
@@ -1576,6 +1594,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("status: finished")
     elif state.paused:
         print(f"status: PAUSED ({state.paused_stage}) — {state.paused_reason}")
+    elif graceful_pending:
+        print("status: in progress — graceful stop pending (will stop after the current item)")
     else:
         print("status: in progress (or interrupted)")
     raw_total, weighted_total, weight = run_token_totals(state)
@@ -1678,6 +1698,11 @@ def cmd_stop(args: argparse.Namespace) -> int:
         print(str(e), file=sys.stderr)
         return 1
     args.run_id = run_dir.name
+    if args.cancel_graceful:
+        return _cmd_cancel_graceful(run_dir, args.run_id)
+    if args.graceful:
+        return _cmd_request_graceful(run_dir, args.run_id)
+    # Hard stop (unchanged): SIGTERM the engine, kill its agent window, mark stopped.
     try:
         stopped = runs.stop_run(run_dir)
     except (runs.StopRunError, ProcessHostError) as e:
@@ -1687,6 +1712,46 @@ def cmd_stop(args: argparse.Namespace) -> int:
         print(f"run {args.run_id} already finished", file=sys.stderr)
         return 1
     print(f"run {args.run_id} stopped")
+    return 0
+
+
+def _cmd_cancel_graceful(run_dir: Path, run_id: str) -> int:
+    """`stop --cancel-graceful`: discard a pending request so the run keeps going."""
+    if runs.clear_graceful_stop(run_dir):
+        print(f"run {run_id}: graceful stop request cancelled")
+        return 0
+    print(f"run {run_id} has no graceful stop pending", file=sys.stderr)
+    return 1
+
+
+def _cmd_request_graceful(run_dir: Path, run_id: str) -> int:
+    """`stop --graceful`: ask a live run to finish its in-flight item, then stop
+    cleanly (resumable). Delivery + refusal live in runs.request_graceful_stop;
+    here we only translate its status token into operator-facing messaging."""
+    try:
+        outcome = runs.request_graceful_stop(run_dir)
+    except runs.GracefulStopError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    if outcome == "already-pending":
+        print(f"run {run_id} already has a graceful stop pending")
+        return 0
+    if outcome == "requested-unverifiable":
+        print(
+            f"run {run_id}: could not confirm a live engine (unverifiable pid) — the "
+            f"request stands and fires if one is running",
+            file=sys.stderr,
+        )
+    # The in-flight item the run will finish before stopping: the first task not yet
+    # in a terminal phase. None when the request lands between items (it takes effect
+    # at the next boundary regardless).
+    state = load_state(run_dir)
+    current = next((key for key, task in state.tasks.items() if not task.terminal), None)
+    item = current if current is not None else "none in flight"
+    print(
+        f"graceful stop requested — run {run_id} will stop after the current item "
+        f"completes (current item: {item}); continue later with `bmad-loop resume {run_id}`"
+    )
     return 0
 
 
@@ -2419,6 +2484,18 @@ def main(argv: list[str] | None = None) -> int:
 
     stop_p = add("stop", cmd_stop, "stop a live run (engine + agent session)")
     stop_p.add_argument("run_id")
+    stop_grp = stop_p.add_mutually_exclusive_group()
+    stop_grp.add_argument(
+        "--graceful",
+        action="store_true",
+        help="finish the in-flight item (through commit), then stop cleanly and stay "
+        "resumable — instead of the hard SIGTERM stop; also suppresses pending auto-sweeps",
+    )
+    stop_grp.add_argument(
+        "--cancel-graceful",
+        action="store_true",
+        help="cancel a pending --graceful request (the run keeps going)",
+    )
 
     delete_p = add("delete", cmd_delete, "delete a run directory")
     delete_p.add_argument("run_id")

@@ -44,7 +44,8 @@ from .model import (
 from .platform_util import atomic_replace, retrying_unlink, safe_ref_segment, safe_segment
 from .plugins import HookBus, HookContext, PluginRegistry
 from .policy import Policy
-from .runs import kill_session
+from .runs import clear_graceful_stop, graceful_stop_requested, kill_session
+from .sprintstatus import ACTIONABLE_STATUSES
 from .sprintstatus import advance as sprint_advance
 from .sprintstatus import load as load_sprint_status
 from .sprintstatus import next_actionable, parse_selector
@@ -68,9 +69,24 @@ class RunPaused(Exception):
 
 
 class RunStopped(Exception):
-    """Raised from the SIGTERM/SIGINT handler to unwind the loop cleanly so the
-    engine can mark the run `stopped` (a deliberate stop, distinct from a
-    crash) and tear down its in-flight agent session."""
+    """Raised to unwind the loop cleanly so the engine can mark the run `stopped`
+    (a deliberate stop, distinct from a crash).
+
+    Two flavors, distinguished by ``graceful``:
+
+    - ``graceful=False`` (default) — a *hard* stop from the SIGTERM/SIGINT handler.
+      The loop is interrupted mid-session, so the in-flight agent window is still
+      live and must be torn down unconditionally.
+    - ``graceful=True`` — a stop requested via the ``stop-request.json`` control
+      file and detected at an item boundary (:meth:`Engine._check_graceful_stop`).
+      The in-flight item already completed through commit, so ``run()`` runs the
+      wanted subset of the clean-finish path (worktree GC + ``post_run`` +
+      policy-gated session teardown) rather than a hard kill, and the run stays
+      resumable."""
+
+    def __init__(self, graceful: bool = False):
+        super().__init__("graceful stop" if graceful else "stopped")
+        self.graceful = graceful
 
 
 @dataclass(frozen=True)
@@ -238,6 +254,12 @@ class Engine:
         self._is_nested = False
         self._stopping = False
         self._prev_handlers: dict[int, object] = {}
+        # Set by run()'s graceful-stop arm so the trailing notify (which fires for
+        # every exit path) can word itself for a graceful stop and quote how many
+        # stories a resume would still have to run. _graceful_remaining is a
+        # best-effort hint (None when the estimate could not be computed).
+        self._graceful_stopped = False
+        self._graceful_remaining: int | None = None
 
     # ------------------------------------------------------------- top level
 
@@ -271,14 +293,43 @@ class Engine:
                     stage=pause.stage,
                     story_key=pause.story_key,
                 )
-            except RunStopped:
-                # the loop was interrupted inside adapter.run(), so the agent
-                # window is still live — tear the whole run session down.
-                kill_session(self.state.run_id)
-                if self._is_nested:
-                    raise  # nested auto-sweep: let the owner record the stop
-                self.state.stopped = True
-                self.journal.append("run-stop")
+            except RunStopped as stop:
+                if stop.graceful:
+                    # Graceful stop: the request was consumed at an item boundary
+                    # (_check_graceful_stop), so the in-flight item already ran to
+                    # completion through commit — nothing mid-session to kill. Run
+                    # the wanted subset of the clean-finish path so a resumable
+                    # `stopped` run is finalized as tidily as a finished one.
+                    self.state.stopped = True
+                    self._graceful_stopped = True
+                    try:
+                        # These run plugin code (post_run) + git worktree admin;
+                        # an exception raised inside an except arm escapes run()
+                        # uncaught, so guard them inline and journal the failure
+                        # rather than let it mask the stop.
+                        self._gc_run_worktrees()
+                        self._emit("post_run")
+                    except Exception as finalize_exc:  # noqa: BLE001 - see comment above
+                        self.journal.append("run-stop-finalize-error", error=str(finalize_exc))
+                    remaining = self._remaining_estimate()
+                    self._graceful_remaining = remaining
+                    self.journal.append("run-stop", graceful=True, remaining=remaining)
+                    # Session teardown follows the same policy gate the clean-finish
+                    # path uses (mirrors the finished-run branch), NOT the hard
+                    # stop's unconditional kill. Deliberately NO _is_nested re-raise:
+                    # a gracefully stopped child sweep is a clean completion from the
+                    # parent's perspective (the parent journals sweep-auto-finished).
+                    if self._owns_signals and self.policy.adapter.cleanup_session_on_finish:
+                        kill_session(self.state.run_id)
+                else:
+                    # Hard stop: the loop was interrupted inside adapter.run(), so
+                    # the agent window is still live — tear the whole run session
+                    # down.
+                    kill_session(self.state.run_id)
+                    if self._is_nested:
+                        raise  # nested auto-sweep: let the owner record the stop
+                    self.state.stopped = True
+                    self.journal.append("run-stop")
             except KeyboardInterrupt:
                 # Some Windows console/control events can still surface as a raw
                 # KeyboardInterrupt without routing through the installed signal
@@ -337,11 +388,32 @@ class Engine:
                 ):  # noqa: BLE001  # nosec B110 - journal write is best-effort; crash.txt + state flag already persisted
                     pass
             finally:
+                # Any pending stop-request control file that outlived this run
+                # (the run finished/paused/crashed, or a hard stop superseded it,
+                # before an item boundary consumed it) is discarded here so a later
+                # resume does not re-honor a stale request. The graceful arm already
+                # consumed its own file, so this only fires for a superseded one.
+                if clear_graceful_stop(self.run_dir):
+                    with contextlib.suppress(Exception):
+                        self.journal.append("stop-request-discarded")
                 self._save()
         finally:
             self._restore_stop_signals()
         summary = self.summary()
-        gates.notify(self.policy, self.run_dir, "bmad-loop run finished", summary.render())
+        if self._graceful_stopped:
+            body = [summary.render()]
+            if self._graceful_remaining is not None:
+                stories_word = "story" if self._graceful_remaining == 1 else "stories"
+                body.append(f"{self._graceful_remaining} {stories_word} remaining")
+            body.append(f"resume with `bmad-loop resume {self.state.run_id}`")
+            gates.notify(
+                self.policy,
+                self.run_dir,
+                "bmad-loop run stopped gracefully",
+                "\n".join(body),
+            )
+        else:
+            gates.notify(self.policy, self.run_dir, "bmad-loop run finished", summary.render())
         return summary
 
     # ---------------------------------------------------------- stop signals
@@ -773,9 +845,48 @@ class Engine:
             crash_error=self.state.crash_error,
         )
 
+    def _remaining_estimate(self) -> int | None:
+        """Best-effort count of stories a resume would still have to run, for the
+        graceful-stop journal + notify. Sprint mode: actionable sprint-status
+        stories this run has not already picked up (mirrors ``cmd_status``'s sprint
+        backlog count, minus anything already in ``state.tasks``). It is a hint,
+        never a contract — the whole body is guarded so an unreadable/invalid
+        sprint-status file returns None rather than derailing a graceful stop.
+        StoriesEngine overrides this against the manifest scheduler."""
+        try:
+            ss = load_sprint_status(self.paths.sprint_status)
+            return sum(
+                1
+                for s in ss.stories
+                if s.status in ACTIONABLE_STATUSES and s.key not in self.state.tasks
+            )
+        except Exception:  # noqa: BLE001 - a hint must never break the stop
+            return None
+
+    def _check_graceful_stop(self) -> None:
+        """Honor a pending graceful-stop request at an item boundary.
+
+        Consumes (deletes) the ``stop-request.json`` control file and raises
+        :class:`RunStopped` with ``graceful=True`` so ``run()`` unwinds into the
+        clean-finalization arm. An exception, not a sentinel return, because the
+        sweep check fires two frames below ``_loop`` (inside ``_cycle``) where a
+        return could not stop the loop. Called as the first statement of the loop
+        body (and, in the sweep engine, before each bundle): by the time control
+        reaches here the in-flight item has already completed through commit, so
+        the stop takes effect cleanly at the next boundary and the run stays
+        resumable."""
+        if graceful_stop_requested(self.run_dir):
+            clear_graceful_stop(self.run_dir)
+            raise RunStopped(graceful=True)
+
     def _loop(self) -> None:
         self._finish_inflight()
         while True:
+            # First statement of the loop body: one site covers every story
+            # boundary this base loop reaches — between stories, right after
+            # _finish_inflight on resume, and the epic boundary + run-end (the
+            # StoriesEngine has no _loop override, so it is covered here too).
+            self._check_graceful_stop()
             if self.max_stories is not None and self._dispatched_count() >= self.max_stories:
                 self.journal.append("max-stories-reached", count=self._dispatched_count())
                 return
@@ -2925,6 +3036,15 @@ class Engine:
             return
         if trigger in self.state.sweeps_triggered:
             return  # already fired before a pause/resume of this run
+        if graceful_stop_requested(self.run_dir):
+            # A pending graceful stop suppresses new child sweeps. Return (not
+            # raise): at the run-end call site the story queue is already empty,
+            # so finishing this run as `finished` is truthful — the finally clears
+            # the superseded control file. Crucially this precedes the append
+            # below, so the trigger stays UNrecorded and a later resume (after the
+            # request is cleared) can still fire the sweep it would have run.
+            self.journal.append("sweep-auto-suppressed", trigger=trigger)
+            return
         self.state.sweeps_triggered.append(trigger)
         self._save()
         try:

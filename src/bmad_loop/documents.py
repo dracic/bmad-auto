@@ -166,7 +166,7 @@ def run_token_totals(state: RunState) -> tuple[int, int, float]:
     return raw, weighted, weight
 
 
-def status_document(state: RunState) -> dict[str, object]:
+def status_document(state: RunState, *, graceful_stop_pending: bool = False) -> dict[str, object]:
     """The `status --json` document: the stable machine-readable contract.
 
     Obeys the pure-document contract in machine.py (additive-only evolution;
@@ -174,7 +174,10 @@ def status_document(state: RunState) -> dict[str, object]:
     status text, which is best-effort and free to change. Everything here is
     derived from state.json alone — never from live policy or other project
     files — so a consumer can reproduce the document, and the weight matches
-    what the run actually enforced (see run_token_totals).
+    what the run actually enforced (see run_token_totals). The one exception is
+    ``graceful_stop_pending``: liveness plus the presence of the control file is
+    not in state.json, so the caller supplies it (default False keeps the
+    builder a pure projection); ``status`` itself is unaffected.
     """
     raw_total, weighted_total, weight = run_token_totals(state)
     if state.finished:
@@ -213,6 +216,7 @@ def status_document(state: RunState) -> dict[str, object]:
         "status": status,
         "finished": state.finished,
         "stopped": state.stopped,
+        "graceful_stop_pending": graceful_stop_pending,
         "crashed": state.crashed,
         "crash_error": state.crash_error,
         "paused_stage": state.paused_stage,

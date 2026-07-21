@@ -50,7 +50,7 @@ from bmad_loop.policy import (
     SweepPolicy,
     VerifyPolicy,
 )
-from bmad_loop.runs import rearm_escalation
+from bmad_loop.runs import STOP_REQUEST_FILE, graceful_stop_requested, rearm_escalation
 from bmad_loop.verify import (
     GitError,
     PrunePreserveError,
@@ -5114,3 +5114,344 @@ def test_resolved_redrive_reescalates_instead_of_deferring(project):
     assert "story-deferred" not in kinds
     saved = load_state(resumed.run_dir)
     assert "re-escalating instead of deferring" in saved.paused_reason
+
+
+# --------------------------------------------------------------- graceful stop
+#
+# A graceful stop is delivered out-of-band via the stop-request.json control file
+# (Phase 1's runs helpers): the engine consumes it at an item boundary and unwinds
+# into a clean-finalization arm, leaving the run `stopped` + resumable. These tests
+# lodge the control file directly (an existence read is all the engine checks) and
+# drive it through the mock adapter — no signals, no live requester process.
+
+
+def _lodge_stop_request(run_dir: Path) -> None:
+    """Drop the graceful-stop control file the way a CLI/TUI requester would — the
+    engine only checks its existence, so a minimal body suffices."""
+    (run_dir / STOP_REQUEST_FILE).write_text(
+        '{"requested_at": "2026-07-20T00:00:00", "mode": "graceful"}', encoding="utf-8"
+    )
+
+
+def _lodge_after(inner, run_dir: Path):
+    """Wrap a scripted effect so the graceful-stop request lands mid-story (right
+    as ``inner`` returns), proving the in-flight item still runs to completion —
+    the boundary check only fires at the next loop head."""
+
+    def effect(spec):
+        result = inner(spec)
+        _lodge_stop_request(run_dir)
+        return result
+
+    return effect
+
+
+def test_graceful_stop_finishes_current_story_then_stops(project, monkeypatch):
+    """The in-flight story runs to DONE (dev→review→commit), the next story is never
+    dispatched, and the run ends `stopped` + resumable — not `finished`."""
+    monkeypatch.setattr("bmad_loop.engine.kill_session", lambda rid: None)
+    write_sprint(project, {"1-1-a": "ready-for-dev", "1-2-b": "ready-for-dev"})
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+    engine, _ = make_engine(
+        project,
+        [
+            _lodge_after(dev_effect(project, "1-1-a"), run_dir),
+            review_effect(project, "1-1-a", clean=True),
+        ],
+    )
+    summary = engine.run()
+
+    saved = load_state(engine.run_dir)
+    assert saved.tasks["1-1-a"].phase == Phase.DONE
+    assert "1-2-b" not in saved.tasks  # story 2 never dispatched
+    assert saved.stopped is True and saved.finished is False
+    assert not graceful_stop_requested(run_dir)  # control file consumed at the boundary
+    assert summary.done == 1 and not summary.paused
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "run-complete" not in kinds
+    stops = [e for e in engine.journal.entries() if e["kind"] == "run-stop"]
+    assert stops and stops[-1]["graceful"] is True
+    assert stops[-1]["remaining"] == 1  # 1-2-b still actionable, never picked
+
+
+def test_graceful_stop_runs_clean_finalization_and_notifies(project, monkeypatch):
+    """Unlike a hard stop, the graceful arm runs worktree GC + the post_run hook +
+    the policy-gated session teardown, and the trailing notify is worded for a
+    graceful stop with a resume hint."""
+    killed = []
+    monkeypatch.setattr("bmad_loop.engine.kill_session", lambda rid: killed.append(rid))
+    notes = []
+    monkeypatch.setattr(
+        "bmad_loop.gates.notify",
+        lambda policy, rd, title, message: notes.append((title, message)),
+    )
+    write_sprint(project, {"1-1-a": "ready-for-dev", "1-2-b": "ready-for-dev"})
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+    engine, _ = make_engine(
+        project,
+        [
+            _lodge_after(dev_effect(project, "1-1-a"), run_dir),
+            review_effect(project, "1-1-a", clean=True),
+        ],
+    )
+
+    gc_calls = []
+    original_gc = engine._gc_run_worktrees
+    monkeypatch.setattr(
+        engine, "_gc_run_worktrees", lambda: (gc_calls.append(True), original_gc())[1]
+    )
+    post_run_stages = []
+    original_emit = engine._emit
+
+    def spy_emit(stage, *args, **kwargs):
+        if stage == "post_run":
+            post_run_stages.append(stage)
+        return original_emit(stage, *args, **kwargs)
+
+    engine._emit = spy_emit
+
+    engine.run()
+
+    assert gc_calls == [True]  # worktree GC ran on the graceful path
+    assert post_run_stages == ["post_run"]  # post_run hook fired
+    assert killed == ["test-run"]  # session torn down (owns_signals + cleanup_on_finish)
+    assert notes and notes[-1][0] == "bmad-loop run stopped gracefully"
+    assert "bmad-loop resume test-run" in notes[-1][1]
+    assert "1 story remaining" in notes[-1][1]
+
+
+def test_epic_boundary_auto_sweep_suppressed_by_graceful_stop(project, monkeypatch):
+    """A graceful stop lodged during epic 1 ends the run at the next loop head,
+    before the epic-2 pick — so the per-epic child sweep never fires and epic 2 is
+    never dispatched."""
+    monkeypatch.setattr("bmad_loop.engine.kill_session", lambda rid: None)
+    write_sprint(
+        project,
+        {
+            "epic-1": "backlog",
+            "1-1-a": "ready-for-dev",
+            "epic-2": "backlog",
+            "2-1-b": "ready-for-dev",
+        },
+    )
+    policy = Policy(
+        gates=GatesPolicy(mode="none"), notify=QUIET, sweep=SweepPolicy(auto="per-epic")
+    )
+    calls = []
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+    engine, _ = make_engine(
+        project,
+        [
+            _lodge_after(dev_effect(project, "1-1-a"), run_dir),
+            review_effect(project, "1-1-a", clean=True),
+        ],
+        policy=policy,
+        sweep_factory=calls.append,
+    )
+    engine.run()
+
+    saved = load_state(engine.run_dir)
+    assert saved.stopped and "2-1-b" not in saved.tasks
+    assert calls == []  # no child sweep started
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "sweep-auto-trigger" not in kinds
+
+
+def test_maybe_auto_sweep_suppressed_when_graceful_stop_pending(project):
+    """The run-end race: a request landing after the loop-head check reaches
+    _maybe_auto_sweep, which suppresses the sweep (return, not raise) and — because
+    the guard precedes the sweeps_triggered append — leaves the trigger unrecorded
+    so a later resume can still fire it."""
+    policy = Policy(gates=GatesPolicy(mode="none"), notify=QUIET, sweep=SweepPolicy(auto="run-end"))
+    calls = []
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+    engine, _ = make_engine(project, [], policy=policy, sweep_factory=calls.append)
+    _lodge_stop_request(run_dir)
+
+    engine._maybe_auto_sweep("run-end", "run-end")
+
+    assert calls == []  # no child sweep started
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "sweep-auto-suppressed" in kinds
+    assert "sweep-auto-trigger" not in kinds
+    assert "run-end" not in engine.state.sweeps_triggered  # unrecorded → resumable
+
+
+def test_pause_wins_over_pending_graceful_stop(project, monkeypatch):
+    """A pause raised while a stop is pending wins; the finally discards the stale
+    control file and journals stop-request-discarded (no run-stop)."""
+    monkeypatch.setattr("bmad_loop.engine.kill_session", lambda rid: None)
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+    engine, _ = make_engine(project, [])
+
+    def pausing_loop():
+        _lodge_stop_request(run_dir)
+        raise RunPaused("epic gate", PAUSE_EPIC_BOUNDARY, None)
+
+    monkeypatch.setattr(engine, "_loop", pausing_loop)
+    engine.run()
+
+    saved = load_state(engine.run_dir)
+    assert saved.paused and not saved.stopped
+    assert not graceful_stop_requested(run_dir)  # discarded in finally
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "stop-request-discarded" in kinds
+    assert "run-stop" not in kinds
+
+
+def test_hard_stop_wins_over_pending_graceful_stop(project, monkeypatch):
+    """A hard RunStopped (SIGTERM) supersedes a pending graceful request: the run
+    records run-stop WITHOUT the graceful flag, tears the session down
+    unconditionally, and the finally discards the stale file. Contrast the graceful
+    arm: the hard path does not emit post_run."""
+    killed = []
+    monkeypatch.setattr("bmad_loop.engine.kill_session", lambda rid: killed.append(rid))
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+    engine, _ = make_engine(project, [])
+
+    post_run_stages = []
+    original_emit = engine._emit
+
+    def spy_emit(stage, *args, **kwargs):
+        if stage == "post_run":
+            post_run_stages.append(stage)
+        return original_emit(stage, *args, **kwargs)
+
+    engine._emit = spy_emit
+
+    def stopping_loop():
+        _lodge_stop_request(run_dir)
+        raise RunStopped()  # hard (graceful=False), as the signal handler raises
+
+    monkeypatch.setattr(engine, "_loop", stopping_loop)
+    engine.run()
+
+    saved = load_state(engine.run_dir)
+    assert saved.stopped
+    assert not graceful_stop_requested(run_dir)  # finally discarded it
+    assert killed == ["test-run"]  # hard stop's unconditional teardown
+    assert post_run_stages == []  # hard path skips the clean-finish subset
+    stops = [e for e in engine.journal.entries() if e["kind"] == "run-stop"]
+    assert stops and "graceful" not in stops[-1]
+    assert "stop-request-discarded" in [e["kind"] for e in engine.journal.entries()]
+
+
+def test_crash_wins_over_pending_graceful_stop(project, monkeypatch):
+    """An unexpected crash while a stop is pending wins; the crash arm records and
+    the finally discards the stale control file (no run-stop)."""
+    monkeypatch.setattr("bmad_loop.engine.kill_session", lambda rid: None)
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+    engine, _ = make_engine(project, [])
+
+    def crashing_loop():
+        _lodge_stop_request(run_dir)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(engine, "_loop", crashing_loop)
+    summary = engine.run()
+
+    assert summary.crashed
+    saved = load_state(engine.run_dir)
+    assert saved.crashed and not saved.stopped
+    assert not graceful_stop_requested(run_dir)  # discarded in finally
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "run-crash" in kinds and "stop-request-discarded" in kinds
+    assert "run-stop" not in kinds
+
+
+def test_graceful_stop_finalize_error_still_records_stop(project, monkeypatch):
+    """A post_run hook that raises during graceful finalization is caught inline
+    (an except-arm raise would escape run() uncaught): the run still records
+    run-stop + run-stop-finalize-error and never crashes."""
+    monkeypatch.setattr("bmad_loop.engine.kill_session", lambda rid: None)
+    write_sprint(project, {"1-1-a": "ready-for-dev", "1-2-b": "ready-for-dev"})
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+    engine, _ = make_engine(
+        project,
+        [
+            _lodge_after(dev_effect(project, "1-1-a"), run_dir),
+            review_effect(project, "1-1-a", clean=True),
+        ],
+    )
+    original_emit = engine._emit
+
+    def boom_on_post_run(stage, *args, **kwargs):
+        if stage == "post_run":
+            raise RuntimeError("post_run plugin exploded")
+        return original_emit(stage, *args, **kwargs)
+
+    engine._emit = boom_on_post_run
+
+    summary = engine.run()  # must NOT raise
+
+    assert not summary.crashed
+    saved = load_state(engine.run_dir)
+    assert saved.stopped and not saved.finished and not saved.crashed
+    kinds = [e["kind"] for e in engine.journal.entries()]
+    assert "run-stop-finalize-error" in kinds
+    stops = [e for e in engine.journal.entries() if e["kind"] == "run-stop"]
+    assert stops and stops[-1]["graceful"] is True
+
+
+def test_resume_after_graceful_stop_completes_remaining(project, monkeypatch):
+    """A graceful-stopped run is resumable with zero special handling: the resume
+    dispatches the story that never ran and finishes."""
+    monkeypatch.setattr("bmad_loop.engine.kill_session", lambda rid: None)
+    write_sprint(project, {"1-1-a": "ready-for-dev", "1-2-b": "ready-for-dev"})
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+    engine, _ = make_engine(
+        project,
+        [
+            _lodge_after(dev_effect(project, "1-1-a"), run_dir),
+            review_effect(project, "1-1-a", clean=True),
+        ],
+    )
+    engine.run()
+    assert load_state(engine.run_dir).stopped
+    assert not graceful_stop_requested(run_dir)
+
+    resumed, _ = resume_engine(
+        project,
+        engine,
+        [dev_effect(project, "1-2-b"), review_effect(project, "1-2-b", clean=True)],
+    )
+    summary2 = resumed.run()
+
+    assert summary2.done == 2 and not summary2.paused
+    final = load_state(resumed.run_dir)
+    assert set(final.tasks) == {"1-1-a", "1-2-b"}
+    assert final.finished and not final.stopped
+
+
+def test_graceful_stop_on_resume_finishes_inflight_then_stops(project, monkeypatch):
+    """A request pending when a resume starts is honored AFTER _finish_inflight: the
+    in-flight item completes, then the first loop-head check stops the run before
+    any new story is picked."""
+    monkeypatch.setattr("bmad_loop.engine.kill_session", lambda rid: None)
+    write_sprint(project, {"1-1-a": "ready-for-dev", "1-2-b": "ready-for-dev"})
+    run_dir = project.project / ".bmad-loop" / "runs" / "test-run"
+    engine, _ = make_engine(project, [dev_effect(project, "1-1-a")])
+    original_emit = engine._emit
+
+    def crashing_emit(stage, *args, **kwargs):
+        if stage == "post_session":
+            raise RuntimeError("host died in the post-session window")
+        return original_emit(stage, *args, **kwargs)
+
+    engine._emit = crashing_emit
+    assert engine.run().crashed
+    assert load_state(engine.run_dir).tasks["1-1-a"].phase == Phase.DEV_RUNNING
+
+    # a graceful stop is lodged before the resume even starts
+    _lodge_stop_request(run_dir)
+    resumed, adapter = resume_engine(project, engine, [review_effect(project, "1-1-a", clean=True)])
+    resumed.run()
+
+    final = load_state(resumed.run_dir)
+    assert final.tasks["1-1-a"].phase == Phase.DONE  # in-flight item finished
+    assert "1-2-b" not in final.tasks  # no NEW pick after the boundary
+    assert final.stopped and not final.finished
+    assert not graceful_stop_requested(run_dir)  # consumed at the first loop head
+    assert [s.role for s in adapter.sessions] == ["review"]  # only the in-flight review ran
+    stops = [e for e in resumed.journal.entries() if e["kind"] == "run-stop"]
+    assert stops and stops[-1]["graceful"] is True
