@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from bmad_loop import policy
@@ -180,6 +182,56 @@ stop_without_result_nudges = 7
     dev = pol.adapter.resolved("dev")
     assert dev.usage_grace_s == 3.5
     assert dev.stop_without_result_nudges is None
+
+
+def _roundtrip_snapshot(pol):
+    # RunState.policy_snapshot is the json-round-tripped asdict(Policy).
+    return json.loads(json.dumps(pol.to_dict()))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # (a) base-only config
+        '[adapter]\nname = "claude"\nmodel = "opus"\nextra_args = ["--permission-mode", "plan"]\n',
+        # (b) a stage model override (same client keeps the base model inheritable)
+        '[adapter]\nname = "claude"\nmodel = "opus"\n[adapter.dev]\nmodel = "haiku"\n',
+        # (c) a stage name override — the client switch resets model to ""
+        '[adapter]\nname = "claude"\nmodel = "opus"\n'
+        'extra_args = ["--permission-mode", "plan"]\n[adapter.review]\nname = "codex"\n',
+    ],
+)
+def test_adapter_policy_from_snapshot_roundtrips_resolved(body):
+    # a snapshot rebuild resolves identically to the live policy for every role,
+    # so downstream display paths can reuse AdapterPolicy.resolved() verbatim.
+    pol = policy.loads(body)
+    rebuilt = policy.adapter_policy_from_snapshot(_roundtrip_snapshot(pol))
+    assert rebuilt is not None
+    for role in ("dev", "review", "triage"):
+        assert rebuilt.resolved(role) == pol.adapter.resolved(role)
+
+
+def test_adapter_policy_from_snapshot_extra_args_back_to_tuple():
+    # asdict turns extra_args into a list; the rebuild must restore the tuple so
+    # the reconstruction compares equal to a freshly-parsed policy (#189 trap).
+    pol = policy.loads('[adapter]\nname = "claude"\nextra_args = ["--foo", "--bar"]\n')
+    rebuilt = policy.adapter_policy_from_snapshot(_roundtrip_snapshot(pol))
+    assert rebuilt is not None
+    assert isinstance(rebuilt.extra_args, tuple)
+    assert rebuilt.extra_args == ("--foo", "--bar")
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        None,  # no snapshot at all
+        {},  # snapshot without an adapter table
+        {"adapter": "garbage"},  # adapter present but not a table
+        {"adapter": {}},  # adapter table with no name -> would falsely display "claude"
+    ],
+)
+def test_adapter_policy_from_snapshot_returns_none(snapshot):
+    assert policy.adapter_policy_from_snapshot(snapshot) is None
 
 
 def test_adapter_timing_knobs_default_none(tmp_path):

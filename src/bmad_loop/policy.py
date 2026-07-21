@@ -332,6 +332,73 @@ class AdapterPolicy:
         )
 
 
+def _snapshot_extra_args(raw: Any) -> tuple[str, ...] | None:
+    # asdict() turns the extra_args tuple into a list and json keeps it a list;
+    # rebuild the tuple so a reconstructed AdapterPolicy compares equal to a
+    # freshly-parsed one (the #189 tuple-vs-list trap). None stays None.
+    if raw is None:
+        return None
+    return tuple(str(a) for a in raw)
+
+
+def _stage_from_snapshot(raw: Any) -> StageAdapterPolicy:
+    # A missing or non-dict stage entry rebuilds to the all-inherit default,
+    # matching StageAdapterPolicy()'s field defaults.
+    if not isinstance(raw, dict):
+        return StageAdapterPolicy()
+    name = raw.get("name")
+    model = raw.get("model")
+    return StageAdapterPolicy(
+        name=None if name is None else str(name),
+        model=None if model is None else str(model),
+        extra_args=_snapshot_extra_args(raw.get("extra_args")),
+        usage_grace_s=raw.get("usage_grace_s"),
+        stop_without_result_nudges=raw.get("stop_without_result_nudges"),
+    )
+
+
+def adapter_policy_from_snapshot(snapshot: dict[str, Any] | None) -> AdapterPolicy | None:
+    """Rebuild an :class:`AdapterPolicy` from a run's persisted policy snapshot.
+
+    ``snapshot`` is ``RunState.policy_snapshot`` — the json-round-tripped
+    ``asdict(Policy)``. This reconstructs the ``[adapter]`` sub-tree (the base
+    plus the dev/review/triage :class:`StageAdapterPolicy` stages) so display
+    paths can reuse the canonical :meth:`AdapterPolicy.resolved` instead of
+    re-deriving its stage-inheritance / client-switch rules against a raw dict.
+
+    Returns ``None`` when there is nothing trustworthy to rebuild: ``snapshot``
+    is ``None`` or not a dict, ``snapshot["adapter"]`` is not a dict, or it lacks
+    a non-empty string ``name`` — an all-defaults reconstruction would falsely
+    display "claude" for a run that predates adapter stamping. The rebuild is
+    wrapped so a malformed snapshot yields ``None`` rather than raising: this
+    feeds status/TUI display surfaces that must never crash.
+    """
+    try:
+        if not isinstance(snapshot, dict):
+            return None
+        adapter_d = snapshot.get("adapter")
+        if not isinstance(adapter_d, dict):
+            return None
+        name = adapter_d.get("name")
+        if not isinstance(name, str) or not name:
+            return None
+        return AdapterPolicy(
+            name=name,
+            model=str(adapter_d.get("model", AdapterPolicy.model)),
+            extra_args=_snapshot_extra_args(adapter_d.get("extra_args")),
+            cleanup_session_on_finish=bool(
+                adapter_d.get("cleanup_session_on_finish", AdapterPolicy.cleanup_session_on_finish)
+            ),
+            usage_grace_s=adapter_d.get("usage_grace_s"),
+            stop_without_result_nudges=adapter_d.get("stop_without_result_nudges"),
+            dev=_stage_from_snapshot(adapter_d.get("dev")),
+            review=_stage_from_snapshot(adapter_d.get("review")),
+            triage=_stage_from_snapshot(adapter_d.get("triage")),
+        )
+    except Exception:
+        return None
+
+
 @dataclass(frozen=True)
 class ScmPolicy:
     # isolation = none  -> work happens in place on the checked-out branch
