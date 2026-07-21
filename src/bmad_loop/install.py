@@ -486,7 +486,7 @@ def provision_worktree(
     repo_root: Path,
     seed_files: Sequence[str] = (),
     seed_globs: Sequence[str] = (),
-) -> None:
+) -> list[str]:
     """Make a freshly-created git worktree a self-sufficient bmad-loop project.
 
     A worktree checks out tracked files only, but the skill trees (.claude/skills,
@@ -519,9 +519,14 @@ def provision_worktree(
     seed_files are copied BEFORE the hook step so a seeded settings file that is
     also a hook config_path (.claude/settings.json, .gemini/settings.json) keeps its
     real content and just gets the Stop hook merged in, rather than being created empty.
+
+    Returns the `seed_files` entries that existed in the repo but were skipped
+    because the destination already existed — copy-when-absent turned them into
+    no-ops. The caller journals them: a user-authored `worktree_seed` entry that
+    silently copies nothing reads as applied configuration and is not.
     """
     if not profiles and not seed_files and not seed_globs:
-        return
+        return []
     worktree = worktree.resolve()
     repo_root = repo_root.resolve()
     relay = repo_root / HOOK_SCRIPT_REL
@@ -530,12 +535,24 @@ def provision_worktree(
     # project gitignored MCP/CLI configs: copy from the main repo when absent.
     # Resolve-and-contain guards against an `..`/absolute entry escaping either tree.
     seeded: list[str] = []
+    # Entries that named a real source but whose destination already exists, so
+    # copy-when-absent made them a no-op. Reported to the caller (this function is
+    # quiet by contract — it runs under a TUI) because for a DIRECTORY entry the
+    # no-op is silent and total: a worktree checks out tracked files, so a seed dir
+    # with any tracked child always exists and the whole entry is skipped, including
+    # the children that are absent and would clobber nothing. Glob-expanded matches
+    # are deliberately not reported: a plugin's glob is expected to hit paths the
+    # checkout already carries, so that skip is routine rather than a misconfiguration.
+    skipped: list[str] = []
     for rel in seed_files:
         src = (repo_root / rel).resolve()
         dst = (worktree / rel).resolve()
         if not src.is_relative_to(repo_root) or not dst.is_relative_to(worktree):
             continue
-        if not src.exists() or dst.exists():
+        if not src.exists():
+            continue
+        if dst.exists():
+            skipped.append(str(rel))
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         _copy_traversable(src, dst)
@@ -614,6 +631,7 @@ def provision_worktree(
     patterns |= {f"/{p.hooks.config_path}" for p in profiles if not p.hookless}
     patterns |= {f"/{rel}" for rel in seeded}
     _worktree_local_exclude(worktree, sorted(patterns))
+    return skipped
 
 
 def _warn_if_policy_tracked(project: Path) -> None:

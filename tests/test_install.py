@@ -804,6 +804,43 @@ def test_provision_worktree_seed_does_not_clobber_existing(tmp_path):
     assert dst.read_text() == "IN_WORKTREE"
 
 
+def test_provision_worktree_reports_seed_skipped_as_noop(tmp_path):
+    """A seed entry left untouched because the destination exists is REPORTED, so a
+    `worktree_seed` that copies nothing cannot look like applied configuration."""
+    wt, repo = tmp_path / "wt", tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".mcp.json").write_text("FROM_REPO", encoding="utf-8")
+    dst = wt / ".mcp.json"
+    dst.parent.mkdir(parents=True)
+    dst.write_text("IN_WORKTREE", encoding="utf-8")
+    assert provision_worktree(wt, [], repo, seed_files=[".mcp.json"]) == [".mcp.json"]
+
+
+def test_provision_worktree_reports_seed_dir_skipped_whole(tmp_path):
+    """The case that motivated the report: a worktree checks out tracked files, so a
+    seed DIRECTORY with any tracked child already exists and the whole entry is
+    skipped — including children that are absent and would clobber nothing."""
+    wt, repo = tmp_path / "wt", tmp_path / "repo"
+    (repo / "_bmad" / "custom").mkdir(parents=True)  # tracked child
+    (repo / "_bmad" / "bmm").mkdir()  # gitignored sibling, absent from the checkout
+    (repo / "_bmad" / "bmm" / "config.yaml").write_text("SEED ME", encoding="utf-8")
+    (wt / "_bmad" / "custom").mkdir(parents=True)  # what `git worktree add` lays down
+
+    assert provision_worktree(wt, [], repo, seed_files=["_bmad"]) == ["_bmad"]
+    assert not (wt / "_bmad" / "bmm").exists()  # documents today's behaviour
+
+
+def test_provision_worktree_reports_nothing_when_seeding_succeeds(tmp_path):
+    """A seed that actually copies is not reported — the signal stays specific to
+    entries that silently did nothing. A missing source is also not a no-op report:
+    it is already covered as its own case."""
+    wt, repo = tmp_path / "wt", tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".mcp.json").write_text("FROM_REPO", encoding="utf-8")
+    assert provision_worktree(wt, [], repo, seed_files=[".mcp.json", "absent.json"]) == []
+    assert (wt / ".mcp.json").read_text() == "FROM_REPO"
+
+
 def test_provision_worktree_seed_rejects_escaping_path(tmp_path):
     """A seed entry resolving outside the repo/worktree is skipped — never copies
     a file from outside the project tree into the worktree."""
