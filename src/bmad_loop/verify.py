@@ -105,14 +105,21 @@ def _run_git(
     `subprocess.run` *before* any return code exists, so left uncaught it would
     bypass every `except GitError` guard and crash the run (#156); translating
     it here puts timeouts in the same taxonomy as any other git failure —
-    observation guards degrade, unguarded paths fail typed."""
+    observation guards degrade, unguarded paths fail typed.
+
+    Every git child runs with `LC_ALL=C` so messages stay stable English: the one
+    place that inspects git *text* rather than a return code — `safe_rollback`'s
+    benign "pathspec did not match" tolerance — must not misread a translated
+    message under a localized git (#236). Merged last so it wins over both the
+    inherited environment and any explicit `env` (the `_git_env` callers' throwaway
+    `GIT_INDEX_FILE` / synthetic identity vars are preserved by the spread)."""
     try:
         return subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=_git_timeout_s,
-            env=env,
+            env={**(env if env is not None else os.environ), "LC_ALL": "C"},
         )
     except subprocess.TimeoutExpired as exc:
         raise GitError(f"git {cmd[3]} timed out after {_git_timeout_s}s in {repo}") from exc
@@ -582,6 +589,8 @@ def safe_rollback(
         # only untracked files). Any other failure means a protected path wasn't
         # restored: raise instead of silently dropping a resolved re-drive's
         # corrected spec (which would regress the re-drive into a recovery loop).
+        # `_run_git` pins LC_ALL=C, so this English substring is stable under a
+        # localized git (#236) — never translated out from under the match.
         for d in preserve:
             rc, out = _git(repo, "checkout", snapshot, "--", d)
             if rc != 0 and "did not match" not in out:

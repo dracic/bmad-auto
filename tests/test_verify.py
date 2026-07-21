@@ -132,6 +132,45 @@ def test_configure_git_timeout_overrides_bound(project, monkeypatch):
     assert seen["timeout"] == 7
 
 
+def test_run_git_forces_c_locale(project, monkeypatch):
+    """Every git child runs with LC_ALL=C so message text stays stable English —
+    the chokepoint fix for #236 (safe_rollback's "did not match" tolerance must not
+    be translated out from under it by a localized parent git). Spy on the actual
+    subprocess env rather than the parent LANG, so the guarantee is pinned even on a
+    CI box with no non-English locale catalogs installed (where a plain LANG=it_IT
+    test would emit English anyway and pass without the fix)."""
+    seen: dict[str, object] = {}
+    real_run = subprocess.run
+
+    def spying_run(cmd, **kwargs):
+        seen["env"] = kwargs.get("env")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(verify.subprocess, "run", spying_run)
+    verify.rev_parse_head(project.project)
+    assert seen["env"] is not None
+    assert seen["env"]["LC_ALL"] == "C"
+
+
+def test_run_git_locale_merge_preserves_explicit_env(project, monkeypatch):
+    """The LC_ALL=C merge must not clobber a caller-supplied env — the `_git_env`
+    callers pass a throwaway GIT_INDEX_FILE / synthetic commit identity that has to
+    survive (else snapshot_worktree breaks). Assert both the forced LC_ALL and the
+    caller's own key reach subprocess.run together."""
+    seen: dict[str, object] = {}
+    real_run = subprocess.run
+
+    def spying_run(cmd, **kwargs):
+        seen["env"] = kwargs.get("env")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(verify.subprocess, "run", spying_run)
+    verify._git_env(project.project, "status", env={**os.environ, "SENTINEL_X": "1"})
+    assert seen["env"] is not None
+    assert seen["env"]["LC_ALL"] == "C"
+    assert seen["env"]["SENTINEL_X"] == "1"  # caller's env preserved
+
+
 @pytest.mark.parametrize(
     "raw,expected",
     [
