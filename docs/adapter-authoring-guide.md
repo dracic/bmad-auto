@@ -97,7 +97,11 @@ families: the **seam-canonical target token** `=session[:window]` — formatted 
 the concrete `TerminalMultiplexer.target(session, window=None)`, decoded by the
 module-level `parse_target()` — or the backend's own **native id** (whatever your
 `new_window` returned). Core never hand-assembles the grammar; it calls
-`target()`. tmux consumes the token natively (it coincides with tmux exact-match
+`target()`. One caller stretches the shape: the parked-window return target is
+formatted as `target(session, pane_id)` — a _pane id_ (`%N`) rides in the
+window slot — so a backend resolving `parse_target()` output must tolerate a
+pane id there when it reaches `switch_client`. tmux consumes the token
+natively (it coincides with tmux exact-match
 syntax), so `BaseTmuxBackend` passes it straight through. A native-id backend
 calls `parse_target()` first — `None` means "already a native id, use as-is",
 otherwise resolve `(session, window)` yourself; the herdr adapter's

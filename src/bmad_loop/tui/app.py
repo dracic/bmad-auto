@@ -411,9 +411,10 @@ class BmadLoopApp(App[None]):
         # fire-and-forget switch/focus form, so no suspend is needed.
         ret = launch.current_return_target()
         if ret is not None:
-            # Record our own session-qualified pane on the ctl window so its
-            # trailing shell switches the client back here when it exits,
-            # instead of stranding the user in the control session.
+            # Record our own pane target (session-qualified when resolvable)
+            # on the ctl window so its trailing shell switches the client back
+            # here when it exits, instead of stranding the user in the control
+            # session.
             if return_window is not None:
                 launch.set_return_pane(return_window, ret)
             subprocess.call(argv)

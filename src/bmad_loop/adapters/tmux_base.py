@@ -214,12 +214,13 @@ class BaseTmuxBackend(TerminalMultiplexer):
         return ["sh", "-c", source]
 
     def _parked_trailer(self, return_opt: str) -> str:
-        # After the park, switch an attached client back to its origin pane:
-        #   - return_opt == a pane target (=session:%N — session-qualified so it
-        #     resolves from the control session even on a one-server-per-session
+        # After the park, switch an attached client back to its origin pane.
+        # `return_opt` names the per-window option; on its recorded value:
+        #   - a pane target (=session:%N — session-qualified so it resolves
+        #     from the control session even on a one-server-per-session
         #     backend): switch that client back there (`switch-client -l` is a
         #     best-effort fallback when it is gone);
-        #   - return_opt == PARKED_RETURN_DETACH: detach the client so a blocking
+        #   - PARKED_RETURN_DETACH: detach the client so a blocking
         #     `tmux attach` returns and a suspended TUI resumes;
         #   - unset/empty: nobody attached interactively -> park as-is.
         # The tmux verbs are protocol-identical across the family; only the
