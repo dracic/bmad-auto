@@ -167,8 +167,9 @@ class RunHeader(Static):
         text.append(f"  {weighted:,} tokens ({raw:,} raw)", style="dim")
 
         if stopping:
-            # A RUNNING run with a pending graceful-stop request: it never enters the
-            # PAUSED/CRASHED/INTERRUPTED branches below, so this stands on its own.
+            # A RUNNING or UNKNOWN run with a pending graceful-stop request: it never
+            # enters the PAUSED/CRASHED/INTERRUPTED branches below, so this stands on
+            # its own.
             text.append(
                 "\n⏹ graceful stop pending — will stop after the current item",
                 style="bold yellow",

@@ -760,9 +760,12 @@ class DashboardScreen(Screen[None]):
                 snap.run_id = ctx.run_dir.name
                 snap.state = ctx.watcher.state()
                 snap.status = ctx.watcher.status()
-                # A graceful stop pending is the control file, meaningful only while
-                # RUNNING (the engine consumes it at the next item boundary).
-                snap.stopping = snap.status == data.RUNNING and ctx.watcher.stopping()
+                # A graceful stop pending is the control file, meaningful while an
+                # engine is still around to consume it — RUNNING or UNKNOWN (an
+                # unverifiable pid still honors it, matching the CLI's != "dead").
+                snap.stopping = (
+                    snap.status in (data.RUNNING, data.UNKNOWN) and ctx.watcher.stopping()
+                )
                 if snap.state is not None and snap.state.source == "stories":
                     # per-run board: re-derived each tick (only while a stories run
                     # is selected) so it tracks the dev sessions writing story specs.

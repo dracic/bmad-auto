@@ -840,12 +840,16 @@ class BmadLoopApp(App[None]):
         Deliberately no `_mux_missing` gate: unlike `x` (which kills the agent
         window) this touches no multiplexer — the request is a control file the
         engine polls at item boundaries — so it must work even with the backend
-        down. Mirrors action_stop_run otherwise: liveness gate, then a confirm."""
+        down. The liveness gate is also deliberately looser than `x`'s: it rejects
+        only a *provably dead* engine, so an unverifiable (`unknown`) pid — a win32
+        access-denied pid, a psmux backend, a run on another host — still lodges the
+        request, matching `runs.request_graceful_stop`'s `requested-unverifiable`
+        path (the request stands and fires if an engine is in fact running)."""
         selected = self._selected_run_dir()
         if selected is None:
             return
         run_id, run_dir = selected
-        if not data.liveness(run_dir) == "alive":
+        if data.liveness(run_dir) == "dead":
             self.notify(f"run {run_id} is not live", severity="warning")
             return
 

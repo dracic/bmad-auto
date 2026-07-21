@@ -183,10 +183,12 @@ def discover_runs(project: Path) -> list[RunInfo]:
         # paused_stage is advisory: only meaningful while the run is actually PAUSED
         # (a resumed run keeps the last stage in state until it re-pauses/finishes).
         stage = paused_stage if status == PAUSED else ""
-        # A pending graceful stop is the control file's presence, but only while the
-        # run is still RUNNING to honor it: the engine consumes the file at the stop
-        # boundary, so a lingering file on an already-stopped run is not "stopping".
-        stopping = status == RUNNING and (run_dir / STOP_REQUEST_FILE).is_file()
+        # A pending graceful stop is the control file's presence, but only while an
+        # engine is still around to honor it — RUNNING or UNKNOWN (an unverifiable
+        # pid still consumes the file). The engine discards the file at the stop
+        # boundary, so a lingering file on an already-concluded run is not "stopping":
+        # STOPPED/FINISHED/CRASHED classify before liveness, so they never read UNKNOWN.
+        stopping = status in (RUNNING, UNKNOWN) and (run_dir / STOP_REQUEST_FILE).is_file()
         out.append(RunInfo(run_dir.name, run_dir, run_type, started_at, status, stage, stopping))
     return out
 

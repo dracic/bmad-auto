@@ -2379,8 +2379,9 @@ async def test_graceful_stop_token_messages(project, monkeypatch, token, needle)
 
 
 async def test_graceful_stop_not_live_warns_without_calling(project, monkeypatch):
-    # A dead/unverifiable engine is refused at the liveness gate — the helper is
-    # never called and no confirm modal opens (mirrors action_stop_run's gate).
+    # Only a *provably dead* engine is refused at the liveness gate — the helper is
+    # never called and no confirm modal opens. Unlike the hard-stop gate, an
+    # unverifiable ('unknown') pid is allowed through (see the next test).
     from bmad_loop import runs
 
     calls: list[Path] = []
@@ -2394,6 +2395,32 @@ async def test_graceful_stop_not_live_warns_without_calling(project, monkeypatch
         await until(pilot, lambda: any("is not live" in m for m in notifications(app)))
         assert calls == []
         assert not isinstance(app.screen, ConfirmModal)
+
+
+async def test_graceful_stop_unknown_liveness_proceeds(project, monkeypatch):
+    # An unverifiable ('unknown') pid — a win32 access-denied pid, a psmux backend,
+    # a run on another host — is NOT dead, so the graceful gate lets it through to
+    # the confirm modal and the helper (which returns 'requested-unverifiable': the
+    # request stands and fires if an engine is in fact running). This mirrors the
+    # CLI, whose stop --graceful gate is likewise != "dead".
+    from bmad_loop import runs
+
+    calls: list[Path] = []
+    monkeypatch.setattr(data, "liveness", lambda run_dir: "unknown")
+    monkeypatch.setattr(
+        runs, "request_graceful_stop", lambda rd: calls.append(rd) or "requested-unverifiable"
+    )
+    make_run(project.project, "20260611-100000-aaaa")
+    app = BmadLoopApp(project.project)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: dashboard(app).selected_run_id == "20260611-100000-aaaa")
+        await pilot.press("S")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.click(await ready(pilot, "#ok"))
+        await until(pilot, lambda: len(calls) == 1)
+        assert calls[0].name == "20260611-100000-aaaa"
+        needle = "could not confirm a live engine"
+        await until(pilot, lambda: any(needle in m for m in notifications(app)))
 
 
 async def test_graceful_stop_error_toasts(project, monkeypatch):

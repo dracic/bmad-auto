@@ -169,7 +169,8 @@ unweighted one in parentheses. Below that, situational banners:
   press `R` instead to resolve it (see "Resolving an escalation" below).
 - `⏹ graceful stop pending — will stop after the current item` — a graceful
   stop was requested (`S`, or `bmad-loop stop --graceful`); the run finishes the
-  in-flight story/bundle through commit, then finalizes and stops (resumable).
+  in-flight story/bundle through commit (or, mid-sweep-triage, lets triage
+  complete and starts no bundles), then finalizes and stops (resumable).
 - `✖ engine gone — run was interrupted · press e to resume` — the recorded
   engine pid is dead.
 - `⚑ decision needed: DW-<n> — <question> / press a to attach and answer` —

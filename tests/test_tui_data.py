@@ -190,6 +190,28 @@ def test_discover_runs_marks_graceful_stop_pending_while_running(tmp_path):
     assert info.stopping is True
 
 
+def test_discover_runs_marks_graceful_stop_pending_while_unknown(tmp_path, monkeypatch):
+    # An unverifiable ('unknown') pid still has an engine that can consume the control
+    # file, so the "stopping" badge shows for an UNKNOWN-status run too — matching the
+    # CLI's graceful_stop_pending, which projects the request on liveness != "dead".
+    from bmad_loop import runs
+    from bmad_loop.runs import STOP_REQUEST_FILE
+
+    run_dir = make_run(tmp_path, "20260611-100000-aaaa")
+    (run_dir / "engine.pid").write_text("4242 123.0")
+
+    class Host:
+        def liveness_of(self, pid, identity):
+            return "unknown"
+
+    monkeypatch.setattr(runs, "get_process_host", lambda: Host())
+    assert data.discover_runs(tmp_path)[0].stopping is False  # no request yet
+    (run_dir / STOP_REQUEST_FILE).write_text("{}", encoding="utf-8")
+    info = data.discover_runs(tmp_path)[0]
+    assert info.status == data.UNKNOWN
+    assert info.stopping is True
+
+
 def test_stopping_ignored_on_a_non_running_run(tmp_path):
     # The engine consumes the control file at the stop boundary; a file lingering
     # on an already-stopped or finished run must not read as still-stopping.
