@@ -1903,15 +1903,15 @@ async def test_decision_footer_suppressed_for_crashed(project):
 def _patch_attach_exec(monkeypatch) -> tuple[list[list[str]], list[tuple[str, str]]]:
     """Route the final attach exec into a list: pretend we are inside tmux so
     action_attach takes the plain subprocess.call(switch-client) path. Stub the
-    TUI pane id and capture return-pane stamps so no real tmux is touched and
-    tests can assert which ctl window gets the switch-back target recorded."""
+    TUI return target and capture return-pane stamps so no real tmux is touched
+    and tests can assert which ctl window gets the switch-back target recorded."""
     calls: list[list[str]] = []
     stamps: list[tuple[str, str]] = []
     monkeypatch.setenv("TMUX", "/tmp/fake-tmux,1,0")
     monkeypatch.setattr(
         "bmad_loop.tui.app.subprocess.call", lambda argv: calls.append(list(argv)) or 0
     )
-    monkeypatch.setattr(launch, "current_pane_id", lambda: "%9")
+    monkeypatch.setattr(launch, "current_return_target", lambda: "=main:%9")
     monkeypatch.setattr(launch, "set_return_pane", lambda w, p: stamps.append((w, p)))
     return calls, stamps
 
@@ -1935,7 +1935,7 @@ async def test_attach_targets_ctl_window_when_decision_pending(project, monkeypa
     assert selected == ["sweep-20260611-100000-aaaa"]
     assert calls == [["tmux", "switch-client", "-t", "=bmad-loop-ctl"]]
     # the ctl window is stamped with our pane so it switches us back on exit
-    assert stamps == [("=bmad-loop-ctl:sweep-20260611-100000-aaaa", "%9")]
+    assert stamps == [("=bmad-loop-ctl:sweep-20260611-100000-aaaa", "=main:%9")]
 
 
 @pytest.mark.usefixtures("force_tmux_backend")  # pin tmux against win32-matching externals
@@ -1996,7 +1996,7 @@ async def test_attach_falls_back_to_ctl_window(project, monkeypatch):
         await until(pilot, lambda: bool(calls))
     assert selected == ["run-20260611-100000-aaaa"]
     assert calls == [["tmux", "switch-client", "-t", "=bmad-loop-ctl"]]
-    assert stamps == [("=bmad-loop-ctl:run-20260611-100000-aaaa", "%9")]
+    assert stamps == [("=bmad-loop-ctl:run-20260611-100000-aaaa", "=main:%9")]
 
 
 @pytest.mark.usefixtures("force_tmux_backend")  # pin tmux against win32-matching externals
@@ -2031,7 +2031,7 @@ async def test_resolve_escalation_launches_and_attaches(project, monkeypatch):
     assert selected == ["@7"]
     assert calls == [["tmux", "switch-client", "-t", "=bmad-loop-ctl"]]
     # resolve runs in the freshly launched ctl window (@7) — stamp it to return
-    assert stamps == [("@7", "%9")]
+    assert stamps == [("@7", "=main:%9")]
 
 
 async def test_resolve_unknown_pid_refused(project, monkeypatch):

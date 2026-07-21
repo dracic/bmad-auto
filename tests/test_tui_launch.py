@@ -290,16 +290,19 @@ def test_set_return_pane_argv(fake_run):
     ]
 
 
-def test_current_pane_id_reads_pane(monkeypatch):
+def test_current_return_target_qualified(monkeypatch):
+    # Composes both display-message probes into the session-qualified form.
+    answers = {"#{pane_id}": "%9", "#{session_name}": "main"}
+
     def fake(argv, **kwargs):
-        return subprocess.CompletedProcess(argv, 0, stdout="%9\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=answers[argv[-1]] + "\n", stderr="")
 
     monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")  # inside tmux
     monkeypatch.setattr(tmux_base.subprocess, "run", fake)
-    assert launch.current_pane_id() == "%9"
+    assert launch.current_return_target() == "=main:%9"
 
 
-def test_current_pane_id_none_outside_tmux(monkeypatch):
+def test_current_return_target_none_outside_tmux(monkeypatch):
     # Outside tmux the TMUX guard answers None WITHOUT shelling out: against a
     # live server, display-message would answer for some OTHER client's session
     # and misreport a plain shell as being inside tmux.
@@ -308,17 +311,54 @@ def test_current_pane_id_none_outside_tmux(monkeypatch):
 
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr(tmux_base.subprocess, "run", boom)
-    assert launch.current_pane_id() is None
+    assert launch.current_return_target() is None
     assert launch.current_session() is None
 
 
-def test_current_pane_id_none_on_transport_failure(monkeypatch):
+def test_current_return_target_none_on_transport_failure(monkeypatch):
     def fake(argv, **kwargs):
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="no server")
 
     monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")
     monkeypatch.setattr(tmux_base.subprocess, "run", fake)
-    assert launch.current_pane_id() is None
+    assert launch.current_return_target() is None
+
+
+def test_current_return_target_none_on_empty_pane(monkeypatch):
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")
+    monkeypatch.setattr(
+        tmux_base.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="\n", stderr=""),
+    )
+    assert launch.current_return_target() is None
+
+
+def test_current_return_target_bare_pane_when_session_probe_fails(monkeypatch):
+    # A resolvable own pane means we ARE inside the multiplexer; a failed
+    # session-name probe degrades to the bare pane id, never to None (which
+    # callers would record as "detach" and strand the client).
+    def fake(argv, **kwargs):
+        if argv[-1] == "#{pane_id}":
+            return subprocess.CompletedProcess(argv, 0, stdout="%9\n", stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="no server")
+
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")
+    monkeypatch.setattr(tmux_base.subprocess, "run", fake)
+    assert launch.current_return_target() == "%9"
+
+
+def test_current_return_target_bare_pane_on_empty_session_name(monkeypatch):
+    # rc-0 empty stdout from the session probe must degrade the same way a
+    # failed probe does — a "=:%9" target would misparse at replay.
+    answers = {"#{pane_id}": "%9", "#{session_name}": ""}
+
+    def fake(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=answers[argv[-1]] + "\n", stderr="")
+
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")
+    monkeypatch.setattr(tmux_base.subprocess, "run", fake)
+    assert launch.current_return_target() == "%9"
 
 
 def test_start_detached_returns_window_id(fake_run, tmp_path: Path):
@@ -457,7 +497,7 @@ def test_detach_client_argv(fake_run):
     assert fake_run.calls == [["tmux", "detach-client"]]
 
 
-def _return_fake(monkeypatch, *, win="@5", option="%9", switch_rc=0):
+def _return_fake(monkeypatch, *, win="@5", option="=main:%9", switch_rc=0):
     """Script tmux for return_attached_client: display-message -> window id,
     show-options -> the recorded RETURN_OPTION, switch-client -> switch_rc.
     return_attached_client runs inside a ctl window, so TMUX is set (the
@@ -484,16 +524,16 @@ def _return_fake(monkeypatch, *, win="@5", option="%9", switch_rc=0):
 
 
 def test_return_attached_client_switches_to_pane(monkeypatch):
-    calls = _return_fake(monkeypatch, option="%9")
+    calls = _return_fake(monkeypatch, option="=main:%9")
     assert launch.return_attached_client() is True
-    assert ["tmux", "switch-client", "-t", "%9"] in calls
+    assert ["tmux", "switch-client", "-t", "=main:%9"] in calls
     assert ["tmux", "set-option", "-wu", "-t", "@5", "@bmad_return_pane"] in calls
     assert ["tmux", "switch-client", "-l"] not in calls  # no fallback when -t works
     assert not any(c[1] == "detach-client" for c in calls)
 
 
 def test_return_attached_client_switch_fallback(monkeypatch):
-    calls = _return_fake(monkeypatch, option="%9", switch_rc=1)
+    calls = _return_fake(monkeypatch, option="=main:%9", switch_rc=1)
     assert launch.return_attached_client() is True
     assert ["tmux", "switch-client", "-l"] in calls
 

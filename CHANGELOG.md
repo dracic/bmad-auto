@@ -298,6 +298,17 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
 
 ### Fixed
 
+- **The parked-window return target is now session-qualified (#221).** An interactive attach
+  recorded the client's origin as a bare pane id (`%N`) and replayed it as `switch-client -t %N`
+  from inside the control session — sound under tmux's one-server model, but on psmux (one
+  server per session, upstream-final per psmux/psmux#483) a bare id is session-local: at best
+  unresolvable, at worst colliding with a real control-session pane and landing the client on
+  the wrong one with exit 0, past the `switch-client -l` fallback. The recording seam now emits
+  `=session:%N` when both probes succeed, retaining bare `%N` only if the session probe fails;
+  the replay sides treat the value as an opaque target and are unchanged. tmux resolves the
+  qualified form to the same pane it always did (verified on 3.4), and psmux releases carrying
+  the psmux/psmux#483 fix resolve it cross-server.
+
 - **A dry run the TUI cannot spawn opens a modal instead of taking the app down (#210).** The
   `run --dry-run` / `sweep --dry-run` workers called `run_captured` unguarded, and
   `@work(thread=True)` defaults to `exit_on_error=True` — so an `OSError` from the spawn itself
