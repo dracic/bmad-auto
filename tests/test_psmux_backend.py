@@ -275,24 +275,45 @@ def test_new_parked_window_composes_pwsh_source(rec, tmp_path):
 # ------------------------------------------------------------------ pipe_pane
 
 
-def test_pipe_pane_ships_pwsh_sink(rec, tmp_path):
+def test_pipe_pane_ships_positional_sidecar_sink(rec, tmp_path):
     log = tmp_path / "win's.log"
     PsmuxMultiplexer().pipe_pane("@1", log)
 
     assert rec.argv[:5] == ["psmux", "pipe-pane", "-t", "@1", "-o"]
-    launch = rec.argv[5].split(" ")
-    assert launch[:3] == ["pwsh", "-NoProfile", "-EncodedCommand"]
-    sink = _decode(launch[3])
-    # byte-exact raw stream copy (no console decode / re-encode / CRLF mangling)
+    # psmux strips every dash-flag token from the piped command, so the sink
+    # must be a purely positional launch of a sidecar script
+    sidecar = tmp_path / "win's.log.sink.ps1"
+    assert rec.argv[5] == f'pwsh "{sidecar}"'
+    sink = sidecar.read_text(encoding="utf-8")
+    # byte-exact raw stream copy (no console decode / re-encode / CRLF mangling),
+    # flushed per chunk so the live tail sees bytes incrementally
     quoted = str(log).replace(chr(39), chr(39) * 2)
     assert f"[System.IO.File]::Open('{quoted}', 'Append', 'Write', 'Read')" in sink
-    assert "OpenStandardInput().CopyTo($out)" in sink
+    assert "$in.Read($buf, 0, $buf.Length)" in sink
+    assert "$out.Flush()" in sink
 
 
 def test_pipe_pane_swallows_failure_with_warning(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(tmux_base.subprocess, "run", _RecordRun(returncode=1, stderr="gone"))
     assert PsmuxMultiplexer().pipe_pane("@1", tmp_path / "log") is None
     assert "pipe-pane log capture failed" in capsys.readouterr().err
+
+
+def test_pipe_pane_sidecar_write_failure_warns_without_spawning(rec, capsys, tmp_path):
+    # An unwritable sidecar path (missing log dir) must warn and skip the psmux
+    # call — never raise
+    assert PsmuxMultiplexer().pipe_pane("@1", tmp_path / "absent" / "log") is None
+    assert rec.calls == []
+    assert "pipe-pane log capture failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("syntax", ["$name", "`name"])
+def test_pipe_pane_rejects_interpolating_sidecar_path(rec, capsys, tmp_path, syntax):
+    log = tmp_path / f"{syntax}.log"
+    assert PsmuxMultiplexer().pipe_pane("@1", log) is None
+    assert rec.calls == []
+    assert not log.with_name(log.name + ".sink.ps1").exists()
+    assert "PowerShell interpolation syntax" in capsys.readouterr().err
 
 
 # ------------------------------------------------------------------ selection
