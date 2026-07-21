@@ -319,6 +319,11 @@ PATH)`, the TUI notifies `multiplexer backend unavailable — launch/attach disa
 
 ### Fixed
 
+- **Locale-stable rollback (#236).** Git subprocesses now run with `LC_ALL=C`, so `safe_rollback`'s
+  benign "pathspec did not match" no-op is no longer misread as a hard failure under a localized git
+  (e.g. `LANG=it_IT.UTF-8`) — which had turned a resolvable re-drive into a rollback pause. Forced at
+  the single `_run_git` spawn point, so every git message the orchestrator inspects stays English.
+
 - **The parked-window return target is now backend-composed (#221).** An interactive attach
   recorded the client's origin as a bare pane id (`%N`) and replayed it as `switch-client -t %N`
   from inside the control session — sound under tmux's one-server model, but on psmux (one
