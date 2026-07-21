@@ -21,23 +21,28 @@ of the README.
 
 - **Python 3.11+** and a supported coding CLI (`claude` by default).
 - **A terminal multiplexer** — the orchestrator drives agent sessions through a terminal
-  multiplexer: **tmux** is the bundled default, and additional backends install as
-  separate packages that register themselves (e.g. the
-  [herdr adapter](https://github.com/pbean/bmad-loop-adapter-herdr), then
+  multiplexer: **tmux** (POSIX) and the experimental **psmux** (native Windows) ship
+  bundled, and further backends install as separate packages that register themselves
+  (e.g. the [herdr adapter](https://github.com/pbean/bmad-loop-adapter-herdr), then
   `bmad-loop mux set herdr` — see
   [Terminal multiplexer backends](multiplexer-backends.md)). A backend is required for
   launching, attaching, and driving runs (pure TUI observation works without one). The
-  multiplexer sits behind a pluggable seam (`TerminalMultiplexer`), so a native-Windows
-  backend can be added later without changing the engine — contributors should start with
+  multiplexer sits behind a pluggable seam (`TerminalMultiplexer`), so a new backend slots
+  in without changing the engine — contributors should start with
   [Porting bmad-loop to a new OS](porting-to-a-new-os.md). `bmad-loop mux` lists the
   registered backends and shows which is selected (and why); `bmad-loop mux set <name>` —
   or the `[mux] backend` policy key, or the `BMAD_LOOP_MUX_BACKEND` env var — forces the
   choice per machine.
 - **OS** — Linux or macOS. **Windows is supported via WSL**, which _is_ Linux: tmux and
-  every POSIX path work unchanged there, so no special setup is needed. **Native Windows
-  is not yet shipped** — it awaits a non-tmux multiplexer backend (tracked in
+  every POSIX path work unchanged there, so no special setup is needed. **Native Windows is
+  experimental** — the bundled `psmux` backend (a ConPTY tmux re-implementation) drives runs
+  there and is selected automatically as the win32 default when its prerequisites are present:
+  the `psmux` and `pwsh` (PowerShell) binaries on `PATH`, with `psmux` newer than 3.3.6 (older
+  releases can force-kill a recycled PID during teardown and so read as unavailable). It is
+  not yet at the Linux/macOS/WSL support tier — the remaining native-Windows work (window
+  hosting, attach/detach, Unity cache paths) is tracked in
   [the roadmap](ROADMAP.md#native-windows-multiplexer-backend); the port path is in
-  [Porting bmad-loop to a new OS](porting-to-a-new-os.md)).
+  [Porting bmad-loop to a new OS](porting-to-a-new-os.md).
 
 ## Installed via the BMAD-method installer? (recommended)
 
@@ -97,8 +102,10 @@ invokes inline — are present before a run starts.
 
 ## Choosing which CLIs to drive
 
-The supported adapters are `claude` (the default), `codex`, `gemini`, `copilot`, and
-`antigravity` (Google's `agy`, experimental — `isolation = "none"` only). You can pick more
+The supported adapters are `claude` (the default), `codex`, `gemini`, `copilot`,
+`antigravity` (Google's `agy`, experimental — `isolation = "none"` only), and `opencode`
+(OpenCode ≥ 1.18 over HTTP/SSE, profile `opencode-http` — no tmux window; needs the
+`bmad-loop[opencode]` extra and `model` set as `provider/model`). You can pick more
 than one — register every CLI you intend to use for dev, review, or sweep triage.
 
 There are **two layers** here, and confusing them is the usual stumbling block:
@@ -176,8 +183,10 @@ bmad-loop init --project <project-root> --cli claude --cli codex --cli gemini
 
 Run with no `--cli` and `init` registers hooks for every CLI the `policy.toml` references,
 so a dual-client setup that's already configured in policy needs no extra flags. Names must
-be exactly `claude`, `codex`, `gemini`, `copilot`, or `antigravity` — `init` errors on an unknown profile and
-lists the valid ones.
+be exactly `claude`, `codex`, `gemini`, `copilot`, `antigravity`, or `opencode-http` (alias
+`opencode`) — `init` errors on an unknown profile and lists the valid ones. A hookless
+profile like `opencode-http` installs its skills but registers no hooks (it signals over
+HTTP/SSE).
 
 ### First-run notes
 
@@ -209,6 +218,12 @@ them to whoever owns the machine:
   - **Token usage is not recorded** (`usage_parser = "none"`) — and this is permanent,
     not a gap: agy's transcript carries no usage data at all (it counts tokens only in
     an internal SQLite/protobuf store). Runs work; the token columns stay empty.
+- **opencode** — install the HTTP client extra (`pip install 'bmad-loop[opencode]'`) and
+  authenticate once, **globally**, with `opencode auth login` (not per-project — there is no
+  workspace-trust dialog to answer). Requires OpenCode ≥ 1.18. Set the model as
+  `provider/model` (e.g. `[adapter] model = "anthropic/claude-haiku-4-5"`). No hooks are
+  registered — the adapter drives a headless `opencode serve` over HTTP/SSE, so there is no
+  tmux window to attach to; watch a session via its `logs/<task-id>.log` or the TUI Log tab.
 
 ### Skill location
 

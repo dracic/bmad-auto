@@ -116,6 +116,17 @@ breaking changes may land in a minor release.
   by a zero-token real-binary smoke test (`tests/test_opencode_live.py`, skipped when
   the binary is absent).
 
+- **Native-Windows `psmux` multiplexer backend (experimental).** A bundled builtin that
+  drives runs on native Windows through psmux — a ConPTY tmux re-implementation that speaks
+  the tmux CLI via its own `psmux` binary — so tmux's session/window model and the
+  `bmad-loop-<run-id>`/`bmad-loop-ctl` session names carry over unchanged. It registers for
+  `win32` and is the platform default there, selected automatically when the `psmux` and
+  `pwsh` binaries are on `PATH` and psmux reports newer than 3.3.6 (older releases can
+  force-kill a recycled PID during teardown, so they read as unavailable and selection falls
+  through). Native Windows stays experimental — window hosting, attach/detach mapping, and
+  Unity cache-path correctness are tracked in the roadmap — but the dev→review→verify→commit
+  loop and TUI observation run. WSL is unaffected (it _is_ Linux and uses tmux). (#58)
+
 - **Out-of-tree multiplexer backends (`bmad_loop.mux_backends` entry points).** A backend
   package installed next to bmad-loop (e.g. `uv tool install bmad-loop --with <adapter>`) now
   registers itself with no config step: before every selection, core imports each module
