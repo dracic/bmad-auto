@@ -1728,7 +1728,10 @@ async def test_cleanup_unknown_sessions_notifies(project, monkeypatch):
         await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
         await pilot.click(await ready(pilot, "#ok"))
         await until(pilot, lambda: any("unverifiable engine pid" in m for m in notifications(app)))
-        assert any("removed 1 session(s)" in m for m in notifications(app))
+        # `until`, not a bare assert: the summary toast is marshalled from the
+        # worker AFTER the pid warning, so waiting on the earlier one does not
+        # guarantee this one has reached the message pump yet (Windows flake).
+        await until(pilot, lambda: any("removed 1 session(s)" in m for m in notifications(app)))
 
 
 async def test_cleanup_sessions_mux_error_notifies(project, monkeypatch):
@@ -1760,7 +1763,10 @@ async def test_cleanup_sessions_mux_error_notifies(project, monkeypatch):
         # the ctl-window failure is surfaced, but the session pruning that already
         # completed is still reported — not swallowed by an early return
         await until(pilot, lambda: any("unverifiable engine pid" in m for m in notifications(app)))
-        assert any("removed 1 session(s)" in m for m in notifications(app))
+        # `until`, not a bare assert: the summary toast is marshalled from the
+        # worker AFTER the pid warning, so waiting on the earlier one does not
+        # guarantee this one has reached the message pump yet (Windows flake).
+        await until(pilot, lambda: any("removed 1 session(s)" in m for m in notifications(app)))
         assert isinstance(app.screen, DashboardScreen)  # worker failed soft, no crash
 
 
