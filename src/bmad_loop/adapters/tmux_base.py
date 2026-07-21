@@ -35,8 +35,9 @@ from .multiplexer import MultiplexerError, TerminalMultiplexer
 
 TMUX_TIMEOUT_S = 30
 # Per-window option value (vs a pane target) telling the parked trailer to detach
-# the client rather than switch it. Recorded targets are =session:%N (or a bare
-# %N pane id), so this never collides with one.
+# the client rather than switch it. Recorded targets are backend-composed pane
+# targets (bare %N on tmux, =session:%N on psmux — see
+# TerminalMultiplexer.current_return_target), so this never collides with one.
 PARKED_RETURN_DETACH = "detach"
 
 
@@ -216,10 +217,10 @@ class BaseTmuxBackend(TerminalMultiplexer):
     def _parked_trailer(self, return_opt: str) -> str:
         # After the park, switch an attached client back to its origin pane.
         # `return_opt` names the per-window option; on its recorded value:
-        #   - a pane target (=session:%N — session-qualified so it resolves
-        #     from the control session even on a one-server-per-session
-        #     backend): switch that client back there (`switch-client -l` is a
-        #     best-effort fallback when it is gone);
+        #   - a pane target (backend-composed by current_return_target, replayed
+        #     opaquely here — bare %N on tmux, =session:%N on psmux): switch
+        #     that client back there (`switch-client -l` is a best-effort
+        #     fallback when it is gone);
         #   - PARKED_RETURN_DETACH: detach the client so a blocking
         #     `tmux attach` returns and a suspended TUI resumes;
         #   - unset/empty: nobody attached interactively -> park as-is.

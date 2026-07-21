@@ -230,6 +230,18 @@ class TerminalMultiplexer(ABC):
         """Name of the session this process runs in, or None when not inside the
         multiplexer."""
 
+    def current_return_target(self) -> str | None:
+        """Target an interactive attach records so the parked-window return
+        trailer / :meth:`switch_client` can send the client back to the pane
+        this process runs in; None when not inside the multiplexer. The value
+        is backend-composed and replayed opaquely, so each backend emits
+        whatever its own ``switch-client`` resolves best. Default: the native
+        pane id — globally unique on a one-server multiplexer (tmux) and the
+        pass-through form for native-id backends. A backend whose ids do not
+        resolve from another session's context (e.g. psmux, one server per
+        session) overrides this to emit a qualified form."""
+        return self.current_pane_id() or None
+
     @abstractmethod
     def detach_client(self) -> None:
         """Detach the client viewing the current session (best-effort: a no-op on
