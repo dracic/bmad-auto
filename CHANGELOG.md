@@ -5,6 +5,15 @@ All notable changes to `bmad-loop` are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the project is pre-1.0,
 breaking changes may land in a minor release.
 
+## [Unreleased]
+
+### Added
+
+- **`python -m bmad_loop` (#240).** The package is now runnable as a module
+  (`python -m bmad_loop …`), mirroring the installed `bmad-loop` console script via a thin
+  `__main__.py`. Subprocess smoke tests exercise the module entry, and characterization tests
+  pin the current CLI exit codes (typed errors and the broad backstop → 1, argparse usage → 2).
+
 ## [0.9.0] — 2026-07-21
 
 ### Added
@@ -1691,6 +1700,7 @@ enforced in CI.
   implementation phase, driven by a Python control loop with hook-based session transport and
   resumable on-disk run state.
 
+[Unreleased]: https://github.com/bmad-code-org/bmad-loop/compare/v0.9.0...HEAD
 [0.9.0]: https://github.com/bmad-code-org/bmad-loop/releases/tag/v0.9.0
 [0.8.1]: https://github.com/bmad-code-org/bmad-loop/releases/tag/v0.8.1
 [0.8.0]: https://github.com/bmad-code-org/bmad-loop/releases/tag/v0.8.0
